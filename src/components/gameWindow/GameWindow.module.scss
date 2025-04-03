@@ -1,0 +1,15 @@
+.gameWindow {
+    width: min-content;
+    height: min-content;
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background-color: black;
+    justify-self: center;
+    align-self: center;
+}
+
+.gameWindow canvas {
+    display: block;
+}
