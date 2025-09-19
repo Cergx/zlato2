@@ -1,7 +1,6 @@
-import { SEFData } from "./parsers/SEFParser.ts";
-import { MapScroller, scrollerDefaultPosition, ScrollerPosition } from "./MapScroller";
-import {LevelData, LevelMask, LevelStatic} from "./Level.ts";
-import { MaskDescription } from "./parsers/LVLParser.ts";
+import { SEFData } from './parsers/SEFParser.ts';
+import { MapScroller, scrollerDefaultPosition, ScrollerPosition } from './MapScroller';
+import { LevelData, LevelMask, LevelStatic } from './Level.ts';
 
 export class MapRenderer {
     private canvas: HTMLCanvasElement;
@@ -10,22 +9,58 @@ export class MapRenderer {
     private scroller: MapScroller | null = null;
     private offset: ScrollerPosition = scrollerDefaultPosition;
 
+    private helperCanvas: HTMLCanvasElement | null = null;
+    private helperCtx: CanvasRenderingContext2D | null = null;
+    private chunkDirty = true; // флаг «перерисовать кэш маски»
+    private showChunkBorders = true; // опционально: рисовать рамки чанков поверх маски
+
     private readonly tileWidth: number = 12;
     private readonly tileHeight: number = 9;
 
     constructor(canvas: HTMLCanvasElement, levelData: LevelData) {
         this.canvas = canvas;
-        this.ctx = canvas.getContext("2d");
+        this.ctx = canvas.getContext('2d');
 
         this.levelData = levelData;
-        console.log("Загруженные данные уровня:\n", levelData);
+        console.log('Загруженные данные уровня:\n', levelData);
+        console.log(levelData.lvlData.mapHDR.chunks);
 
         this.scroller = new MapScroller(this.canvas, levelData.lvlData.mapSize);
+        this.buildHelperCanvas(); // создаём кэш под маску
     }
 
     public updateLevelData(levelData: LevelData) {
-        console.log("Обновление данных уровня в рендерере");
+        console.log('Обновление данных уровня в рендерере');
         this.levelData = levelData;
+        this.buildHelperCanvas(); // перестроим кэш (вдруг размеры карты изменились)
+        this.chunkDirty = true; // и пометим на перерисовку
+    }
+
+    // Можно вызывать извне, если что-то в маске логически меняется (например, двери):
+    public invalidateMask() {
+        this.chunkDirty = true;
+    }
+
+    private buildHelperCanvas() {
+        const { image, lvlData } = this.levelData;
+        const chunkSize = 2;
+        const mapPixelWidth = (image?.width ?? lvlData.mapHDR.width * chunkSize * this.tileWidth) | 0;
+        const mapPixelHeight = (image?.height ?? lvlData.mapHDR.height * chunkSize * this.tileHeight) | 0;
+
+        if (!this.helperCanvas) {
+            this.helperCanvas = document.createElement('canvas');
+            this.helperCtx = this.helperCanvas.getContext('2d');
+        }
+
+        if (!this.helperCanvas || !this.helperCtx) return;
+
+        // если размер поменялся — переинициализируем
+        if (this.helperCanvas.width !== mapPixelWidth || this.helperCanvas.height !== mapPixelHeight) {
+            this.helperCanvas.width = mapPixelWidth;
+            this.helperCanvas.height = mapPixelHeight;
+        }
+
+        this.chunkDirty = true; // нужно перерисовать содержимое
     }
 
     public draw() {
@@ -38,7 +73,17 @@ export class MapRenderer {
         this.offset = this.scroller.getOffset();
 
         // Отрисовка фона
-        this.ctx.drawImage(image, this.offset.x, this.offset.y, this.canvas.width, this.canvas.height, 0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.drawImage(
+            image,
+            this.offset.x,
+            this.offset.y,
+            this.canvas.width,
+            this.canvas.height,
+            0,
+            0,
+            this.canvas.width,
+            this.canvas.height
+        );
 
         // Отрисовка анимаций
         this.drawAnimations();
@@ -49,64 +94,120 @@ export class MapRenderer {
         // Отрисовка дверей
         this.drawDoors();
 
-        // Отрисовка NPC
-        this.drawPersons(sefData.persons, "red");
-
         // Отрисовка всех масок
-        // this.drawMasks(this.levelData.levelMasks);
+        this.drawMasks(this.levelData.levelMasks);
 
         // Отрисовка групп клеток
-        this.drawCellGroups(sefData.cellGroups, "green");
+        // this.drawCellGroups(sefData.cellGroups, "green");
 
         // Отрисовка тайлов
-        // this.drawMaskHDR();
+        this.drawMapHDRCache(this.ctx);
+
+        // Отрисовка NPC
+        this.drawPersons(sefData.persons, 'red');
     }
 
-    private drawMaskHDR() {
-        const ctx = this.ctx;
-        if (!ctx || !this.levelData) return;
+    private drawMapHDRCache(ctx: CanvasRenderingContext2D) {
+        if (this.chunkDirty) this.redrawMapHDRCache(); // перерисуем только при изменениях
 
-        const { maskHDR } = this.levelData.lvlData;
-        if (!maskHDR || maskHDR.chunks.length === 0) return;
+        if (this.helperCanvas) {
+            ctx.drawImage(
+                this.helperCanvas,
+                this.offset.x,
+                this.offset.y,
+                this.canvas.width,
+                this.canvas.height,
+                0,
+                0,
+                this.canvas.width,
+                this.canvas.height
+            );
+        }
+    }
 
-        const chunkSize = 2; // 2x2 тайла в одном чанке
-        const tileSizeX = this.tileWidth;  // Размер одного тайла по X
-        const tileSizeY = this.tileHeight; // Размер одного тайла по Y
-        const chunksPerColumn = maskHDR.height;
+    private redrawMapHDRCache() {
+        if (!this.helperCtx || !this.helperCanvas) return;
 
-        for (let chunkIndex = 0; chunkIndex < maskHDR.chunks.length; chunkIndex++) {
-            const chunk = maskHDR.chunks[chunkIndex];
+        const ctx = this.helperCtx;
+        const { mapHDR } = this.levelData.lvlData;
+        if (!mapHDR || mapHDR.chunks.length === 0) return;
 
-            // **Восстанавливаем координаты с учётом отрисовки по колонкам**
-            const correctX = Math.floor(chunkIndex / chunksPerColumn) * chunkSize * tileSizeX - this.offset.x;
-            const correctY = (chunkIndex % chunksPerColumn) * chunkSize * tileSizeY - this.offset.y;
+        const chunkSize = 2;
+        const tileSizeX = this.tileWidth;
+        const tileSizeY = this.tileHeight;
+
+        const chunkPixelW = chunkSize * tileSizeX;
+        const chunkPixelH = chunkSize * tileSizeY;
+
+        ctx.clearRect(0, 0, this.helperCanvas.width, this.helperCanvas.height);
+
+        // (по желанию) отключим сглаживание для пиксельной чёткости
+        ctx.imageSmoothingEnabled = false;
+
+        for (let chunkIndex = 0; chunkIndex < mapHDR.chunks.length; chunkIndex++) {
+            const chunk = mapHDR.chunks[chunkIndex];
+
+            const baseX = Math.floor(chunkIndex / mapHDR.height) * chunkPixelW;
+            const baseY = (chunkIndex % mapHDR.height) * chunkPixelH;
 
             for (let tileIndex = 0; tileIndex < chunk.length; tileIndex++) {
                 const tile = chunk[tileIndex];
 
-                const objX = correctX + Math.floor(tileIndex / chunkSize) * tileSizeX;
-                const objY = correctY + (tileIndex % chunkSize) * tileSizeY;
+                // (column-major внутри чанка):
+                // const objX = baseX + Math.floor(tileIndex / chunkSize) * tileSizeX;
+                // const objY = baseY + (tileIndex % chunkSize) * tileSizeY;
 
-                // Выбираем цвет: зелёный если param2 < 2000, иначе красный
-                const color = tile.param2 < 2000 ? "rgba(0, 255, 0, 0.25)" : "rgba(255, 0, 0, 0.25)";
+                // (row-major внутри чанка):
+                const objX = baseX + (tileIndex % chunkSize) * tileSizeX;
+                const objY = baseY + Math.floor(tileIndex / chunkSize) * tileSizeY;
 
+                const valueToWatch =
+                    tile.maskNumber !== 0 &&
+                    tile.maskNumber !== 255 &&
+                    tile.maskNumber2 !== 0 &&
+                    tile.maskNumber2 !== 255
+                        ? 255
+                        : 0;
+
+                // твоя текущая раскраска (оставляю как есть)
+                // const color = `rgba(${tile.param1a === 2 && tileIndex === 0 ? 255 : 0}, ${/*tile.param1_1 === 5 ? 255 : */ 0}, ${/*tile.param1_1 === 4 ? 255 : */ 0}, 0.25)`;
+                const color = `rgba(${tile.maskNumber2 === 0 ? 255 : 0}, ${/*tile.param1_1 === 5 ? 255 : */ 0}, ${/*tile.param1_1 === 4 ? 255 : */ 0}, 0.25)`;
                 ctx.fillStyle = color;
                 ctx.fillRect(objX, objY, tileSizeX, tileSizeY);
+
+                // if (tile.param1 > 10 && tile.param1 < 128) {
+                //     console.log(`chunkIndex=${chunkIndex}`);
+                //     console.log(tile);
+                // }
+            }
+
+            if (this.showChunkBorders) {
+                this.drawChunkBorder(ctx, baseX, baseY, chunkPixelW, chunkPixelH);
             }
         }
+
+        this.chunkDirty = false;
     }
 
     // **Метод для рисования границ чанка**
+    // Рисует только верхний и левый угол чанка
     private drawChunkBorder(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
-        ctx.strokeStyle = "blue";
-        ctx.setLineDash([5, 5]); // Штрихпунктирная линия
+        ctx.save();
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)';
+        ctx.setLineDash([5, 5]);
         ctx.lineWidth = 1;
 
         ctx.beginPath();
-        ctx.rect(x, y, width, height);
-        ctx.stroke();
+        // верхняя граница
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + width, y);
 
-        ctx.setLineDash([]); // Сбрасываем стиль линии
+        // левая граница
+        ctx.moveTo(x, y);
+        ctx.lineTo(x, y + height);
+
+        ctx.stroke();
+        ctx.restore();
     }
 
     private drawAnimations() {
@@ -123,7 +224,7 @@ export class MapRenderer {
 
             /* предотвращение отрисовок за пределами экрана */
             if (this.canvas.width < objX || this.canvas.height < objY) return;
-            if ((objX + animation.frameWidth) < 0 || (objY + animation.frameHeight) < 0) return;
+            if (objX + animation.frameWidth < 0 || objY + animation.frameHeight < 0) return;
 
             animation.update();
             animation.draw(ctx, objX, objY);
@@ -153,7 +254,7 @@ export class MapRenderer {
         this.ctx.drawImage(image, objX, objY);
     }
 
-    private drawPersons(persons: SEFData["persons"], color: string) {
+    private drawPersons(persons: SEFData['persons'], color: string) {
         for (let key in persons) {
             const person = persons[key];
 
@@ -165,7 +266,7 @@ export class MapRenderer {
         }
     }
 
-    private drawEntrancePoints(points: SEFData["entrancePoints"], color: string) {
+    private drawEntrancePoints(points: SEFData['entrancePoints'], color: string) {
         for (let key in points) {
             const point = points[key];
 
@@ -176,7 +277,7 @@ export class MapRenderer {
         }
     }
 
-    private drawCellGroups(cellGroups: SEFData["cellGroups"], color: string) {
+    private drawCellGroups(cellGroups: SEFData['cellGroups'], color: string) {
         if (!this.ctx) return;
 
         Object.entries(cellGroups).forEach(([groupName, positions]) => {
@@ -234,10 +335,10 @@ export class MapRenderer {
         this.ctx!.fill();
 
         if (label) {
-            this.ctx!.font = "12px Arial";
-            this.ctx!.strokeStyle = "black";
-            this.ctx!.textAlign = "center";
-            this.ctx!.fillStyle = "white";
+            this.ctx!.font = '12px Arial';
+            this.ctx!.strokeStyle = 'black';
+            this.ctx!.textAlign = 'center';
+            this.ctx!.fillStyle = 'white';
             this.ctx!.lineWidth = 3;
             this.ctx!.strokeText(label, x, y + 15);
             this.ctx!.fillText(label, x, y + 15);

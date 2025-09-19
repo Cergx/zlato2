@@ -8,7 +8,7 @@ export interface PixelPosition {
     y: number;
 }
 
-export interface LVLDescription {
+export interface LevelDescription {
     name: string;
     param1: number;
     param2: number;
@@ -16,11 +16,11 @@ export interface LVLDescription {
     position: PixelPosition;
 }
 
-export interface StaticDescription extends LVLDescription {}
+export interface StaticDescription extends LevelDescription {}
 
-export interface AnimationDescription extends LVLDescription {}
+export interface AnimationDescription extends LevelDescription {}
 
-export interface TriggerDescription extends LVLDescription {}
+export interface TriggerDescription extends LevelDescription {}
 
 export interface MaskDescription {
     number: number;
@@ -80,18 +80,20 @@ interface EnvironmentSounds {
     otherSounds: ExtraSound[];
 }
 
-interface MHDRTile {
+interface MapHDRTile {
     maskNumber: number;
+    maskNumber2: number;
+    param1: number;
     param2: number;
-    tileType: number;
+    surfaceType: number;
 }
 
-type MHDRChunk = MHDRTile[4];
+type MapHDRChunk = MapHDRTile[];
 
-interface MaskHDR {
+interface MapHDR {
     width: number;
     height: number;
-    chunks: MHDRChunk[];
+    chunks: MapHDRChunk[];
 }
 
 export interface LVLData {
@@ -106,25 +108,25 @@ export interface LVLData {
     cellGroups: CellGroups;
     doors: Door[];
     environmentSounds: EnvironmentSounds;
-    maskHDR: MaskHDR;
+    mapHDR: MapHDR;
 }
 
 const defaultEnvironmentSounds: EnvironmentSounds = {
     header: { param1: 0, param2: 0, param3: 0, param4: 0 },
-    levelTheme: "",
-    dayAmbience: "",
-    nightAmbience: "",
+    levelTheme: '',
+    dayAmbience: '',
+    nightAmbience: '',
     otherSounds: []
 };
 
-const defaultMaskHDR: MaskHDR = {
+const defaultMapHDR: MapHDR = {
     width: 1,
     height: 1,
     chunks: []
-}
+};
 
 const defaultLvlData: LVLData = {
-    version: "-1",
+    version: '-1',
     mapSize: { width: 1, height: 1 },
     weather: { type: 0, intensity: 0 },
     levelFloors: 0,
@@ -134,9 +136,9 @@ const defaultLvlData: LVLData = {
     triggerDescription: [],
     cellGroups: {},
     doors: [],
-    environmentSounds: {...defaultEnvironmentSounds},
-    maskHDR: {...defaultMaskHDR}
-}
+    environmentSounds: { ...defaultEnvironmentSounds },
+    mapHDR: { ...defaultMapHDR }
+};
 
 type DataBlocks = Record<string, Uint8Array>;
 
@@ -172,7 +174,7 @@ export class LVLParser {
             this.blocks[blockId] = data.slice(index, index + blockSize);
             index += blockSize;
         }
-        console.log(this.blocks)
+        console.log(this.blocks);
     }
 
     private interpretData(): LVLData {
@@ -183,52 +185,52 @@ export class LVLParser {
             const block = this.blocks[blockName];
 
             switch (blockName) {
-                case "BLK_LVER":
+                case 'BLK_LVER':
                     data.version = this.parseVersion(block);
                     break;
 
-                case "BLK_MPSZ":
+                case 'BLK_MPSZ':
                     data.mapSize = this.parseMapSize(block);
                     break;
 
-                case "BLK_WTHR":
+                case 'BLK_WTHR':
                     data.weather = this.parseWeather(block);
                     break;
 
-                case "BLK_LFLS":
+                case 'BLK_LFLS':
                     data.levelFloors = this.parseLevelFloors(block);
                     break;
 
-                case "BLK_CGRP":
+                case 'BLK_CGRP':
                     data.cellGroups = this.parseCellGroups(block);
                     break;
 
-                case "BLK_DOOR":
+                case 'BLK_DOOR':
                     data.doors = this.parseDoors(block);
                     break;
 
-                case "BLK_SENV":
+                case 'BLK_SENV':
                     data.environmentSounds = this.parseSENV(block);
                     break;
 
-                case "BLK_SDSC":
+                case 'BLK_SDSC':
                     data.staticDescriptions = this.parseStructuredBlock(block);
                     break;
 
-                case "BLK_ADSC":
+                case 'BLK_ADSC':
                     data.animationDescriptions = this.parseStructuredBlock(block);
                     break;
 
-                case "BLK_TDSC":
+                case 'BLK_TDSC':
                     data.triggerDescription = this.parseStructuredBlock(block);
                     break;
 
-                case "BLK_MDSC":
+                case 'BLK_MDSC':
                     data.maskDescriptions = this.parseMaskDescriptions(block);
                     break;
 
-                case "BLK_MHDR":
-                    data.maskHDR = this.parseMaskHDR(block);
+                case 'BLK_MHDR':
+                    data.mapHDR = this.parseMapHDR(block);
                     break;
 
                 default:
@@ -242,7 +244,7 @@ export class LVLParser {
     }
 
     private parseBlockAsString(block: Uint8Array) {
-        return new TextDecoder("ascii").decode(block);
+        return new TextDecoder('ascii').decode(block);
     }
 
     private parseSENV(block: Uint8Array) {
@@ -255,16 +257,14 @@ export class LVLParser {
 
         // 1. Первые 16 байт записываются в header
         result.header.param1 = view.getInt32(offset, true);
-        result.header.param2 = view.getFloat32(offset += 4, true);
-        result.header.param3 = view.getFloat32(offset += 4, true);
-        result.header.param4 = view.getFloat32(offset += 4, true);
+        result.header.param2 = view.getFloat32((offset += 4), true);
+        result.header.param3 = view.getFloat32((offset += 4), true);
+        result.header.param4 = view.getFloat32((offset += 4), true);
         offset += 4;
-
 
         if (offset + 4 > block.byteLength) return result;
         const otherSoundsLength = view.getUint32(offset, true);
         offset += 4;
-
 
         result.levelTheme = this.readStringWithLength(block, offset);
         offset += 4 + result.levelTheme.length;
@@ -275,7 +275,6 @@ export class LVLParser {
         result.nightAmbience = this.readStringWithLength(block, offset);
         offset += 4 + result.nightAmbience.length;
 
-
         result.otherSounds = [];
 
         for (let i = 0; i < otherSoundsLength; i++) {
@@ -285,17 +284,17 @@ export class LVLParser {
             result.otherSounds.push({
                 path,
                 param1: view.getFloat32(offset, true),
-                param2: view.getFloat32(offset += 4, true),
-                param3: view.getFloat32(offset += 4, true),
-                param4: view.getFloat32(offset += 4, true),
-                param5: view.getFloat32(offset += 4, true),
-                param6: view.getFloat32(offset += 4, true),
-                param7: view.getFloat32(offset += 4, true),
-                param8: view.getFloat32(offset += 4, true),
-                param9: view.getUint32(offset += 4, true),
-                param10: view.getUint32(offset += 4, true),
-                param11: view.getUint32(offset += 4, true),
-                param12: view.getUint32(offset += 4, true)
+                param2: view.getFloat32((offset += 4), true),
+                param3: view.getFloat32((offset += 4), true),
+                param4: view.getFloat32((offset += 4), true),
+                param5: view.getFloat32((offset += 4), true),
+                param6: view.getFloat32((offset += 4), true),
+                param7: view.getFloat32((offset += 4), true),
+                param8: view.getFloat32((offset += 4), true),
+                param9: view.getUint32((offset += 4), true),
+                param10: view.getUint32((offset += 4), true),
+                param11: view.getUint32((offset += 4), true),
+                param12: view.getUint32((offset += 4), true)
             });
 
             offset += 4;
@@ -305,7 +304,7 @@ export class LVLParser {
     }
 
     private parseVersion(block: Uint8Array) {
-        if (block.length < 4) return "-1";
+        if (block.length < 4) return '-1';
 
         const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
         const minor = view.getUint16(0, true);
@@ -361,46 +360,90 @@ export class LVLParser {
         return masks;
     }
 
-    private parseMaskHDR(block: Uint8Array): MaskHDR {
-        const maskHDR = {...defaultMaskHDR};
+    private parseMapHDR(block: Uint8Array): MapHDR {
+        const mapHDR = { ...defaultMapHDR };
 
-        if (block.length < 8) return maskHDR;
+        if (block.length < 8) return mapHDR;
 
         const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
-        maskHDR.width = view.getUint32(0, true);
-        maskHDR.height = view.getUint32(4, true);
+        mapHDR.width = view.getUint32(0, true);
+        mapHDR.height = view.getUint32(4, true);
 
         // Читаем данные
         const rawData = block.slice(8);
-        const tileSize = 6; // 6 байт на один тайл (3 значения по 2 байта)
+        const tileSize = 6; // 6 байт на один тайл
         const chunkSize = 4; // 4 тайла в чанке
         const numChunks = Math.floor(rawData.length / (chunkSize * tileSize));
 
-        const flatChunks: MHDRChunk[] = new Array(numChunks);
+        const flatChunks: MapHDRChunk[] = new Array(numChunks);
 
         // **Записываем чанки в одну полоску**
         for (let i = 0; i < numChunks; i++) {
-            const chunk: MHDRChunk = [];
+            const tiles: MapHDRChunk = [];
             const baseOffset = i * chunkSize * tileSize;
 
             for (let j = 0; j < chunkSize; j++) {
                 const offset = baseOffset + j * tileSize;
                 if (offset + tileSize > rawData.length) break;
 
-                chunk.push({
-                    maskNumber: view.getUint16(offset, true),
-                    param2: view.getUint16(offset + 2, true),
-                    tileType: view.getUint16(offset + 4, true),
+                const param1Byte = view.getUint8(offset + 2, true);
+                const param2Byte = view.getUint8(offset + 3, true);
+
+                tiles.push({
+                    /* в самом первом тайле вместо maskNumber всегда ширина в чанках, а в surfaceType - высота */
+                    /* остальное - нули */
+
+                    param2bin: param2Byte.toString(2).padStart(8, '0'),
+                    param2_1: param2Byte & 0x0f,
+                    // param2_1 - тоже проходимость?
+                    // 0 - проходимое
+                    // 15 - непроходимое
+                    // 1-14 - какие-то крючки?
+                    param2_2: (param2Byte & 0xf0) >> 4,
+                    // param2_2 - проходимость ландшафта?
+                    // 0 - проходимое
+                    // 15 - непроходимое
+                    // 1-14 - какие-то крючки на границе?
+                    // param2_1 и param2_2 явно связаны с картой проходимости
+                    // возможно, там не 2 значения по полбайта, а как-то иначе
+
+                    param1a: param1Byte & 0b11,
+                    // соответствует каким-то маскам (бывает либо 1, либо 2)
+                    passability: (param1Byte & 0b1100) >> 2,
+                    // проходимость?
+                    // 0 - проходимый
+                    // 1 - непроходимый
+                    obstacles: (param1Byte & 0xf0) >> 4,
+                    // param1_2
+                    // 0 - нет препятствий
+                    // 8 - препятствие/стена
+
+                    maskNumber: view.getUint8(offset, true),
+                    // maskNumber
+                    // каждое отдельное значение относится к соответствующей маске
+                    maskNumber2: view.getUint8(offset + 1, true),
+                    // maskNumber2 всегда принимает значения либо 255, либо 0
+                    // как-то связаны с масками, поскольку пересекаются
+                    // есть предположение, что эти значения отвечают за перекрытие объектами, выделенных масками
+                    surfaceType: view.getUint16(offset + 4, true)
+                    // surfaceType - тип поверхности
+                    // 0 земля (ground)
+                    // 1 трава (grass)
+                    // 2 песок (sand)
+                    // 3 доски (wood)
+                    // 4 камень (stone)
+                    // 5 влага (water)
+                    // 6 снег (snow)
+                    // \sounds\persons\footsteps
                 });
             }
 
-            flatChunks[i] = chunk;
+            flatChunks[i] = tiles;
         }
 
-        maskHDR.chunks = flatChunks;
-        return maskHDR;
+        mapHDR.chunks = flatChunks;
+        return mapHDR;
     }
-
 
     private parseCellGroups(block: Uint8Array) {
         if (block.length < 4) return {};
@@ -453,7 +496,7 @@ export class LVLParser {
         const arrayLength = view.getUint32(offset, true);
         offset += 4;
 
-        const descriptions: LVLDescription[] = [];
+        const descriptions: LevelDescription[] = [];
 
         for (let i = 0; i < arrayLength; i++) {
             if (offset + 16 > block.byteLength) break;
@@ -465,7 +508,7 @@ export class LVLParser {
             const position: PixelPosition = {
                 x: view.getUint32(offset + 8, true),
                 y: view.getUint32(offset + 12, true)
-            }
+            };
 
             offset += 16;
 
@@ -520,19 +563,19 @@ export class LVLParser {
     }
 
     private readStringWithLength(block: Uint8Array, offset: number) {
-        if (offset + 4 > block.byteLength) return "";
+        if (offset + 4 > block.byteLength) return '';
 
         const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
         const length = view.getUint32(offset, true);
         offset += 4;
 
-        if (offset + length > block.byteLength) return "";
+        if (offset + length > block.byteLength) return '';
 
         return this.readString(block, offset, length);
     }
 
     private readString(data: Uint8Array, offset: number, length: number) {
-        return new TextDecoder("windows-1251").decode(data.slice(offset, offset + length));
+        return new TextDecoder('windows-1251').decode(data.slice(offset, offset + length));
     }
 
     getData() {

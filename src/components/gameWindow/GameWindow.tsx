@@ -21,13 +21,17 @@ export const GameWindow = ({ gameMode, level }: GameWindowProps) => {
         setCursor(CursorType.NORMAL);
 
         if (!gameRef.current) {
-            console.log(222)
+            console.log(222);
             gameRef.current = new Game(canvasRef.current);
             gameRef.current?.start(gameMode, level);
             setInitialized(true);
         } else if (initialized) {
             // gameRef.current?.changeLevel(gameMode, level);
         }
+
+        return () => {
+            gameRef.current?.stop();
+        };
     }, [gameMode, level]);
 
     return (
