@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
-import { Game } from "../../game/Game";
-import { useCursor } from "../../context/CursorContext";
-import { CursorType } from "../../enums/CursorTypes.ts";
-import styles from "./GameWindow.module.scss";
+import { useEffect, useRef, useState } from 'react';
+import { Game } from '../../game/Game';
+import { useCursor } from '../../context/CursorContext';
+import { CursorType } from '../../enums/CursorTypes.ts';
+import styles from './GameWindow.module.scss';
 
 interface GameWindowProps {
-    gameMode: "single" | "multiplayer";
+    gameMode: 'single' | 'multiplayer';
     level: string;
 }
 

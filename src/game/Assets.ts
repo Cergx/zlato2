@@ -1,4 +1,4 @@
-import { CSXParser } from "./parsers/CSXParser.ts";
+import { CSXParser } from './parsers/CSXParser.ts';
 
 export const loadImage = (src: string): Promise<HTMLImageElement> => {
     return new Promise((resolve, reject) => {
@@ -9,7 +9,7 @@ export const loadImage = (src: string): Promise<HTMLImageElement> => {
     });
 };
 
-export const loadCSX = async (path: string): Promise<HTMLCanvasElement | undefined> => {
+export const loadCSX = async (path: string) => {
     try {
         const response = await fetch(path);
         if (!response.ok) throw new Error(`CSX-файл не найден: ${path}`);
@@ -18,7 +18,6 @@ export const loadCSX = async (path: string): Promise<HTMLCanvasElement | undefin
         const parser = new CSXParser(buffer);
         return parser.parse(true);
     } catch (error) {
-        console.warn(`Ошибка загрузки CSX (${path}):`, error);
-        return undefined; // Если ошибка, просто возвращаем null
+        throw new Error(`Ошибка загрузки CSX (${path}):\n${error}`);
     }
 };

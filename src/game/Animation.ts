@@ -1,10 +1,10 @@
-import { loadCSX } from "./Assets";
+import { loadCSX } from './Assets';
 
 export class Animation {
-    private img: HTMLImageElement | HTMLCanvasElement | undefined;
+    private img: HTMLImageElement | HTMLCanvasElement;
     private frameCount: number;
     public readonly frameHeight: number;
-    public readonly frameWidth: number;
+    public frameWidth: number;
     private currentFrame: number;
     private frameDuration: number;
     private lastUpdateTime: number;
@@ -21,7 +21,7 @@ export class Animation {
         this.lastUpdateTime = performance.now();
         this.isLoaded = false;
 
-        if (imgSrc.endsWith(".csx")) {
+        if (imgSrc.endsWith('.csx')) {
             this.loadCSX(imgSrc);
         } else {
             this.loadPNG(imgSrc);
@@ -30,8 +30,6 @@ export class Animation {
 
     private async loadCSX(path: string) {
         this.img = await loadCSX(path);
-
-        if (!this.img) return;
 
         this.frameWidth = this.img.width;
         this.frameCount = this.img.height / this.frameHeight;
@@ -64,8 +62,14 @@ export class Animation {
 
         ctx.drawImage(
             this.img,
-            0, this.currentFrame * this.frameHeight, this.frameWidth, this.frameHeight,  // Исходные координаты
-            x, y, this.frameWidth, this.frameHeight  // Координаты отрисовки
+            0,
+            this.currentFrame * this.frameHeight,
+            this.frameWidth,
+            this.frameHeight, // Исходные координаты
+            x,
+            y,
+            this.frameWidth,
+            this.frameHeight // Координаты отрисовки
         );
     }
 }

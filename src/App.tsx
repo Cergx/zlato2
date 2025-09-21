@@ -1,11 +1,11 @@
-import { CursorProvider } from "./context/CursorContext";
-import styles from "./App.module.scss";
-import { GameWindow } from "./components/gameWindow/GameWindow";
-import { useState } from "react";
-import { singleLevels, multiplayerLevels, GameMode } from "./constants/levels";
+import { CursorProvider } from './context/CursorContext';
+import styles from './App.module.scss';
+import { GameWindow } from './components/gameWindow/GameWindow';
+import { useState } from 'react';
+import { singleLevels, multiplayerLevels, GameMode } from './constants/levels';
 
-export const App = () => {
-    const [gameMode, setGameMode] = useState<GameMode>("single");
+const App = () => {
+    const [gameMode, setGameMode] = useState<GameMode>('single');
     // const [singleLevel, setSingleLevel] = useState(singleLevels[0]);
     // const [singleLevel, setSingleLevel] = useState(singleLevels[4]);
     // const [singleLevel, setSingleLevel] = useState('l9_2_1');
@@ -15,7 +15,7 @@ export const App = () => {
     // const [singleLevel, setSingleLevel] = useState('l5_2_3');
     const [multiplayerLevel, setMultiplayerLevel] = useState(multiplayerLevels[0]);
 
-    const currentLevel = gameMode === "single" ? singleLevel : multiplayerLevel;
+    const currentLevel = gameMode === 'single' ? singleLevel : multiplayerLevel;
 
     return (
         <CursorProvider>
@@ -30,28 +30,32 @@ export const App = () => {
                 </label>
 
                 {/* Выбор single уровня */}
-                {gameMode === "single" &&
+                {gameMode === 'single' && (
                     <label>
                         Level:
                         <select value={singleLevel} onChange={(e) => setSingleLevel(e.target.value)}>
                             {singleLevels.map((lvl) => (
-                                <option key={lvl} value={lvl}>{lvl}</option>
+                                <option key={lvl} value={lvl}>
+                                    {lvl}
+                                </option>
                             ))}
                         </select>
                     </label>
-                }
+                )}
 
                 {/* Выбор multiplayer уровня */}
-                {gameMode === "multiplayer" &&
+                {gameMode === 'multiplayer' && (
                     <label>
                         Level:
                         <select value={multiplayerLevel} onChange={(e) => setMultiplayerLevel(e.target.value)}>
                             {multiplayerLevels.map((lvl) => (
-                                <option key={lvl} value={lvl}>{lvl}</option>
+                                <option key={lvl} value={lvl}>
+                                    {lvl}
+                                </option>
                             ))}
                         </select>
                     </label>
-                }
+                )}
 
                 {/* Окно игры */}
                 <GameWindow key={`${gameMode}-${currentLevel}`} gameMode={gameMode} level={currentLevel} />

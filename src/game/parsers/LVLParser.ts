@@ -186,51 +186,51 @@ export class LVLParser {
 
             switch (blockName) {
                 case 'BLK_LVER':
-                    data.version = this.parseVersion(block);
+                    data.version = this.parseVersion(block); // готово
                     break;
 
                 case 'BLK_MPSZ':
-                    data.mapSize = this.parseMapSize(block);
+                    data.mapSize = this.parseMapSize(block); // готово
                     break;
 
                 case 'BLK_WTHR':
-                    data.weather = this.parseWeather(block);
+                    data.weather = this.parseWeather(block); // готово
                     break;
 
                 case 'BLK_LFLS':
-                    data.levelFloors = this.parseLevelFloors(block);
+                    data.levelFloors = this.parseLevelFloors(block); // готово
                     break;
 
                 case 'BLK_CGRP':
-                    data.cellGroups = this.parseCellGroups(block);
+                    data.cellGroups = this.parseCellGroups(block); // готово
                     break;
 
                 case 'BLK_DOOR':
-                    data.doors = this.parseDoors(block);
+                    data.doors = this.parseDoors(block); // готово
                     break;
 
                 case 'BLK_SENV':
-                    data.environmentSounds = this.parseSENV(block);
+                    data.environmentSounds = this.parseEnvironmentSounds(block); // не доделано?
                     break;
 
                 case 'BLK_SDSC':
-                    data.staticDescriptions = this.parseStructuredBlock(block);
+                    data.staticDescriptions = this.parseStructuredBlock(block); // не доделано?
                     break;
 
                 case 'BLK_ADSC':
-                    data.animationDescriptions = this.parseStructuredBlock(block);
+                    data.animationDescriptions = this.parseStructuredBlock(block); // не доделано?
                     break;
 
                 case 'BLK_TDSC':
-                    data.triggerDescription = this.parseStructuredBlock(block);
+                    data.triggerDescription = this.parseStructuredBlock(block); // не доделано?
                     break;
 
                 case 'BLK_MDSC':
-                    data.maskDescriptions = this.parseMaskDescriptions(block);
+                    data.maskDescriptions = this.parseMaskDescriptions(block); // не доделано?
                     break;
 
                 case 'BLK_MHDR':
-                    data.mapHDR = this.parseMapHDR(block);
+                    data.mapHDR = this.parseMapHDR(block); // не доделано
                     break;
 
                 default:
@@ -247,7 +247,7 @@ export class LVLParser {
         return new TextDecoder('ascii').decode(block);
     }
 
-    private parseSENV(block: Uint8Array) {
+    private parseEnvironmentSounds(block: Uint8Array) {
         const result: EnvironmentSounds = defaultEnvironmentSounds;
 
         if (!block || block.length < 16) return result;
@@ -386,26 +386,31 @@ export class LVLParser {
                 const offset = baseOffset + j * tileSize;
                 if (offset + tileSize > rawData.length) break;
 
-                const param1Byte = view.getUint8(offset + 2, true);
-                const param2Byte = view.getUint8(offset + 3, true);
+                const param1Byte = view.getUint8(offset + 2);
+                const param2Byte = view.getUint8(offset + 3);
 
                 tiles.push({
                     /* в самом первом тайле вместо maskNumber всегда ширина в чанках, а в surfaceType - высота */
                     /* остальное - нули */
 
-                    param2bin: param2Byte.toString(2).padStart(8, '0'),
-                    param2_1: param2Byte & 0x0f,
-                    // param2_1 - тоже проходимость?
-                    // 0 - проходимое
-                    // 15 - непроходимое
-                    // 1-14 - какие-то крючки?
-                    param2_2: (param2Byte & 0xf0) >> 4,
-                    // param2_2 - проходимость ландшафта?
-                    // 0 - проходимое
-                    // 15 - непроходимое
-                    // 1-14 - какие-то крючки на границе?
-                    // param2_1 и param2_2 явно связаны с картой проходимости
-                    // возможно, там не 2 значения по полбайта, а как-то иначе
+                    maskNumber: view.getUint8(offset),
+                    maskNumber1: view.getUint8(offset).toString(2).padStart(8, '0'),
+                    // maskNumber
+                    // каждое отдельное значение относится к соответствующей маске
+                    maskNumber2: view.getUint8(offset + 1),
+                    // maskNumber2 всегда принимает значения либо 255, либо 0
+                    // как-то связаны с масками, поскольку пересекаются
+                    // есть предположение, что эти значения отвечают за перекрытие объектами, выделенных масками
+                    surfaceType: view.getUint16(offset + 4, true),
+                    // surfaceType - тип поверхности
+                    // 0 земля (ground)
+                    // 1 трава (grass)
+                    // 2 песок (sand)
+                    // 3 доски (wood)
+                    // 4 камень (stone)
+                    // 5 влага (water)
+                    // 6 снег (snow)
+                    // \sounds\persons\footsteps
 
                     param1a: param1Byte & 0b11,
                     // соответствует каким-то маскам (бывает либо 1, либо 2)
@@ -418,23 +423,18 @@ export class LVLParser {
                     // 0 - нет препятствий
                     // 8 - препятствие/стена
 
-                    maskNumber: view.getUint8(offset, true),
-                    // maskNumber
-                    // каждое отдельное значение относится к соответствующей маске
-                    maskNumber2: view.getUint8(offset + 1, true),
-                    // maskNumber2 всегда принимает значения либо 255, либо 0
-                    // как-то связаны с масками, поскольку пересекаются
-                    // есть предположение, что эти значения отвечают за перекрытие объектами, выделенных масками
-                    surfaceType: view.getUint16(offset + 4, true)
-                    // surfaceType - тип поверхности
-                    // 0 земля (ground)
-                    // 1 трава (grass)
-                    // 2 песок (sand)
-                    // 3 доски (wood)
-                    // 4 камень (stone)
-                    // 5 влага (water)
-                    // 6 снег (snow)
-                    // \sounds\persons\footsteps
+                    param2_1: param2Byte & 0x0f,
+                    // param2_1 - тоже проходимость или z-index
+                    // 0 - проходимое
+                    // 15 - непроходимое
+                    // 1-14 - какие-то крючки?
+                    param2_2: (param2Byte & 0xf0) >> 4
+                    // param2_2 - проходимость ландшафта или z-index?
+                    // 0 - проходимое
+                    // 15 - непроходимое
+                    // 1-14 - какие-то крючки на границе?
+                    // param2_1 и param2_2 явно связаны с картой проходимости
+                    // возможно, там не 2 значения по полбайта, а как-то иначе
                 });
             }
 
