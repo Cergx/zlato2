@@ -103,7 +103,7 @@ export class MapRenderer {
 
                 // твоя текущая раскраска (оставляю как есть)
                 // const color = `rgba(${tile.param1a === 2 && tileIndex === 0 ? 255 : 0}, ${/*tile.param1_1 === 5 ? 255 : */ 0}, ${/*tile.param1_1 === 4 ? 255 : */ 0}, 0.25)`;
-                this.helperCtx.fillStyle = `rgba(${tile.maskNumber2 === 0 ? 255 : 0}, ${/*tile.param1_1 === 5 ? 255 : */ 0}, ${/*tile.param1_1 === 4 ? 255 : */ 0}, 0.25)`;
+                this.helperCtx.fillStyle = `rgba(${tile.passability === 1 || tile.obstacles === 8 ? 255 : 0}, ${/*tile.param1_1 === 5 ? 255 : */ 0}, ${/*tile.param1_1 === 4 ? 255 : */ 0}, 0.25)`;
                 this.helperCtx.fillRect(objX, objY, tileSizeX, tileSizeY);
             }
         }
