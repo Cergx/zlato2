@@ -1,5 +1,5 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import {ANIParser, ParsedAni} from "../game/parsers/ANIParser.ts";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ANIParser, type ParsedAni } from "../game/parsers/ANIParser.ts";
 import { CursorType } from "../enums/CursorTypes";
 
 interface CursorContextType {
@@ -18,21 +18,32 @@ export const useCursor = () => {
 };
 
 const cursorClassName = 'aniCursor';
+const cursorCache = new Map<CursorType, Promise<ParsedAni>>();
 
 export const CursorProvider = ({ children }: { children: ReactNode }) => {
     const [parsedAni, setParsedAni] = useState<ParsedAni>();
+    const activeCursor = useRef<CursorType | undefined>(undefined);
+    const requestGeneration = useRef(0);
 
-    const setCursor = async (cursor: CursorType) => {
-        const path = `/assets/cursors/${cursor}`;
-        try {
-            const response = await fetch(path);
-            const buffer = await response.arrayBuffer();
-            const aniParser = new ANIParser(buffer);
-            setParsedAni(aniParser.parse());
-        } catch (error) {
-            console.error("Failed to load ANI cursor:", error);
+    const setCursor = useCallback((cursor: CursorType) => {
+        if (activeCursor.current === cursor) return;
+        activeCursor.current = cursor;
+        const generation = ++requestGeneration.current;
+        let pending = cursorCache.get(cursor);
+        if (!pending) {
+            pending = fetch(`/assets/cursors/${cursor}`).then(async (response) => {
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return new ANIParser(await response.arrayBuffer()).parse();
+            });
+            cursorCache.set(cursor, pending);
         }
-    };
+        void pending.then((parsed) => {
+            if (generation === requestGeneration.current) setParsedAni(parsed);
+        }).catch((error) => {
+            cursorCache.delete(cursor);
+            console.error("Failed to load ANI cursor:", error);
+        });
+    }, []);
 
     useEffect(() => {
         if (!parsedAni || parsedAni.frames.length === 0) {
@@ -59,8 +70,10 @@ export const CursorProvider = ({ children }: { children: ReactNode }) => {
         };
     }, [parsedAni]);
 
+    const contextValue = useMemo(() => ({ setCursor, cursorClassName }), [setCursor]);
+
     return (
-        <CursorContext.Provider value={{ setCursor, cursorClassName }}>
+        <CursorContext.Provider value={contextValue}>
             {children}
         </CursorContext.Provider>
     );

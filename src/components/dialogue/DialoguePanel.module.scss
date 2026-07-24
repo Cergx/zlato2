@@ -1,0 +1,145 @@
+.panel {
+    --dialogue-color-text: #211d16;
+    --dialogue-color-muted: #635a47;
+    --dialogue-color-accent: #342a18;
+    --dialogue-color-focus: #6e4b18;
+
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+
+    width: min(92%, 627px);
+    aspect-ratio: 627 / 207;
+    padding: 2.5% 15% 2.5% 5.5%;
+    overflow: hidden;
+
+    color: var(--dialogue-color-text);
+    background: url('/assets/engineres/gpanel/dialog_panel.bmp') center / 100% 100% no-repeat;
+    border: 0;
+    filter: drop-shadow(0 10px 16px rgb(0 0 0 / 70%));
+    font-family: ZlatoPalatino, "Palatino Linotype", serif;
+
+    text-shadow: 0 1px rgb(255 255 255 / 38%);
+}
+
+.header {
+    min-width: 0;
+    margin-bottom: 1.5%;
+    padding-bottom: 1%;
+    border-bottom: 1px solid rgb(58 49 35 / 45%);
+}
+
+.speaker {
+    margin: 0;
+    overflow: hidden;
+    color: var(--dialogue-color-accent);
+    font-size: clamp(.72rem, 1.35vw, 1rem);
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: .045em;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.content {
+    min-height: 0;
+    padding-right: .4rem;
+    overflow-x: hidden;
+    overflow-y: auto;
+    outline: 0;
+    scrollbar-color: #655c49 #aaa68f;
+    scrollbar-width: thin;
+}
+
+.content::-webkit-scrollbar { width: 8px; }
+.content::-webkit-scrollbar-track { background: rgb(120 111 86 / 35%); }
+.content::-webkit-scrollbar-thumb {
+    background: #655c49;
+    border: 1px solid #aaa68f;
+}
+
+.phrase {
+    margin: 0 0 1.5%;
+    color: var(--dialogue-color-text);
+    font-size: clamp(.68rem, 1.25vw, .95rem);
+    line-height: 1.35;
+    text-wrap: pretty;
+}
+
+.options {
+    display: grid;
+    gap: 1px;
+    margin: 0;
+    padding: 1.2% 0 0;
+    border-top: 1px solid rgb(58 49 35 / 40%);
+    list-style: none;
+
+}
+
+.optionItem {
+    min-width: 0;
+}
+
+.option {
+    display: grid;
+    grid-template-columns: 1.25rem minmax(0, 1fr);
+    gap: .35rem;
+    align-items: start;
+    width: 100%;
+    margin: 0;
+    padding: .18rem .3rem;
+    color: var(--dialogue-color-text);
+    background: transparent;
+    border: 1px solid transparent;
+    font: inherit;
+    font-size: clamp(.64rem, 1.1vw, .85rem);
+    line-height: 1.25;
+    text-align: left;
+    cursor: inherit;
+    transition: color 100ms linear, background-color 100ms linear;
+}
+
+.option:hover:not(:disabled),
+.option:focus-visible {
+    color: var(--dialogue-color-focus);
+    background: rgb(255 249 215 / 38%);
+    border-color: rgb(83 67 40 / 45%);
+    outline: 0;
+}
+
+.option:disabled {
+    color: #7a7467;
+}
+
+.shortcut {
+    display: inline-grid;
+    min-width: 1.1rem;
+    min-height: 1.1rem;
+    place-content: center;
+    color: var(--dialogue-color-muted);
+    background: rgb(255 252 226 / 35%);
+    border: 1px solid rgb(71 59 40 / 55%);
+    font-family: ZlatoPalatino, "Palatino Linotype", serif;
+
+    font-size: .65rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+@media (max-width: 600px) {
+    .panel {
+        padding-right: 14%;
+    }
+    .header {
+        margin-bottom: .5%;
+    }
+    .phrase {
+        margin-bottom: .5%;
+        line-height: 1.2;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .option { transition: none; }
+}

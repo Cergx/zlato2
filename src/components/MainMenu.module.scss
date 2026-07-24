@@ -1,0 +1,79 @@
+.viewport,
+.splash {
+    position: relative;
+    width: min(100vw, calc(100vh * 4 / 3));
+    height: min(100vh, calc(100vw * 3 / 4));
+    overflow: hidden;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    background: #000;
+    user-select: none;
+}
+
+.splash {
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+}
+
+.splash img {
+    display: block;
+    max-width: 72%;
+    max-height: 72%;
+    object-fit: contain;
+    animation: splash-fade 1.3s ease both;
+}
+
+.backdrop {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+}
+
+.aboutSlide {
+    position: absolute;
+    left: 33.3984375%;
+    top: 5.3385417%;
+    width: 62.5%;
+    height: 62.5%;
+    object-fit: fill;
+    box-shadow: 0 0 1.2rem #000;
+}
+
+.optionLabels {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+}
+
+.optionLabels span {
+    position: absolute;
+    width: 29%;
+    color: #322d25;
+    font: clamp(8px, 1.35vw, 18px)/1 "GoldenLand", Georgia, serif;
+    text-align: center;
+    text-shadow: 0 1px rgb(255 255 255 / 45%);
+    transform: translate(-50%, -50%);
+}
+
+.message {
+    position: absolute;
+    right: 2%;
+    bottom: 2%;
+    z-index: 10;
+    border: 1px solid rgb(203 169 101 / 55%);
+    padding: 0.45em 0.8em;
+    color: #e8d5a2;
+    font: clamp(10px, 1.4vw, 18px)/1.2 Georgia, serif;
+    background: rgb(12 8 4 / 82%);
+}
+
+@keyframes splash-fade {
+    0% { opacity: 0; }
+    20%, 78% { opacity: 1; }
+    100% { opacity: 0; }
+}

@@ -1,139 +1,113 @@
-type ParsedData = Record<string, any>;
+export type ParsedValue = string | number | number[] | ParsedData | ParsedData[];
+
+export interface ParsedData {
+    [key: string]: ParsedValue;
+}
+
+export function isParsedData(value: ParsedValue | undefined): value is ParsedData {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function isParsedDataArray(value: ParsedValue | undefined): value is ParsedData[] {
+    return Array.isArray(value) && value.every((entry) => isParsedData(entry));
+}
 
 function parseEngineObject(input: string): ParsedData {
     const rawLines = input.split(/\r?\n/);
-
-    // Убираем комментарии и пустые строки
     const lines = rawLines
         .map((line) => {
-            const idx = line.indexOf('//');
-            if (idx !== -1) {
-                line = line.slice(0, idx);
-            }
-            return line.trim();
+            const idx = line.indexOf("//");
+            return (idx === -1 ? line : line.slice(0, idx)).trim();
         })
-        .filter((l) => l !== '' && !/^[/\\]+$/.test(l));
+        .filter((line) => line !== "" && !/^[/\\]+$/.test(line));
 
-    const { result } = parseBlock(lines, 0);
-    return result;
+    return parseBlock(lines, 0).result;
 }
 
-function parseBlock(
-    lines: string[],
-    startIndex: number
-): { result: ParsedData; nextIndex: number } {
+function parseBlock(lines: string[], startIndex: number): { result: ParsedData; nextIndex: number } {
     const result: ParsedData = {};
-    let i = startIndex;
+    let index = startIndex;
 
-    while (i < lines.length) {
-        const line = lines[i];
-
-        // Закрытие блока
-        if (line === '}') {
-            return { result, nextIndex: i + 1 };
-        }
+    while (index < lines.length) {
+        const line = lines[index];
+        if (line === "}") return { result, nextIndex: index + 1 };
 
         const keyValue = parseKeyValue(line);
-
         if (!keyValue) {
-            // Возможно, это просто "{" или какая-то левоватая строка
-            i++;
+            index += 1;
             continue;
         }
 
-        let { key, value } = keyValue;
-
-        // Если value пустое и следующая строка — {
-        //   => вложенный блок
-        if (
-            value === '' &&
-            i + 1 < lines.length &&
-            lines[i + 1] === '{'
-        ) {
-            const subBlock = parseBlock(lines, i + 2);
+        const { key, value } = keyValue;
+        if (value === "" && lines[index + 1] === "{") {
+            const subBlock = parseBlock(lines, index + 2);
             result[key] = subBlock.result;
-            i = subBlock.nextIndex;
+            index = subBlock.nextIndex;
             continue;
         }
 
-        // Особая логика для name
-        if (key === 'name') {
-            const subKey = removeSurroundingQuotes(value);
-
-            if (i + 1 < lines.length && lines[i + 1] === '{') {
-                const subBlock = parseBlock(lines, i + 2);
-                result[subKey] = subBlock.result;
-                i = subBlock.nextIndex;
+        if (key === "name") {
+            const name = removeSurroundingQuotes(value);
+            if (lines[index + 1] === "{") {
+                const subBlock = parseBlock(lines, index + 2);
+                appendNamedBlock(result, name, subBlock.result);
+                index = subBlock.nextIndex;
             } else {
-                // Если нет блока, просто записываем как пустой или строку (на ваше усмотрение)
-                result[subKey] = {};
-                i++;
+                appendNamedBlock(result, name, {});
+                index += 1;
             }
             continue;
         }
 
-        // Если value === '{' => блок на этой же строке
-        if (value === '{') {
-            const subBlock = parseBlock(lines, i + 1);
+        if (value === "{") {
+            const subBlock = parseBlock(lines, index + 1);
             result[key] = subBlock.result;
-            i = subBlock.nextIndex;
+            index = subBlock.nextIndex;
             continue;
         }
 
-        // Обычное значение
         result[key] = convertValue(value);
-        i++;
+        index += 1;
     }
 
-    return { result, nextIndex: i };
+    return { result, nextIndex: index };
+}
+
+function appendNamedBlock(result: ParsedData, name: string, block: ParsedData): void {
+    const existing = result[name];
+    if (existing === undefined) {
+        result[name] = block;
+    } else if (isParsedDataArray(existing)) {
+        existing.push(block);
+    } else if (isParsedData(existing)) {
+        result[name] = [existing, block];
+    } else {
+        throw new Error(`Named block ${name} conflicts with a scalar value`);
+    }
 }
 
 function parseKeyValue(line: string): { key: string; value: string } | null {
-    // 1) Кейс "key: value"
-    const matchColon = line.match(/^([^:]+):\s*(.*)$/);
-    if (matchColon) {
-        const key = matchColon[1].trim();
-        const value = matchColon[2].trim();
-        return { key, value };
-    }
+    const colonMatch = line.match(/^([^:]+):\s*(.*)$/);
+    if (colonMatch) return { key: colonMatch[1].trim(), value: colonMatch[2].trim() };
 
-    // 2) Кейс "key value" (без двоеточия)
-    const parts = line.split(/\s+/);
-    if (parts.length > 1) {
-        const [key, ...rest] = parts;
-        const value = rest.join(' ');
-        return { key, value };
-    }
-
-    return null;
+    const [key, ...rest] = line.split(/\s+/);
+    return rest.length > 0 ? { key, value: rest.join(" ") } : null;
 }
 
-function removeSurroundingQuotes(str: string): string {
-    const match = str.match(/^"(.*)"$/);
-    if (match) {
-        return match[1];
-    }
-    return str;
+function removeSurroundingQuotes(value: string): string {
+    const match = value.match(/^"(.*)"$/);
+    return match ? match[1] : value;
 }
 
 function convertValue(value: string): string | number | number[] {
     const unquoted = removeSurroundingQuotes(value);
     const parts = unquoted.split(/\s+/);
-
     if (parts.length > 1) {
-        if (parts.every((p) => !isNaN(Number(p)))) {
-            return parts.map((p) => Number(p));
-        }
-
-        return unquoted;
+        return parts.every((part) => !Number.isNaN(Number(part))) ? parts.map(Number) : unquoted;
     }
 
-    const num = Number(unquoted);
-    if (!isNaN(num)) {
-        return num;
-    }
-    // Иначе просто строка
-    return unquoted;
+    const numericValue = Number(unquoted);
+    return Number.isNaN(numericValue) ? unquoted : numericValue;
 }
 
 export default parseEngineObject;

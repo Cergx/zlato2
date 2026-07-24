@@ -1,11 +1,45 @@
 .container {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    position: relative;
+    display: grid;
     min-height: 100vh;
-    width: 100%;
+    place-items: center;
+    overflow: hidden;
+    background: #050505;
 }
 
-.levelSelector {
+.debugControls {
+    position: fixed;
+    top: 0.4rem;
+    left: 0.4rem;
+    z-index: 100;
+    max-width: 14rem;
+    border: 1px solid rgb(200 184 135 / 35%);
+    padding: 0.2rem 0.35rem;
+    color: #c9bb91;
+    font: 10px/1.2 system-ui, sans-serif;
+    background: rgb(10 10 9 / 78%);
+    opacity: 0.3;
+}
 
+.debugControls:hover,
+.debugControls[open] {
+    opacity: 1;
+}
+
+.debugControls summary {
+    cursor: pointer;
+    letter-spacing: 0.12em;
+}
+
+.debugControls label {
+    display: grid;
+    gap: 0.15rem;
+    margin-top: 0.35rem;
+}
+
+.debugControls select {
+    max-width: 13rem;
+    color: #ddd2ad;
+    font: inherit;
+    background: #171611;
 }

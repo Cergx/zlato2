@@ -1,0 +1,32 @@
+.panel,
+.background,
+.labels {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.panel {
+    z-index: 60;
+    overflow: hidden;
+}
+
+.background {
+    object-fit: fill;
+}
+
+.labels {
+    z-index: 1;
+    pointer-events: none;
+}
+
+.labels span {
+    position: absolute;
+    width: 29%;
+    color: #322d25;
+    font: clamp(8px, 1.35vw, 18px)/1 "GoldenLand", Georgia, serif;
+    text-align: center;
+    text-shadow: 0 1px rgb(255 255 255 / 45%);
+    transform: translate(-50%, -50%);
+}

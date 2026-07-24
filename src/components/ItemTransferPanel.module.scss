@@ -1,0 +1,185 @@
+.panel {
+    position: absolute;
+    inset: 0;
+    z-index: 80;
+    overflow: hidden;
+    color: #2a1908;
+    font-family: ZlatoPalatino, "Palatino Linotype", serif;
+    user-select: none;
+}
+
+.background {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.panel > h1 {
+    position: absolute;
+    top: 5.5%;
+    right: 0;
+    left: 0;
+    margin: 0;
+    font-size: clamp(18px, 2.5vw, 34px);
+    text-align: center;
+    text-shadow: 0 1px #dfbd78;
+}
+
+.panes {
+    position: absolute;
+    top: 18%;
+    right: 7%;
+    left: 7%;
+    display: grid;
+    height: 62%;
+    grid-template-columns: 1fr 1fr;
+    gap: 8%;
+}
+
+.inventory {
+    position: relative;
+    min-width: 0;
+    padding: 3.2rem 1rem 1rem;
+}
+
+.inventory h2 {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    margin: 0;
+    font-size: clamp(14px, 1.8vw, 24px);
+    text-align: center;
+}
+
+.grid {
+    display: grid;
+    height: 100%;
+    grid-template-columns: repeat(5, 1fr);
+    grid-auto-rows: 20%;
+    gap: 1%;
+}
+
+.grid button {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    border: 1px solid transparent;
+    padding: 3px;
+    background: rgb(34 20 7 / 12%);
+    cursor: pointer;
+}
+
+.grid button:hover,
+.grid button:focus-visible,
+.grid button[aria-pressed='true'] {
+    z-index: 3;
+    border-color: #d7b35f;
+    outline: 0;
+    background: rgb(227 189 98 / 20%);
+    box-shadow: inset 0 0 12px rgb(255 224 133 / 65%);
+}
+
+.grid button > img,
+.grid button > span:first-child {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.grid button > strong {
+    position: absolute;
+    right: 2px;
+    bottom: 0;
+    color: #fff0b2;
+    text-shadow: 0 1px 2px #000;
+}
+
+.tooltip {
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 50%;
+    display: none;
+    width: 190px;
+    padding: 6px;
+    border: 1px solid #887755;
+    color: #ddd0aa;
+    background: rgb(21 16 10 / 96%);
+    font: 11px/1.25 Arial, sans-serif;
+    text-align: left;
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+
+.tooltip b { display: block; color: #f1d58c; }
+.grid button:hover .tooltip,
+.grid button:focus-visible .tooltip { display: block; }
+
+.stackDialog {
+    position: absolute;
+    top: 42%;
+    left: 50%;
+    z-index: 7;
+    display: grid;
+    width: 245px;
+    height: 140px;
+    padding: 20px 18px 12px;
+    box-sizing: border-box;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    transform: translate(-50%, -50%);
+}
+
+.stackDialog > img {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    width: 100%;
+    height: 100%;
+}
+
+.stackDialog > strong,
+.stackDialog > label { grid-column: 1 / -1; text-align: center; }
+.stackDialog input { width: 4rem; }
+.stackDialog button { border: 1px solid #6d5025; background: #c2a367; font: inherit; cursor: pointer; }
+
+.takeAll {
+    position: absolute;
+    right: 12%;
+    bottom: 4.5%;
+    z-index: 3;
+    min-width: 13rem;
+    height: 6%;
+    border: 1px solid #654719;
+    color: #2c1805;
+    background: #c5a566;
+    font: 700 clamp(12px, 1.4vw, 18px)/1 ZlatoPalatino, serif;
+    cursor: pointer;
+}
+
+.close {
+    position: absolute;
+    right: 2.83203125%;
+    bottom: .78125%;
+    z-index: 4;
+    width: 7.32421875%;
+    height: 8.8541667%;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+.close:hover,
+.close:focus-visible { background: url('/assets/engineres/trade/exitl.bmp') center / 100% 100% no-repeat; outline: 0; }
+.close:active { background-image: url('/assets/engineres/trade/exit.bmp'); }
+
+.error {
+    position: absolute;
+    bottom: 11%;
+    left: 50%;
+    z-index: 8;
+    color: #ffd1bf;
+    background: rgb(55 10 5 / 90%);
+    transform: translateX(-50%);
+}

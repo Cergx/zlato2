@@ -18,36 +18,32 @@ export class CSXParser {
         return value;
     }
 
-    private readBGRA(): [number, number, number, number] {
+    private readBGRA(magentaTransparent: boolean): [number, number, number, number] {
         const b = this.readByte();
         const g = this.readByte();
         const r = this.readByte();
-        const a = this.readByte(); // alpha инвертирован
+        const a = this.readByte();
 
-        // если цвет - magenta - делаем прозрачным
-        // if (r > 253 && g < 2 && b > 252) {
-        //     a = 255;
-        // }
-
-        return [r, g, b, 255 - a];
+        const isMagenta = r > 253 && g < 2 && b > 252;
+        const alpha = magentaTransparent && isMagenta ? 0 : 255 - a;
+        return [r, g, b, alpha];
     }
 
-    public parse(isBackgroundTransparent: boolean): HTMLCanvasElement {
+    public parse(isBackgroundTransparent: boolean, magentaTransparent: boolean = true): HTMLCanvasElement {
         // Читаем количество цветов в палитре
         const colorCount = this.readInt();
-        const fillColor = this.readBGRA();
+        const fillColor = this.readBGRA(magentaTransparent);
         if (isBackgroundTransparent) fillColor[3] = 0;
 
         // Читаем палитру цветов
         const colors: [number, number, number, number][] = [];
         for (let i = 0; i < colorCount; i++) {
-            colors.push(this.readBGRA());
+            colors.push(this.readBGRA(magentaTransparent));
         }
 
         // Читаем размеры изображения
         const width = this.readInt();
         const height = this.readInt();
-
         // Читаем индексы строк пикселей
         const byteLineIndices: number[] = [];
         for (let i = 0; i < height + 1; i++) {

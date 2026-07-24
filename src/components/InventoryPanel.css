@@ -1,0 +1,357 @@
+.inventory-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    overflow: hidden;
+    color: #211407;
+    font-family: ZlatoPalatino, "Palatino Linotype", serif;
+    font-size: clamp(9px, 1.15vw, 16px);
+    user-select: none;
+}
+
+.inventory-panel-background {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    pointer-events: none;
+}
+
+.inventory-view-tab {
+    position: absolute;
+    top: 0;
+    z-index: 5;
+    height: 5.99%;
+    border: 0;
+    color: #24180c;
+    background: transparent;
+    font: 700 clamp(11px, 1.35vw, 18px) ZlatoPalatino, "Palatino Linotype", serif;
+    text-shadow: 0 1px rgb(255 239 190 / 55%);
+    cursor: pointer;
+}
+
+.inventory-view-characteristics { left: 27.34375%; width: 35.9375%; }
+.inventory-view-skills { left: 63.8671875%; width: 35.15625%; }
+
+.inventory-view-tab:focus-visible {
+    outline: 2px solid rgb(226 193 112 / 75%);
+    outline-offset: -4px;
+}
+
+.inventory-character-name {
+    position: absolute;
+    top: 1.1%;
+    left: 1.2%;
+    z-index: 4;
+    width: 24.8%;
+    text-align: center;
+    font-size: 1.08em;
+    font-weight: 700;
+    line-height: 2;
+    text-shadow: 0 1px rgb(255 239 190 / 55%);
+}
+.inventory-secondary-heading {
+    position: absolute;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    color: #211407;
+    font-size: .84em;
+    font-weight: 700;
+    line-height: 1;
+    text-align: center;
+    text-shadow: 0 1px rgb(255 239 190 / 55%);
+}
+
+
+.inventory-secondary-field {
+    position: absolute;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-sizing: border-box;
+    padding: 0 .45em;
+    font-size: .78em;
+    line-height: 1;
+    text-shadow: 0 1px rgb(238 209 144 / 45%);
+}
+
+.inventory-secondary-field strong {
+    margin-left: .5em;
+    font-size: 1.05em;
+}
+
+.inventory-progression-row {
+    position: absolute;
+    z-index: 2;
+    display: grid;
+    align-items: center;
+    line-height: 1;
+    text-shadow: 0 1px rgb(238 209 144 / 45%);
+}
+
+.inventory-progression-row.inventory-characteristic {
+    grid-template-columns: minmax(0, 1fr) 26px 37px 26px;
+}
+
+.inventory-progression-row.inventory-skill {
+    grid-template-columns: minmax(0, 1fr) 24px 34px 24px;
+    font-size: .76em;
+}
+
+.inventory-progression-row > span {
+    overflow: hidden;
+    padding-left: 2px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.inventory-progression-row > strong {
+    text-align: center;
+}
+
+.inventory-stat-minus,
+.inventory-stat-plus {
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+.inventory-stat-minus img,
+.inventory-stat-plus img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    image-rendering: auto;
+    pointer-events: none;
+}
+
+.inventory-stat-minus:active img,
+.inventory-stat-plus:active img,
+.inventory-stat-minus:focus-visible img,
+.inventory-stat-plus:focus-visible img {
+    opacity: 1;
+}
+
+.inventory-stat-minus:disabled,
+.inventory-stat-plus:disabled {
+    cursor: default;
+}
+
+.inventory-person-points,
+.inventory-skill-points {
+    position: absolute;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: #27170a;
+    font-weight: 700;
+}
+
+.inventory-person-points {
+    left: 1.95%;
+    top: 33.2%;
+    width: 23.1%;
+    height: 3.1%;
+}
+
+.inventory-skill-points {
+    left: 77.9%;
+    top: 78.4%;
+    width: 20.4%;
+    height: 3.1%;
+    font-size: .78em;
+}
+
+
+.inventory-puppet {
+    position: absolute;
+    left: .78125%;
+    top: 38.5417%;
+    z-index: 1;
+    width: 26.3672%;
+    height: 41.6667%;
+}
+
+.inventory-equipment-slot,
+.inventory-item {
+    padding: 2px;
+    border: 1px solid transparent;
+    background: transparent;
+    cursor: pointer;
+}
+
+.inventory-equipment-slot {
+    position: absolute;
+    z-index: 3;
+}
+
+.inventory-equipment-slot:focus-visible,
+.inventory-item:focus-visible {
+    border-color: rgba(227, 190, 92, 0.9);
+    outline: 1px solid #e3be5c;
+}
+
+.inventory-panel .inventory-item-image {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    image-rendering: auto;
+    pointer-events: none;
+}
+
+.inventory-equipment-slot:hover,
+.inventory-equipment-slot:focus-visible,
+.inventory-item:hover,
+.inventory-item:focus-visible {
+    z-index: 6;
+}
+
+.inventory-panel .inventory-selection {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 2;
+    width: 108%;
+    height: 108%;
+    opacity: 0;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+}
+
+.inventory-equipment-slot:hover .inventory-selection,
+.inventory-equipment-slot:focus-visible .inventory-selection,
+.inventory-item:hover .inventory-selection,
+.inventory-item:focus-visible .inventory-selection {
+    opacity: 1;
+}
+
+.inventory-item-popup {
+    position: absolute;
+    bottom: calc(100% + 7px);
+    left: 50%;
+    z-index: 8;
+    display: none;
+    min-width: max-content;
+    max-width: 220px;
+    padding: 5px 8px;
+    border: 1px solid #8f8569;
+    color: #e5d8b3;
+    background: linear-gradient(rgb(38 35 29 / 96%), rgb(12 11 9 / 96%));
+    box-shadow: inset 0 0 0 1px #29251e, 0 3px 8px rgb(0 0 0 / 75%);
+    font: 11px/1.25 ZlatoPalatino, "Palatino Linotype", serif;
+    text-align: left;
+    text-shadow: 0 1px #000;
+    white-space: normal;
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+
+.inventory-item-popup strong,
+.inventory-item-popup span {
+    display: block;
+}
+
+.inventory-item-popup span {
+    margin-top: 2px;
+    color: #bcb194;
+}
+
+.inventory-item-popup em {
+    display: block;
+    color: #c8a868;
+    font-style: normal;
+    text-transform: capitalize;
+}
+
+.inventory-equipment-slot:hover .inventory-item-popup,
+.inventory-equipment-slot:focus-visible .inventory-item-popup,
+.inventory-item:hover .inventory-item-popup,
+.inventory-item:focus-visible .inventory-item-popup {
+    display: block;
+}
+
+.inventory-bag {
+    position: absolute;
+    left: 13.4766%;
+    top: 90.625%;
+    z-index: 2;
+    display: grid;
+    width: 71.2891%;
+    height: 8.59375%;
+    grid-template-columns: repeat(12, 1fr);
+    gap: .15%;
+}
+
+.inventory-item {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+}
+
+.inventory-error {
+    position: absolute;
+    right: 10%;
+    top: 9%;
+    z-index: 8;
+    max-width: 35%;
+    padding: 5px 8px;
+    border: 1px solid #9c564c;
+    color: #f2d5bf;
+    background: rgb(50 8 5 / 92%);
+}
+
+.inventory-quantity {
+    position: absolute;
+    right: 2px;
+    bottom: 0;
+    padding: 0 2px;
+    border-radius: 2px;
+    color: #fff2bf;
+    background: rgba(25, 12, 3, 0.82);
+    font: 700 clamp(9px, 1vw, 13px) Arial, sans-serif;
+    text-shadow: 0 1px #000;
+}
+
+.inventory-drop,
+.inventory-close {
+    position: absolute;
+    z-index: 4;
+    padding: 0;
+    border: 0;
+    background-color: transparent;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    cursor: pointer;
+}
+
+.inventory-drop {
+    left: 1.8555%;
+    top: 89.84375%;
+    width: 7.9102%;
+    height: 9.7656%;
+    background-image: url('/assets/engineres/newinv/drop.bmp');
+}
+
+.inventory-close {
+    left: 89.84375%;
+    top: 90.3646%;
+    width: 7.3242%;
+    height: 8.8542%;
+    background-image: url('/assets/engineres/newinv/exit.bmp');
+}
+
+.inventory-drop:disabled {
+    opacity: .45;
+    cursor: default;
+}

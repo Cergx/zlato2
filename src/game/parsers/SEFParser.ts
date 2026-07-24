@@ -1,20 +1,19 @@
-import parseEngineObject from "./engineObjectParser.ts";
+import parseEngineObject, { isParsedData, isParsedDataArray } from "./engineObjectParser.ts";
+import type { ParsedData, ParsedValue } from "./engineObjectParser.ts";
 
-/** Общий тип для координат в тайлах */
 export interface TilePosition {
     x: number;
     y: number;
 }
 
-export type Direction = 'LEFT' | 'RIGHT' | 'UP' | 'DOWN' | 'UP_LEFT' | 'UP_RIGHT' | 'DOWN_LEFT' | 'DOWN_RIGHT';
+export type Direction = "LEFT" | "RIGHT" | "UP" | "DOWN" | "UP_LEFT" | "UP_RIGHT" | "DOWN_LEFT" | "DOWN_RIGHT";
+export type RouteType = "STAY" | "RANDOM_RADIUS" | "STAY_ROTATE" | "MOVED_FLIP" | "MOVED" | "RANDOM";
 
-export type RouteType = 'STAY' | 'RANDOM_RADIUS' | 'STAY_ROTATE' | 'MOVED_FLIP' | 'MOVED' | 'RANDOM';
-
-/** NPC (персонажи) */
 export interface SEFPerson {
+    name: string;
     position: TilePosition;
     literaryName?: number;
-    literaryNameString?: string;
+    literaryLabel?: string;
     direction: Direction;
     routeType?: RouteType;
     route?: string;
@@ -26,13 +25,12 @@ export interface SEFPerson {
     scriptInventory?: string;
 }
 
-/** Входные точки */
 export interface SEFEntrancePoint {
+    name: string;
     direction: Direction;
     position: TilePosition;
 }
 
-/** Входные точки */
 export interface SEFDoor {
     cellsName: string;
     literaryNameClosed: number;
@@ -40,15 +38,11 @@ export interface SEFDoor {
     isOpened?: boolean;
 }
 
-/** Группы клеток (ключ - название группы, значение - массив позиций) */
-export interface SEFCellGroups {
-    [groupName: string]: TilePosition[];
-}
+export type SEFCellGroups = Record<string, TilePosition[]>;
 
-/** Триггеры */
 export interface SEFTrigger {
+    name: string;
     literaryName?: number;
-    literaryNameString?: string;
     cursorName?: string;
     scriptName?: string;
     inventoryName?: string;
@@ -58,18 +52,17 @@ export interface SEFTrigger {
     isTransition?: boolean;
 }
 
-/** Основная структура данных SEF */
 export interface SEFData {
     version?: number;
     pack: string;
     internalLocation?: boolean;
     exitToGlobalMap?: boolean;
     weather?: number;
-    persons: Record<string, SEFPerson>;
+    persons: SEFPerson[];
     doors: Record<string, SEFDoor>;
-    entrancePoints: Record<string, SEFEntrancePoint>;
+    entrancePoints: SEFEntrancePoint[];
     cellGroups: SEFCellGroups;
-    triggers: Record<string, SEFTrigger>;
+    triggers: SEFTrigger[];
 }
 
 export class SEFParser {
@@ -79,225 +72,142 @@ export class SEFParser {
         this.data = this.mapToSEFData(parseEngineObject(sefText));
     }
 
-    private mapToSEFData(raw: any): SEFData {
-        // Создаём заготовку
+    private mapToSEFData(raw: ParsedData): SEFData {
         const result: SEFData = {
-            version: raw.version ?? undefined,
-            pack: (raw.pack ?? "").toLowerCase(),
+            version: typeof raw.version === "number" ? raw.version : undefined,
+            pack: typeof raw.pack === "string" ? raw.pack.toLowerCase() : "",
             internalLocation: raw.internal_location === 1,
             exitToGlobalMap: raw.exit_to_globalmap === 1,
             weather: typeof raw.weather === "number" ? raw.weather : undefined,
-            persons: {},
+            persons: [],
             doors: {},
-            entrancePoints: {},
+            entrancePoints: [],
             cellGroups: {},
-            triggers: {}
+            triggers: [],
         };
 
-        // --- Мапим person-ов
-        if (raw.persons && typeof raw.persons === "object") {
-            for (const [personName, personData] of Object.entries(raw.persons)) {
-                result.persons[personName] = this.mapPersonData(personData);
+        if (isParsedData(raw.persons)) {
+            for (const [name, person] of this.expandNamedEntries(raw.persons)) {
+                result.persons.push(this.mapPersonData(name, person));
             }
         }
-
-        // --- Мапим входные точки (points_entrance)
-        if (raw.points_entrance && typeof raw.points_entrance === "object") {
-            for (const [pointName, pointData] of Object.entries(raw.points_entrance)) {
-                result.entrancePoints[pointName] = this.mapEntrancePoint(pointData);
+        if (isParsedData(raw.points_entrance)) {
+            for (const [name, point] of this.expandNamedEntries(raw.points_entrance)) {
+                result.entrancePoints.push(this.mapEntrancePoint(name, point));
             }
         }
-
-        // --- Мапим cell_groups
-        if (raw.cell_groups && typeof raw.cell_groups === "object") {
-            result.cellGroups = this.mapCellGroups(raw.cell_groups);
-        }
-
-        // --- Мапим триггеры
-        if (raw.triggers && typeof raw.triggers === "object") {
-            for (const [triggerName, triggerData] of Object.entries(raw.triggers)) {
-                result.triggers[triggerName] = this.mapTriggerData(triggerData);
+        if (isParsedData(raw.cell_groups)) result.cellGroups = this.mapCellGroups(raw.cell_groups);
+        if (isParsedData(raw.triggers)) {
+            for (const [name, trigger] of this.expandNamedEntries(raw.triggers)) {
+                result.triggers.push(this.mapTriggerData(name, trigger));
             }
         }
-
-        // --- Мапим двери
-        if (raw.doors && typeof raw.doors === "object") {
-            for (const [doorName, doorData] of Object.entries(raw.doors)) {
-                result.doors[doorName] = this.mapDoorData(doorData);
+        if (isParsedData(raw.doors)) {
+            for (const [name, door] of this.expandNamedEntries(raw.doors)) {
+                if (result.doors[name]) throw new Error(`Duplicate door ${name}`);
+                result.doors[name] = this.mapDoorData(door);
             }
         }
 
         return result;
     }
 
-    private mapPersonData(rawPerson: any): SEFPerson {
-        const person: SEFPerson = {
-            position: { x: 0, y: 0 },
-            direction: "DOWN"
-        };
-
-        // position может быть массивом [x, y]
-        if (Array.isArray(rawPerson.position) && rawPerson.position.length === 2) {
-            person.position = {
-                x: Number(rawPerson.position[0]) || 0,
-                y: Number(rawPerson.position[1]) || 0
-            };
-        }
-
-        // direction
-        if (rawPerson.direction) {
-            person.direction = this.normalizeDirection(rawPerson.direction);
-        }
-
-        // literary_name => literaryName (число)
-        if (typeof rawPerson.literary_name === "number") {
-            person.literaryName = rawPerson.literary_name;
-        }
-
-        // route_type => routeType
-        if (rawPerson.route_type) {
-            person.routeType = this.normalizeRouteType(rawPerson.route_type);
-        }
-
-        // route
-        if (typeof rawPerson.route === "string") {
-            person.route = rawPerson.route;
-        }
-
-        // radius
-        if (typeof rawPerson.radius === "number") {
-            person.radius = rawPerson.radius;
-        }
-
-        // delay_min => delayMin
-        if (typeof rawPerson.delay_min === "number") {
-            person.delayMin = rawPerson.delay_min;
-        }
-
-        // delay_max => delayMax
-        if (typeof rawPerson.delay_max === "number") {
-            person.delayMax = rawPerson.delay_max;
-        }
-
-        // tribe
-        if (typeof rawPerson.tribe === "string") {
-            person.tribe = rawPerson.tribe;
-        }
-
-        // scr_dialog => scriptDialog
-        if (typeof rawPerson.scr_dialog === "string") {
-            person.scriptDialog = rawPerson.scr_dialog;
-        }
-
-        // scr_inv => scriptInventory
-        if (typeof rawPerson.scr_inv === "string") {
-            person.scriptInventory = rawPerson.scr_inv;
-        }
-
+    private mapPersonData(name: string, rawPerson: ParsedData): SEFPerson {
+        const person: SEFPerson = { name, position: this.readPosition(rawPerson.position), direction: "DOWN" };
+        if (typeof rawPerson.literary_name === "number") person.literaryName = rawPerson.literary_name;
+        if (typeof rawPerson.direction === "string") person.direction = this.normalizeDirection(rawPerson.direction);
+        if (typeof rawPerson.route_type === "string") person.routeType = this.normalizeRouteType(rawPerson.route_type);
+        if (typeof rawPerson.route === "string") person.route = rawPerson.route;
+        if (typeof rawPerson.radius === "number") person.radius = rawPerson.radius;
+        if (typeof rawPerson.delay_min === "number") person.delayMin = rawPerson.delay_min;
+        if (typeof rawPerson.delay_max === "number") person.delayMax = rawPerson.delay_max;
+        if (typeof rawPerson.tribe === "string") person.tribe = rawPerson.tribe;
+        if (typeof rawPerson.scr_dialog === "string") person.scriptDialog = rawPerson.scr_dialog;
+        if (typeof rawPerson.scr_inv === "string") person.scriptInventory = rawPerson.scr_inv;
         return person;
     }
 
-    private mapEntrancePoint(rawPoint: any): SEFEntrancePoint {
-        const entrancePoint: SEFEntrancePoint = {
-            direction: "DOWN",
-            position: { x: 0, y: 0 }
+    private mapEntrancePoint(name: string, rawPoint: ParsedData): SEFEntrancePoint {
+        return {
+            name,
+            position: this.readPosition(rawPoint.position),
+            direction: typeof rawPoint.direction === "string" ? this.normalizeDirection(rawPoint.direction) : "DOWN",
         };
-
-        if (Array.isArray(rawPoint.position) && rawPoint.position.length === 2) {
-            entrancePoint.position = {
-                x: Number(rawPoint.position[0]) || 0,
-                y: Number(rawPoint.position[1]) || 0
-            };
-        }
-
-        if (rawPoint.direction) {
-            entrancePoint.direction = this.normalizeDirection(rawPoint.direction);
-        }
-
-        return entrancePoint;
     }
 
-    private mapCellGroups(rawGroups: any): SEFCellGroups {
-        const result: SEFCellGroups = {};
-
-        for (const [groupName, groupData] of Object.entries(rawGroups)) {
-            const positions: TilePosition[] = [];
-            if (groupData && typeof groupData === "object") {
-                // Для каждого cell_XX
-                for (const cellKey of Object.keys(groupData)) {
-                    const maybePos = groupData[cellKey];
-                    if (Array.isArray(maybePos) && maybePos.length === 2) {
-                        const [x, y] = maybePos;
-                        positions.push({ x, y });
-                    }
-                }
-            }
-            result[groupName] = positions;
+    private mapCellGroups(rawGroups: ParsedData): SEFCellGroups {
+        const groups: SEFCellGroups = {};
+        for (const [name, group] of this.expandNamedEntries(rawGroups)) {
+            groups[name] = Object.values(group).map((value) => this.readPosition(value));
         }
+        return groups;
+    }
 
+    private mapTriggerData(name: string, rawTrigger: ParsedData): SEFTrigger {
+        const trigger: SEFTrigger = { name };
+        if (typeof rawTrigger.literary_name === "number") trigger.literaryName = rawTrigger.literary_name;
+        if (typeof rawTrigger.cursor_name === "string") trigger.cursorName = rawTrigger.cursor_name;
+        if (typeof rawTrigger.script_name === "string") trigger.scriptName = rawTrigger.script_name;
+        if (typeof rawTrigger.inv_name === "string") trigger.inventoryName = rawTrigger.inv_name;
+        if (typeof rawTrigger.cells_name === "string") trigger.cellsName = rawTrigger.cells_name;
+        if (rawTrigger.is_active !== undefined) trigger.isActive = Boolean(rawTrigger.is_active);
+        if (rawTrigger.is_visible !== undefined) trigger.isVisible = Boolean(rawTrigger.is_visible);
+        if (rawTrigger.is_transition !== undefined) trigger.isTransition = Boolean(rawTrigger.is_transition);
+        return trigger;
+    }
+
+    private mapDoorData(rawDoor: ParsedData): SEFDoor {
+        return {
+            cellsName: typeof rawDoor.cells_name === "string" ? rawDoor.cells_name : "",
+            literaryNameClosed: typeof rawDoor.literary_name_close === "number" ? rawDoor.literary_name_close : -1,
+            literaryNameOpened: typeof rawDoor.literary_name_open === "number" ? rawDoor.literary_name_open : -1,
+            isOpened: rawDoor.is_opened === undefined ? undefined : Boolean(rawDoor.is_opened),
+        };
+    }
+
+    private expandNamedEntries(entries: ParsedData): Array<[string, ParsedData]> {
+        const result: Array<[string, ParsedData]> = [];
+        for (const [name, value] of Object.entries(entries)) {
+            if (isParsedData(value)) {
+                result.push([name, value]);
+            } else if (isParsedDataArray(value)) {
+                for (const entry of value) result.push([name, entry]);
+            }
+        }
         return result;
     }
 
-    private mapTriggerData(rawTrigger: any): SEFTrigger {
-        const trigger: SEFTrigger = {};
-
-        if (typeof rawTrigger.literary_name === "number") {
-            trigger.literaryName = rawTrigger.literary_name;
+    private readPosition(value: ParsedValue | undefined): TilePosition {
+        if (Array.isArray(value) && value.length === 2 && value.every((entry) => typeof entry === "number")) {
+            return { x: value[0], y: value[1] };
         }
-        if (typeof rawTrigger.cursor_name === "string") {
-            trigger.cursorName = rawTrigger.cursor_name;
-        }
-        if (typeof rawTrigger.script_name === "string") {
-            trigger.scriptName = rawTrigger.script_name;
-        }
-        if (typeof rawTrigger.inv_name === "string") {
-            trigger.inventoryName = rawTrigger.inv_name;
-        }
-        if (typeof rawTrigger.cells_name === "string") {
-            trigger.cellsName = rawTrigger.cells_name;
-        }
-        if (rawTrigger.is_active !== undefined) {
-            trigger.isActive = !!rawTrigger.is_active;
-        }
-        if (rawTrigger.is_visible !== undefined) {
-            trigger.isVisible = !!rawTrigger.is_visible;
-        }
-        if (rawTrigger.is_transition !== undefined) {
-            trigger.isTransition = !!rawTrigger.is_transition;
-        }
-
-        return trigger;
+        return { x: 0, y: 0 };
     }
 
-    private mapDoorData(rawDoor: any): SEFDoor {
-        const trigger: SEFDoor = {
-            cellsName: '',
-            literaryNameClosed: -1,
-            literaryNameOpened: -1
-        };
-
-        if (typeof rawDoor.literary_name_close === "number") {
-            trigger.literaryNameClosed = rawDoor.literary_name_close;
+    private normalizeDirection(value: string): Direction {
+        switch (value) {
+            case "LEFT": return "LEFT";
+            case "RIGHT": return "RIGHT";
+            case "UP": return "UP";
+            case "DOWN": return "DOWN";
+            case "UP_LEFT": return "UP_LEFT";
+            case "UP_RIGHT": return "UP_RIGHT";
+            case "DOWN_LEFT": return "DOWN_LEFT";
+            case "DOWN_RIGHT": return "DOWN_RIGHT";
+            default: return "DOWN";
         }
-        if (typeof rawDoor.literary_name_open === "number") {
-            trigger.literaryNameOpened = rawDoor.literary_name_open;
-        }
-        if (typeof rawDoor.cells_name === "string") {
-            trigger.cellsName = rawDoor.cells_name;
-        }
-        if (rawDoor.is_opened !== undefined) {
-            trigger.isOpened = !!rawDoor.is_opened;
-        }
-
-        return trigger;
     }
 
-    private normalizeDirection(direction: string): Direction {
-        return direction as Direction;
-    }
-
-    private normalizeRouteType(route: string): RouteType {
-        return route as RouteType;
+    private normalizeRouteType(value: string): RouteType | undefined {
+        switch (value) {
+            case "STAY": return "STAY";
+            case "RANDOM_RADIUS": return "RANDOM_RADIUS";
+            case "STAY_ROTATE": return "STAY_ROTATE";
+            case "MOVED_FLIP": return "MOVED_FLIP";
+            case "MOVED": return "MOVED";
+            case "RANDOM": return "RANDOM";
+            default: return undefined;
+        }
     }
 
     public getData(): SEFData {

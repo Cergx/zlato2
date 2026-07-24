@@ -15,6 +15,12 @@ export const Paths = {
     SOUNDS: `${AssetsBase}/sounds`,
     WEAR: `${AssetsBase}/wear`,
 
+    PERSON_PAD: (resource: string) => `${Paths.PERSONS}/${resource}/${resource}.pad`,
+    PERSON_ANIMATION: (resource: string, animation: string) => `${Paths.PERSONS}/${resource}/animation/${animation}`,
+    PERSON_SCRIPT: (name: string) => `${Paths.SCRIPTS}/persons/${name.toLowerCase()}.scr`,
+    HERO_HAD: `${AssetsBase}/wear/noweapon_thrw/noweapon_thrw.had`,
+    HERO_ANIMATION: (animation: string) => `${AssetsBase}/wear/noweapon_thrw/animation/${animation}`,
+
     LEVEL_SDB: (level: string, levelType: GameMode) => `${Paths.LEVELS}/${levelType}/${level}/${level}.sdb`,
     LEVEL_SEF: (level: string, levelType: GameMode) => `${Paths.LEVELS}/${levelType}/${level}/${level}.sef`,
     LEVEL_SCRIPT: (level: string, levelType: GameMode, scriptFileName: string) => `${Paths.LEVELS}/${levelType}/${level}/scripts/${scriptFileName}`,

@@ -1,0 +1,20 @@
+.layer {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.strip {
+    position: absolute;
+    overflow: hidden;
+}
+
+.strip img {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-width: none;
+    image-rendering: auto;
+    will-change: transform;
+}

@@ -1,15 +1,69 @@
 .gameWindow {
-    width: min-content;
-    height: min-content;
     position: relative;
-    display: flex;
-    justify-content: center;
-    align-items: center;
+    width: min(100vw, calc(100vh * 4 / 3));
+    height: min(100vh, calc(100vw * 3 / 4));
+    overflow: hidden;
     background-color: black;
-    justify-self: center;
-    align-self: center;
+    box-shadow: 0 0 40px #000;
 }
 
 .gameWindow canvas {
-    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.gameWindow .weather {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+}
+
+.dialogue {
+    position: absolute;
+    right: 2%;
+    bottom: 18%;
+    left: 2%;
+    z-index: 10;
+    margin-inline: auto;
+}
+
+.finished {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    display: grid;
+    place-content: center;
+    color: #ead8a9;
+    text-align: center;
+    text-shadow: 0 2px 4px black;
+    background: rgb(0 0 0 / 78%);
+}
+
+.finished h2 {
+    margin: 0;
+    font-size: 3rem;
+}
+
+.finished p {
+    margin: 0.5rem 0 0;
+    font-size: 1.5rem;
+}
+
+.runtimeError {
+    @extend .finished;
+    padding: 2rem;
+    color: #ffd0c8;
+}
+
+.runtimeError h2 {
+    margin: 0;
+    font-size: 2rem;
+}
+
+.runtimeError p {
+    max-width: 50rem;
+    margin: 0.75rem 0 0;
+    overflow-wrap: anywhere;
+    font-size: 1.125rem;
 }

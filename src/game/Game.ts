@@ -1,26 +1,158 @@
 import { Level } from "./Level";
 import { GameMode } from "../constants/levels.ts";
+import { Paths } from "../constants/paths.ts";
+import { AGEParser } from "./parsers/AGEParser.ts";
+import { SDBParser, type SDBData } from "./parsers/SDBParser.ts";
+import {
+    DialogueRuntime,
+    type DialogueFunctionCall,
+    type DialogueState,
+    type DialogueValue,
+} from "./dialogue/DialogueRuntime.ts";
+import {
+    LocalStorageAdapter,
+    PersistenceRuntime,
+    createSaveData,
+    type GameSaveData,
+} from "./PersistenceRuntime.ts";
+import {
+    GOLDEN_LAND_WORLD_MAP_LOCATIONS,
+    WorldMapRuntime,
+    type WorldMapLocationState,
+    type WorldMapLocation,
+
+    type WorldMapTravelLink,
+} from "./WorldMapRuntime.ts";
+import { parseInventoryScript, materializeInventory } from "./parsers/INVParser.ts";
+import {
+    ShippedItemCatalog,
+    itemClassCanBeUsed,
+    loadShippedItemCatalog,
+    type HeroInventoryItemView,
+    type HeroInventoryView,
+} from "./ItemCatalogRuntime.ts";
+import type { EquipmentSlot } from "./systems/Items.ts";
+import { EQUIPPED_INVENTORY_OWNER } from "./GameStateRuntime.ts";
+import type { GameRuntimeSnapshot } from "./GameStateRuntime.ts";
+import type { CursorType } from "../enums/CursorTypes.ts";
+import { createBrowserAudio, resolveLevelAudioUrl, type BrowserAudio } from "./AudioWeatherRuntime.ts";
+import { parseHeroProfiles, selectHeroProfile, type HeroProfile } from "./HeroProfileRuntime.ts";
+
+const HERO_CHARACTERISTICS = new Set([
+    "strength", "constitution", "dexterity", "perception", "intelligence", "wisdom", "luck",
+]);
+
+
+
+const dialogueAssetUrls = import.meta.glob("/public/assets/scripts/dialogs/**/*.age.cs", {
+    eager: true,
+    import: "default",
+    query: "?url",
+}) as Record<string, string>;
+
+const normalizedDialogueAssets = new Map<string, string>();
+const dialogueBasenames = new Map<string, string | null>();
+for (const [path, url] of Object.entries(dialogueAssetUrls)) {
+    const relative = path.replace(/^.*\/scripts\/dialogs\//i, "").toLowerCase();
+    normalizedDialogueAssets.set(relative, url);
+    const basename = relative.slice(relative.lastIndexOf("/") + 1);
+    dialogueBasenames.set(basename, dialogueBasenames.has(basename) ? null : url);
+}
+
+
+// The shipped scripts expose locations but no serialized road table. The web host
+// therefore permits direct zero-cost travel and derives elapsed time from map distance.
+const createWorldMapLinks = (locations: readonly WorldMapLocation[]): readonly WorldMapTravelLink[] => locations.flatMap((from) =>
+    locations
+        .filter((to) => to.id !== from.id)
+        .map((to) => ({
+            from: from.id,
+            to: to.id,
+            cost: 0,
+            duration: Math.max(1, Math.round(Math.hypot(to.position.x - from.position.x, to.position.y - from.position.y) / 100)),
+        })),
+);
+
+
+export interface GameEvents {
+    onDialogueStateChange?: (state: DialogueState) => void;
+    onWorldMapStateChange?: (locations: readonly WorldMapLocationState[] | null) => void;
+    onLevelChanged?: (gameMode: GameMode, levelName: string) => void;
+    onError?: (error: unknown) => void;
+    onGameFinished?: (ending: number) => void;
+    onCursorChange?: (cursor: CursorType) => void;
+    onLoadingStateChange?: (loading: boolean, levelName: string) => void;
+    onCombatModeChange?: (active: boolean) => void;
+    onContainerOpen?: (owner: string, title: string) => void;
+    onTradeRequest?: (owner: string, title: string) => void;
+}
 
 export class Game {
-    private canvas: HTMLCanvasElement;
-    private ctx: CanvasRenderingContext2D | null;
+    private readonly ctx: CanvasRenderingContext2D | null;
+    private readonly dialogue: DialogueRuntime;
+    private readonly persistence = new PersistenceRuntime(new LocalStorageAdapter(window.localStorage));
     private level: Level | null = null;
+    private worldMap: WorldMapRuntime | null = null;
     private gameLoopActive = false;
+    private stopped = false;
+    private levelChangeGeneration = 0;
+    private dialoguePhrasesPromise: Promise<SDBData> | null = null;
+    private dialoguePhrases: SDBData | null = null;
+    private dialogueVoice: BrowserAudio | null = null;
+    private itemCatalogPromise: Promise<ShippedItemCatalog> | null = null;
+    private heroProfilePromise: Promise<HeroProfile> | null = null;
+    private currentWorldMapLocation: string | null = null;
+    private combatMode = false;
+    private dialogueSpeakerTechnical: string | null = null;
 
-    constructor(canvas: HTMLCanvasElement) {
-        this.canvas = canvas;
+
+
+    constructor(private readonly canvas: HTMLCanvasElement, private readonly events: GameEvents = {}) {
         this.ctx = canvas.getContext("2d");
+        if (!this.ctx) throw new Error("Не удалось получить контекст `2d`");
 
-        if (!this.ctx) {
-            throw new Error("Не удалось получить контекст `2d`");
-        }
+        this.dialogue = new DialogueRuntime({
+            resolvePhrase: (phraseId) => this.dialoguePhrases?.[phraseId] ?? `#${phraseId}`,
+            readVariable: (name) => {
+                if (name.toLowerCase() === "heroname") return "Герой";
+                const value = this.level?.getRuntime().getVariable(name);
+                return typeof value === "boolean" ? (value ? 1 : 0) : value;
+            },
+            writeVariable: (name, value) => this.level?.getRuntime().setVariable(name, value),
+            invokeFunction: (call) => this.invokeDialogueFunction(call),
+            onStateChange: (state) => {
+                if (state.status !== "active") this.stopDialogueVoice();
+                this.events.onDialogueStateChange?.(state);
+            },
+
+        });
     }
 
-    public async start(gameMode: GameMode, levelName: string) {
-        console.log(`Запуск игры: режим ${gameMode}, уровень ${levelName}`);
+    public async start(gameMode: GameMode, levelName: string, entranceName?: string) {
+        this.events.onLoadingStateChange?.(true, levelName);
 
-        this.level = new Level(this.canvas);
-        await this.level.loadLevel(gameMode, levelName);
+        this.stopped = false;
+        console.log(`Запуск игры: режим ${gameMode}, уровень ${levelName}`);
+        this.level = new Level(this.canvas, {
+            onLoadArea: (request) => void this.changeLevel(request.gameMode, request.level, request.entrance).catch((error) => this.reportError(error)),
+            onGlobalMap: () => this.openWorldMap(),
+            onDialog: (arguments_) => void this.openDialogue(arguments_).catch((error) => this.reportError(error)),
+            onFinished: (ending) => this.events.onGameFinished?.(ending),
+            onCursorChange: (cursor) => this.events.onCursorChange?.(cursor),
+            onContainerOpen: (owner, triggerName) => this.events.onContainerOpen?.(owner, triggerName),
+            onTrade: () => void this.openCurrentTrade().catch((error) => this.reportError(error)),
+        });
+        const heroProfile = await this.loadHeroProfile();
+        this.level.initializeHeroProfile(heroProfile.parameters, heroProfile.experience);
+
+        await this.level.loadLevel(gameMode, levelName, entranceName);
+
+        this.level.setCombatMode(this.combatMode);
+        await this.initializeHeroInventory();
+        if (this.stopped) return;
+        this.events.onLevelChanged?.(gameMode, levelName);
+        this.rememberWorldMapLocation(levelName);
+        this.events.onLoadingStateChange?.(false, levelName);
 
         this.gameLoopActive = true;
         this.gameLoop();
@@ -28,20 +160,480 @@ export class Game {
 
     public stop() {
         console.log("Остановка игрового цикла");
+        this.stopped = true;
         this.gameLoopActive = false;
+        this.levelChangeGeneration++;
+        this.dialogue.end();
+        this.stopDialogueVoice();
+
+        this.worldMap = null;
+        this.currentWorldMapLocation = null;
+
+        this.level?.destroy();
+        this.level = null;
     }
 
-    public async changeLevel(gameMode: GameMode, levelName: string) {
-        if (!this.level) return;
-
+    public async changeLevel(gameMode: GameMode, levelName: string, entranceName?: string) {
+        if (!this.level || this.stopped) return;
+        this.events.onLoadingStateChange?.(true, levelName);
+        const generation = ++this.levelChangeGeneration;
         console.log(`Смена уровня: режим ${gameMode}, новый уровень ${levelName}`);
-        await this.level.changeLevel(gameMode, levelName);
+        await this.level.changeLevel(gameMode, levelName, entranceName);
+        if (generation !== this.levelChangeGeneration) return;
+        this.level.setCombatMode(this.combatMode);
+        this.rememberWorldMapLocation(levelName);
+
+        this.events.onLevelChanged?.(gameMode, levelName);
+        this.events.onLoadingStateChange?.(false, levelName);
+    }
+
+    public chooseDialogue(optionId: number): DialogueState {
+        return this.dialogue.choose(optionId);
+    }
+
+    public getDialogueState(): DialogueState {
+        return this.dialogue.getState();
+    }
+
+    public getLevel(): Level | null {
+        return this.level;
+    }
+
+    public getRuntimeSnapshot(): GameRuntimeSnapshot | null {
+        return this.level?.getRuntimeSnapshot() ?? null;
+    }
+
+    public isCombatMode(): boolean {
+        return this.combatMode;
+    }
+
+    public toggleCombatMode(): boolean {
+        this.combatMode = !this.combatMode;
+        this.level?.setCombatMode(this.combatMode);
+        this.events.onCombatModeChange?.(this.combatMode);
+        return this.combatMode;
+    }
+
+    public endCombatTurn(): boolean {
+        if (!this.combatMode) {
+            this.combatMode = true;
+            this.level?.setCombatMode(true);
+            this.events.onCombatModeChange?.(true);
+            return true;
+        }
+        return this.level?.endCombatTurn() ?? false;
+    }
+
+    public rest(minutes = 480): void {
+        this.level?.getRuntime().advanceClock(minutes);
+    }
+
+    public adjustHeroProgression(
+        parameter: string,
+        kind: "characteristic" | "skill",
+        direction: 1 | -1,
+        minimum: number,
+    ): boolean {
+        const normalized = parameter.toLowerCase();
+        if (kind === "characteristic" ? !HERO_CHARACTERISTICS.has(normalized) : !normalized.startsWith("skill_")) return false;
+        const runtime = this.level?.getRuntime();
+        if (!runtime) return false;
+        return runtime.adjustHeroProgression(
+            normalized,
+            kind === "characteristic" ? "person_points" : "skill_points",
+            direction,
+            minimum,
+            kind === "characteristic" ? 30 : 15,
+        );
+    }
+
+    public async getHeroName(): Promise<string> {
+        return (await this.loadHeroProfile()).name;
+    }
+
+    public async getHeroInventory(): Promise<HeroInventoryView> {
+        const level = this.level;
+        if (!level) throw new Error("Инвентарь недоступен до загрузки уровня");
+        const catalog = await this.getItemCatalog();
+        const snapshot = level.getRuntimeSnapshot();
+        const heroItems = Object.entries(snapshot.inventories)
+            .find(([owner]) => owner.toLowerCase() === "hero")?.[1] ?? {};
+        const items = await Promise.all(Object.entries(heroItems).map(async ([technicalName, quantity]) => ({
+            ...await catalog.get(technicalName),
+            quantity,
+        })));
+        const equippedEntries = await Promise.all(Object.entries(snapshot.equipped).map(async ([slot, technicalName]) => [
+            slot,
+            await catalog.get(technicalName),
+        ] as const));
+        return {
+            items: items.sort((left, right) => left.literaryName.localeCompare(right.literaryName, "ru")),
+            equipped: Object.fromEntries(equippedEntries),
+        };
+    }
+
+    public async getInventoryItems(owner: string): Promise<readonly HeroInventoryItemView[]> {
+        const level = this.level;
+        if (!level) return [];
+        const catalog = await this.getItemCatalog();
+        return Promise.all(Object.entries(level.getRuntime().getInventory(owner)).map(async ([technicalName, quantity]) => ({
+            ...await catalog.get(technicalName),
+            quantity,
+        })));
+    }
+
+    public transferInventoryItem(source: string, destination: string, technicalName: string, quantity = 1): boolean {
+        return this.level?.getRuntime().transferInventoryItem(source, destination, technicalName, quantity) ?? false;
+    }
+
+    public transferInventoryAll(source: string, destination: string): void {
+        this.level?.getRuntime().transferInventoryAll(source, destination);
+    }
+
+    public async equipHeroItem(technicalName: string, requestedSlot?: EquipmentSlot): Promise<boolean> {
+        const level = this.level;
+        if (!level) return false;
+        const item = await (await this.getItemCatalog()).get(technicalName);
+        level.getRuntime().registerItem(item);
+        const equipped = level.getRuntime().getEquippedItems();
+        const slots = item.definition.equipSlots ?? [];
+        const slot = requestedSlot ?? slots.find((candidate) => !equipped[candidate]) ?? slots[0];
+        if (!slot || !slots.includes(slot)) return false;
+
+        const changed = level.getRuntime().equipHeroItem(technicalName, slot);
+        if (changed) await this.refreshHeroEquipment();
+        return changed;
+    }
+
+    public async unequipHeroItem(slot: EquipmentSlot): Promise<boolean> {
+        const level = this.level;
+        if (!level || !level.getRuntime().unequipHeroItem(slot)) return false;
+        await this.refreshHeroEquipment();
+        return true;
+    }
+
+    public async useHeroItem(technicalName: string): Promise<boolean> {
+        const level = this.level;
+        if (!level) return false;
+        const item = await (await this.getItemCatalog()).get(technicalName);
+        if (!itemClassCanBeUsed(item.definition.itemClass)) return false;
+        if (item.definition.itemClass === "book") {
+            return item.magicId !== undefined && level.getRuntime().learnHeroMagic(technicalName, item.magicId);
+        }
+        return level.getRuntime().useHeroItem(technicalName, item.specialEffects, item.nutrition);
+    }
+    public setHeroMagicHotbar(slot: number, magicId: number | null): boolean {
+        return this.level?.getRuntime().setHeroMagicHotbar(slot, magicId) ?? false;
+    }
+    public activateHeroMagicSlot(slot: number): boolean {
+        return this.level?.activateHeroMagicSlot(slot) ?? false;
+    }
+
+    public cancelHeroMagicTargeting(): void {
+        this.level?.cancelHeroMagicTargeting();
+    }
+
+
+    public async dropHeroItem(technicalName: string): Promise<boolean> {
+        const level = this.level;
+        if (!level) return false;
+        const item = await (await this.getItemCatalog()).get(technicalName);
+        if (!item.canDrop) return false;
+        return level.getRuntime().dropHeroItem(technicalName);
+    }
+
+
+    public canShowWorldMap(): boolean {
+        const data = this.level?.getData();
+        return Boolean(data?.sefData.exitToGlobalMap && this.resolveWorldMapLocation(data.levelName));
+    }
+
+    public travelWorldMap(destinationId: string): void {
+        if (!this.worldMap) throw new Error("Глобальная карта не открыта");
+        this.worldMap.travel(destinationId);
+        this.currentWorldMapLocation = destinationId;
+        this.worldMap = null;
+
+        this.events.onWorldMapStateChange?.(null);
+    }
+
+    public closeWorldMap(): void {
+        this.worldMap = null;
+        this.events.onWorldMapStateChange?.(null);
+    }
+
+    public showWorldMap(): boolean {
+        return this.openWorldMap();
+    }
+
+
+    public save(slot: string): GameSaveData {
+        const save = this.captureSave();
+        this.persistence.save(slot, save);
+        return save;
+    }
+
+    public quickSave(): GameSaveData {
+        const save = this.captureSave();
+        this.persistence.quickSave(save);
+        return save;
+    }
+
+    public async load(slot: string): Promise<GameSaveData | null> {
+        return this.restoreSave(this.persistence.load(slot));
+    }
+
+    public async quickLoad(): Promise<GameSaveData | null> {
+        return this.restoreSave(this.persistence.quickLoad());
+    }
+
+    private captureSave(): GameSaveData {
+        const level = this.level;
+        const data = level?.getData();
+        const player = level?.getPlayerState();
+        if (!level || !data || !player) throw new Error("Нельзя сохранить игру до загрузки уровня");
+        const runtime = level.getRuntimeSnapshot();
+        const save = createSaveData({ gameMode: data.gameMode, level: data.levelName, entrance: null });
+        save.player.position = player.position;
+        save.player.direction = player.direction;
+        save.scriptVariables = { ...runtime.variables };
+        save.inventories = Object.fromEntries(Object.entries(runtime.inventories).map(([owner, items]) => [owner, { ...items }]));
+        save.inventories[EQUIPPED_INVENTORY_OWNER] = Object.fromEntries(
+            Object.entries(runtime.equipped).map(([slot, item]) => [`${slot}:${item}`, 1]),
+        );
+        save.questFlags = { ...runtime.questFlags };
+        save.persons = { ...runtime.persons };
+        save.stageFlags = { ...runtime.stageFlags };
+        save.locationAccess = { ...runtime.locationAccess };
+        save.personParameters = Object.fromEntries(Object.entries(runtime.personParameters).map(([person, values]) => [person, { ...values }]));
+        save.magicEffects = runtime.magic.activeEffects.map((effect) => ({ ...effect }));
+        save.regenerationElapsed = Object.fromEntries(
+            Object.entries(runtime.regenerationElapsed).map(([name, elapsed]) => [name, { ...elapsed }]),
+        );
+        save.experience = runtime.experience;
+        save.clock = {
+            day: Math.floor(runtime.elapsedMinutes / (24 * 60)),
+            minuteOfDay: runtime.elapsedMinutes % (24 * 60),
+        };
+        const scenario = level.getRuntime().getScenario();
+        if (scenario) {
+            save.doors = Object.fromEntries(scenario.getDoorStates().map((door) => [door.name, door.opened]));
+            save.triggers = Object.fromEntries(scenario.getTriggerStates().map((trigger) => [trigger.name, {
+                active: trigger.active,
+                visible: trigger.visible,
+            }]));
+        }
+        return save;
+    }
+
+    private async restoreSave(save: GameSaveData | null): Promise<GameSaveData | null> {
+        if (!save) return null;
+        this.level?.getRuntime().restoreScriptVariables(save.scriptVariables);
+        await this.changeLevel(save.location.gameMode, save.location.level, save.location.entrance ?? undefined);
+        if (!this.level) return null;
+        this.level.getRuntime().restore(save);
+        this.level.setPlayerState(save.player.position, save.player.direction);
+        await this.refreshHeroEquipment();
+        return save;
+    }
+
+    private async initializeHeroInventory(): Promise<void> {
+        const level = this.level;
+        if (!level) return;
+        const response = await fetch(`${Paths.SCRIPTS}/inventory/hero_items.inv`);
+        if (!response.ok) throw new Error(`Не удалось загрузить начальный инвентарь: HTTP ${response.status}`);
+        const source = new TextDecoder("windows-1251").decode(await response.arrayBuffer());
+        level.getRuntime().initializeInventory("Hero", materializeInventory(parseInventoryScript(source)));
+    }
+
+    private getItemCatalog(): Promise<ShippedItemCatalog> {
+        this.itemCatalogPromise ??= loadShippedItemCatalog();
+        return this.itemCatalogPromise;
+    }
+    private loadHeroProfile(): Promise<HeroProfile> {
+        this.heroProfilePromise ??= fetch(`${Paths.SCRIPTS}/hero.scr`)
+            .then(async (response) => {
+                if (!response.ok) throw new Error(`Не удалось загрузить профиль героя: HTTP ${response.status}`);
+                const source = new TextDecoder("windows-1251").decode(await response.arrayBuffer());
+                return selectHeroProfile(parseHeroProfiles(source), "Fighter");
+            });
+        return this.heroProfilePromise;
+    }
+
+
+    private async refreshHeroEquipment(): Promise<void> {
+        const level = this.level;
+        if (!level) return;
+        const equippedTechnicalNames = Object.values(level.getRuntime().getEquippedItems());
+        const catalog = await this.getItemCatalog();
+        const items = await Promise.all(equippedTechnicalNames.map((name) => catalog.get(name)));
+        for (const item of items) level.getRuntime().registerItem(item);
+        await level.setHeroEquipment(equippedTechnicalNames);
+    }
+
+    private async openDialogue(arguments_: readonly (number | string | boolean)[]) {
+        const speaker = arguments_[0];
+        const asset = arguments_[1];
+        const suppliedSpeakerName = arguments_[2];
+        if (typeof speaker !== "string" || !speaker) throw new Error("RS_StartDialog requires a speaker id");
+        if (typeof asset !== "string" || !asset) throw new Error("RS_StartDialog requires an AGE asset name");
+        await this.loadDialoguePhrases();
+        const url = await this.resolveDialogueAsset(asset);
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Не удалось загрузить диалог ${asset}: HTTP ${response.status}`);
+        const speakerName = typeof suppliedSpeakerName === "string" && suppliedSpeakerName.trim()
+            ? suppliedSpeakerName
+            : this.resolveSpeakerName(speaker);
+        this.dialogue.start(new AGEParser(await response.arrayBuffer()).getData(), speakerName);
+        this.dialogueSpeakerTechnical = speaker;
+    }
+
+    private async openCurrentTrade(): Promise<void> {
+        const speaker = this.dialogueSpeakerTechnical;
+        const level = this.level;
+        const person = level?.getData()?.levelPersons.find((candidate) => candidate.name.toLowerCase() === speaker?.toLowerCase());
+        if (!speaker || !level || !person?.scriptInventory) throw new Error("У собеседника нет торгового инвентаря");
+        const owner = `person:${speaker}`;
+        if (Object.keys(level.getRuntime().getInventory(owner)).length === 0) {
+            const fileName = person.scriptInventory.toLowerCase().endsWith(".inv") ? person.scriptInventory : `${person.scriptInventory}.inv`;
+            const response = await fetch(`${Paths.SCRIPTS}/inventory/${fileName.toLowerCase()}`);
+            if (!response.ok) throw new Error(`Не удалось загрузить инвентарь торговца ${fileName}: HTTP ${response.status}`);
+            const source = new TextDecoder("windows-1251").decode(await response.arrayBuffer());
+            level.getRuntime().initializeInventory(owner, materializeInventory(parseInventoryScript(source)));
+        }
+        this.events.onTradeRequest?.(owner, this.resolveSpeakerName(speaker));
+    }
+
+    private resolveSpeakerName(technicalName: string): string {
+        const data = this.level?.getData();
+        const person = data?.levelPersons.find((candidate) => candidate.name.toLowerCase() === technicalName.toLowerCase());
+        if (!person) return technicalName;
+        return person.literaryName === undefined ? person.literaryLabel ?? technicalName : data?.sdbData[person.literaryName] ?? technicalName;
+    }
+
+
+    private async resolveDialogueAsset(asset: string): Promise<string> {
+        const normalized = `${asset.replace(/\\/g, "/").toLowerCase()}.cs`.replace(/\.cs\.cs$/, ".cs");
+        const exact = normalizedDialogueAssets.get(normalized);
+        if (exact) return exact;
+        const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
+        const fallback = dialogueBasenames.get(basename);
+        if (fallback) return fallback;
+        if (fallback === null) throw new Error(`Диалог ${asset} неоднозначен без относительного каталога`);
+        throw new Error(`Диалог ${asset} отсутствует в поставленных ресурсах`);
+    }
+
+    private async loadDialoguePhrases(): Promise<SDBData> {
+        if (this.dialoguePhrases) return this.dialoguePhrases;
+        this.dialoguePhrasesPromise ??= fetch("/assets/sdb/dialogs/dialogsphrases.sdb")
+            .then((response) => {
+                if (!response.ok) throw new Error(`Не удалось загрузить базу фраз: HTTP ${response.status}`);
+                return response.arrayBuffer();
+            })
+            .then((buffer) => new SDBParser(buffer).getData());
+        this.dialoguePhrases = await this.dialoguePhrasesPromise;
+        return this.dialoguePhrases;
+    }
+
+    private openWorldMap(): boolean {
+        const level = this.level;
+        const data = level?.getData();
+        if (!level || !data || !data.sefData.exitToGlobalMap) return false;
+        const currentLocation = this.resolveWorldMapLocation(data.levelName);
+        if (!currentLocation) return false;
+
+        const locationAccess = level.getRuntimeSnapshot().locationAccess;
+        const accessFor = (locationId: string): number => locationId === currentLocation
+            ? 2
+            : locationAccess[locationId.toLowerCase()] ?? 0;
+        const configuredLocations = GOLDEN_LAND_WORLD_MAP_LOCATIONS.map((location) => ({
+            ...location,
+            availableWhen: [{ variable: `worldmap:${location.id}`, operator: "atLeast" as const, value: 2 }],
+        }));
+        const locations = configuredLocations.some((location) => location.id === currentLocation)
+            ? configuredLocations
+            : [...configuredLocations, {
+                id: currentLocation,
+                level: data.levelName.toLowerCase(),
+                entrance: "GM",
+                position: { x: 800, y: 600 },
+                availableWhen: [{ variable: `worldmap:${currentLocation}`, operator: "atLeast" as const, value: 2 }],
+            }];
+
+        this.worldMap = new WorldMapRuntime({
+            locations,
+            links: createWorldMapLinks(locations),
+            currentLocation,
+            discoveredLocations: locations.filter((location) => accessFor(location.id) > 0).map((location) => location.id),
+            host: {
+                getVariable: (name) => name.startsWith("worldmap:")
+                    ? accessFor(name.slice("worldmap:".length))
+                    : level.getRuntime().getVariable(name),
+                chargeTravelCost: () => true,
+                advanceClock: (duration) => level.getRuntime().advanceClock(duration),
+                requestTransition: (request) => void this.changeLevel("single", request.level, request.entrance).catch((error) => this.reportError(error)),
+            },
+        });
+        this.events.onWorldMapStateChange?.(this.worldMap.getLocations());
+        return true;
+    }
+
+    private resolveWorldMapLocation(levelName: string): string | null {
+        const normalized = levelName.toLowerCase();
+        return GOLDEN_LAND_WORLD_MAP_LOCATIONS.find((location) => location.level === normalized)?.id
+            ?? this.currentWorldMapLocation
+            ?? normalized.toUpperCase();
+    }
+
+
+    private rememberWorldMapLocation(levelName: string): void {
+        const location = GOLDEN_LAND_WORLD_MAP_LOCATIONS.find((candidate) => candidate.level === levelName.toLowerCase());
+        if (location) this.currentWorldMapLocation = location.id;
+    }
+
+
+    private invokeDialogueFunction(call: DialogueFunctionCall): DialogueValue | void {
+        const name = call.name;
+        if (!name) return 0;
+        if (name === "D_PlaySound") {
+            const source = call.arguments[0];
+            if (typeof source !== "string" || source.trim().length === 0) {
+                throw new Error(`AGE D_PlaySound record ${call.record.index} requires a dialogue voice path`);
+            }
+            this.playDialogueVoice(source);
+            return 1;
+        }
+        const value = this.level?.getRuntime().invokeHost(name, call.arguments);
+        return typeof value === "boolean" ? (value ? 1 : 0) : value;
+    }
+
+    private playDialogueVoice(source: string): void {
+        const url = resolveLevelAudioUrl(`sounds/dialogs/${source}`);
+        const voice = this.dialogueVoice ??= createBrowserAudio(url);
+        voice.pause();
+        voice.src = url;
+        voice.loop = false;
+        voice.currentTime = 0;
+        try {
+            const playback = voice.play();
+            if (playback) void playback.catch((error) => this.reportError(error));
+        } catch (error) {
+            this.reportError(error);
+        }
+    }
+
+    private stopDialogueVoice(): void {
+        this.dialogueVoice?.pause();
+    }
+
+    private reportError(error: unknown) {
+        console.error(error);
+        this.events.onError?.(error);
     }
 
     private gameLoop = () => {
         if (!this.gameLoopActive) return;
         requestAnimationFrame(this.gameLoop);
-
         this.ctx!.clearRect(0, 0, this.canvas.width, this.canvas.height);
         this.level?.draw();
     };

@@ -1,5 +1,12 @@
 export type GameMode = 'single' | 'multiplayer';
 
+export const NEW_GAME_START = {
+    gameMode: "single" as const,
+    level: "l1_3",
+    entrance: "0",
+};
+
+
 export const levelPacks = [
     "l1_1", "l1_2", "l1_3",
     "l2_1", "l2_2_1", "l2_2_2", "l2_2_3",

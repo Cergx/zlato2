@@ -1,0 +1,209 @@
+.hud {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    pointer-events: none;
+    font-family: ZlatoPalatino, "Palatino Linotype", serif;
+
+    color: #ded0a5;
+    text-shadow: 0 1px 2px #000;
+}
+
+.hud[data-hidden="true"] .panel,
+.hud[data-hidden="true"] .characterPanel {
+    display: none;
+}
+
+.panel {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 20.3125%;
+}
+
+.panel > canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.status {
+    position: absolute;
+    top: 55.769231%;
+    left: 19.53125%;
+    display: flex;
+    width: 61.230469%;
+    height: 12.179487%;
+    align-items: center;
+    overflow: hidden;
+    padding: 0 5px 1px;
+    color: #171914;
+    font-family: ZlatoCyrOld, ZlatoArial, sans-serif;
+    font-size: clamp(9px, 1.35vw, 14px);
+    line-height: 1;
+    text-align: left;
+    text-overflow: ellipsis;
+    text-shadow: none;
+    white-space: nowrap;
+    background: url('/assets/engineres/gpanel/status_bar_new.bmp') center / 100% 100% no-repeat;
+}
+
+.lifeValue,
+.energyValue {
+    position: absolute;
+    z-index: 2;
+    display: grid;
+    width: 3.90625%;
+    height: 10.25641%;
+    place-items: center;
+    overflow: hidden;
+    color: #d7d7cf;
+    font-family: ZlatoConsole, monospace;
+    font-size: clamp(8px, 1.15vw, 12px);
+    line-height: 1;
+    text-align: center;
+    text-shadow: 1px 1px #080806;
+}
+
+.lifeValue {
+    top: 92.948718%;
+    left: 15.429688%;
+}
+
+.energyValue {
+    top: 89.102564%;
+    left: 80.566406%;
+}
+
+.toolbarButton {
+    position: absolute;
+    z-index: 2;
+    width: 6.152344%;
+    height: 13.461538%;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    background: transparent center / 100% 100% no-repeat;
+    cursor: inherit;
+    pointer-events: auto;
+}
+
+.toolbarButton:active,
+.toolbarButton[aria-pressed='true'] {
+    background-image: var(--pressed-image);
+}
+
+.toolbarButton:focus-visible {
+    outline: 1px solid rgb(235 231 201 / 80%);
+}
+
+.buttonInventory { top: 17.307692%; left: 1.171875%; --pressed-image: url('/assets/engineres/gpanel/but1.bmp'); }
+.buttonCharacter { top: 17.307692%; left: 8.691406%; --pressed-image: url('/assets/engineres/gpanel/but2.bmp'); }
+.buttonConsole { bottom: 3.846154%; left: 1.171875%; --pressed-image: url('/assets/engineres/gpanel/but3.bmp'); }
+.buttonRest { bottom: 3.205128%; left: 8.691406%; --pressed-image: url('/assets/engineres/gpanel/but4.bmp'); }
+.buttonJournal { top: 16.025641%; right: 8.691406%; width: 6.445313%; height: 14.74359%; --pressed-image: url('/assets/engineres/gpanel/newbut1.bmp'); }
+.buttonMinimap { top: 17.948718%; right: 1.269531%; --pressed-image: url('/assets/engineres/gpanel/but6.bmp'); }
+.buttonMagic { right: 8.789063%; bottom: 3.205128%; --pressed-image: url('/assets/engineres/gpanel/but7.bmp'); }
+.buttonWorldMap { right: 1.074219%; bottom: 3.846154%; width: 6.445313%; height: 14.74359%; --pressed-image: url('/assets/engineres/gpanel/newbut2.bmp'); }
+
+.combatButton {
+    position: absolute;
+    top: 79.487179%;
+    left: 48.242188%;
+    z-index: 4;
+    width: 3.125%;
+    height: 17.948718%;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: pointer;
+    pointer-events: auto;
+}
+
+.combatButton:focus-visible {
+    outline: 1px solid rgb(235 231 201 / 80%);
+}
+
+.magicHotbar {
+    position: absolute;
+    top: 80.769231%;
+    left: 53.125%;
+    z-index: 5;
+    display: grid;
+    width: 25.292969%;
+    height: 17.307692%;
+    grid-template-columns: repeat(9, minmax(0, 1fr));
+    column-gap: .78125%;
+    pointer-events: auto;
+}
+
+.magicHotbar button {
+    position: relative;
+    min-width: 0;
+    overflow: hidden;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: inherit;
+}
+
+.magicHotbar img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    image-rendering: pixelated;
+}
+
+.magicHotbar button[aria-pressed='true'] {
+    outline: 1px solid rgb(238 220 157 / 90%);
+    outline-offset: -1px;
+}
+
+.magicHotbar button:focus-visible {
+    outline: 1px solid rgb(235 231 201 / 80%);
+    outline-offset: -1px;
+}
+
+.magicHotbar button:disabled {
+    cursor: default;
+}
+
+
+.toolbarButton:disabled {
+    filter: brightness(.42) saturate(.35);
+    cursor: default;
+}
+
+.toolbarButton:disabled:hover {
+    outline: 0;
+    animation: none;
+}
+
+
+
+
+.minimapFrame {
+    position: absolute;
+    top: 0.390625%;
+    right: 0.390625%;
+    box-sizing: border-box;
+    width: 21.679688%;
+    height: 21.875%;
+    border: 1px solid #dfe2d5;
+    background: #120f0b;
+}
+
+.minimapFrame[data-hidden='true'] {
+    visibility: hidden;
+}
+
+.minimapFrame canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    image-rendering: auto;
+}
+

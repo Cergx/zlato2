@@ -16,13 +16,14 @@ export interface LVLDescription {
     position: PixelPosition;
 }
 
-export interface StaticDescription extends LVLDescription {}
+export type StaticDescription = LVLDescription;
 
-export interface AnimationDescription extends LVLDescription {}
+export type AnimationDescription = LVLDescription;
 
-export interface TriggerDescription extends LVLDescription {}
+export type TriggerDescription = LVLDescription;
 
 export interface MaskDescription {
+    type: number;
     number: number;
     x: number;
     y: number;
@@ -80,15 +81,15 @@ interface EnvironmentSounds {
     otherSounds: ExtraSound[];
 }
 
-interface MHDRTile {
-    maskNumber: number;
-    param2: number;
-    tileType: number;
+export interface MHDRTile {
+    terrain: number;
+    flags: number;
+    maskIndex: number;
 }
 
-type MHDRChunk = MHDRTile[4];
+export type MHDRChunk = MHDRTile[];
 
-interface MaskHDR {
+export interface MaskHDR {
     width: number;
     height: number;
     chunks: MHDRChunk[];
@@ -142,7 +143,7 @@ type DataBlocks = Record<string, Uint8Array>;
 
 export class LVLParser {
     private blocks: DataBlocks = {};
-    private data: LVLData;
+    private data: LVLData | null = null;
 
     constructor(private filePath: string) {}
 
@@ -172,14 +173,13 @@ export class LVLParser {
             this.blocks[blockId] = data.slice(index, index + blockSize);
             index += blockSize;
         }
-        console.log(this.blocks)
     }
 
     private interpretData(): LVLData {
         const data: LVLData = { ...defaultLvlData };
 
         // Перебираем все блоки, которые были извлечены
-        for (let blockName in this.blocks) {
+        for (const blockName in this.blocks) {
             const block = this.blocks[blockName];
 
             switch (blockName) {
@@ -233,7 +233,7 @@ export class LVLParser {
 
                 default:
                     // Все остальные блоки обрабатываются как строки
-                    (data as any)[blockName] = this.parseBlockAsString(block);
+                    (data as LVLData & Record<string, unknown>)[blockName] = this.parseBlockAsString(block);
                     break;
             }
         }
@@ -338,31 +338,27 @@ export class LVLParser {
         if (block.length < 4) return [];
 
         const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
-        let offset = 0;
-
-        // Читаем количество элементов
-        const count = view.getUint32(offset, true);
-        offset += 4;
-
+        let offset = 4;
+        const count = view.getUint32(0, true);
         const masks: MaskDescription[] = [];
 
         for (let i = 0; i < count; i++) {
-            if (offset + 16 > block.byteLength) break; // Каждая запись занимает 16 байт
+            if (offset + 16 > block.byteLength) break;
 
-            offset += 4;
-            const number = view.getUint32(offset, true);
-            const x = view.getUint32(offset + 4, true);
-            const y = view.getUint32(offset + 8, true);
-            offset += 12;
+            const type = view.getUint32(offset, true);
+            const number = view.getInt32(offset + 4, true);
+            const x = view.getInt32(offset + 8, true);
+            const y = view.getInt32(offset + 12, true);
+            offset += 16;
 
-            masks.push({ number, x, y });
+            masks.push({ type, number, x, y });
         }
 
         return masks;
     }
 
     private parseMaskHDR(block: Uint8Array): MaskHDR {
-        const maskHDR = {...defaultMaskHDR};
+        const maskHDR: MaskHDR = { width: 1, height: 1, chunks: [] };
 
         if (block.length < 8) return maskHDR;
 
@@ -370,27 +366,22 @@ export class LVLParser {
         maskHDR.width = view.getUint32(0, true);
         maskHDR.height = view.getUint32(4, true);
 
-        // Читаем данные
-        const rawData = block.slice(8);
-        const tileSize = 6; // 6 байт на один тайл (3 значения по 2 байта)
-        const chunkSize = 4; // 4 тайла в чанке
-        const numChunks = Math.floor(rawData.length / (chunkSize * tileSize));
-
+        const tileSize = 6;
+        const chunkSize = 4;
+        const chunkByteLength = chunkSize * tileSize;
+        const numChunks = Math.floor((block.length - 8) / chunkByteLength);
         const flatChunks: MHDRChunk[] = new Array(numChunks);
 
-        // **Записываем чанки в одну полоску**
         for (let i = 0; i < numChunks; i++) {
             const chunk: MHDRChunk = [];
-            const baseOffset = i * chunkSize * tileSize;
+            const baseOffset = 8 + i * chunkByteLength;
 
             for (let j = 0; j < chunkSize; j++) {
                 const offset = baseOffset + j * tileSize;
-                if (offset + tileSize > rawData.length) break;
-
                 chunk.push({
-                    maskNumber: view.getUint16(offset, true),
-                    param2: view.getUint16(offset + 2, true),
-                    tileType: view.getUint16(offset + 4, true),
+                    terrain: view.getUint16(offset, true),
+                    flags: view.getUint16(offset + 2, true),
+                    maskIndex: view.getInt16(offset + 4, true),
                 });
             }
 
@@ -463,8 +454,8 @@ export class LVLParser {
             const number = view.getUint32(offset + 4, true);
 
             const position: PixelPosition = {
-                x: view.getUint32(offset + 8, true),
-                y: view.getUint32(offset + 12, true)
+                x: view.getInt32(offset + 8, true),
+                y: view.getInt32(offset + 12, true)
             }
 
             offset += 16;
@@ -536,6 +527,7 @@ export class LVLParser {
     }
 
     getData() {
+        if (!this.data) throw new Error("LVL file has not been parsed");
         return this.data;
     }
 }

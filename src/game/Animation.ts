@@ -4,10 +4,10 @@ export class Animation {
     private img: HTMLImageElement | HTMLCanvasElement | undefined;
     private frameCount: number;
     public readonly frameHeight: number;
-    public readonly frameWidth: number;
+    public frameWidth: number;
     private currentFrame: number;
     private frameDuration: number;
-    private lastUpdateTime: number;
+    private elapsedFrameTime: number;
     private isLoaded: boolean;
 
     constructor(imgSrc: string, frameHeight: number, frameDuration: number) {
@@ -18,7 +18,7 @@ export class Animation {
         this.frameCount = 0;
         this.frameWidth = 0;
         this.currentFrame = 0;
-        this.lastUpdateTime = performance.now();
+        this.elapsedFrameTime = 0;
         this.isLoaded = false;
 
         if (imgSrc.endsWith(".csx")) {
@@ -49,23 +49,25 @@ export class Animation {
         };
     }
 
-    update() {
-        if (!this.isLoaded) return;
+    update(elapsedMs: number) {
+        if (!this.isLoaded || this.frameCount === 0) return;
 
-        const now = performance.now();
-        if (now - this.lastUpdateTime > this.frameDuration) {
+        const frameDuration = Math.max(1, this.frameDuration);
+        this.elapsedFrameTime += elapsedMs;
+        while (this.elapsedFrameTime >= frameDuration) {
             this.currentFrame = (this.currentFrame + 1) % this.frameCount;
-            this.lastUpdateTime = now;
+            this.elapsedFrameTime -= frameDuration;
         }
     }
 
     draw(ctx: CanvasRenderingContext2D, x: number, y: number) {
-        if (!this.isLoaded || this.frameWidth === 0) return; // Не рисуем, пока изображение не загружено
+        const image = this.img;
+        if (!this.isLoaded || !image || this.frameWidth === 0) return;
 
         ctx.drawImage(
-            this.img,
-            0, this.currentFrame * this.frameHeight, this.frameWidth, this.frameHeight,  // Исходные координаты
-            x, y, this.frameWidth, this.frameHeight  // Координаты отрисовки
+            image,
+            0, this.currentFrame * this.frameHeight, this.frameWidth, this.frameHeight,
+            x, y, this.frameWidth, this.frameHeight
         );
     }
 }
