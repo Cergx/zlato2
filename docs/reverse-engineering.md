@@ -2,12 +2,14 @@
 
 Updated: 2026-07-23. All paths below are relative to this repository unless stated otherwise.
 
+> **Current direction:** executable-first script execution. Before adding more browser gameplay behavior, recover the original `GoldenLand.exe` / `Server.dll` / `Client.dll` runtime boundary and validate direct execution of shipped `.scr` and `.age.cs` assets. See [`executable-first-handoff.md`](./executable-first-handoff.md) for the binding architecture decision, binary hashes, known addresses, current-runtime gaps, and ordered next steps.
+
 ## Resource roots
 
 - Original game installation: `E:/Games/zlato22`.
 - Extracted assets used by the web client: `public/assets`.
 - Browser implementation: `src/game`.
-- Original executable: `E:/Games/zlato22/GoldenLand.exe`; primary engine DLL: `E:/Games/zlato22/Client.dll`.
+- Original host: `E:/Games/zlato22/GoldenLand.exe`; engine modules: `E:/Games/zlato22/Server.dll` and `E:/Games/zlato22/Client.dll`.
 - `BurutPak.exe` is the resource pack manager.
 
 ## Burut PAK archives
@@ -414,5 +416,7 @@ Global-map `czdescriptions/*.dsc` files define an overall encounter chance and `
 
 ## Next reverse-engineering target
 
-1. Recover source-level names for zero-ID compiler misses only if dialogue-editor sources, symbol files, or compiler logs become available; the serialized AGE files contain only the discarded numeric zero.
-2. Continue validating renderer and combat edge cases against direct original-client captures rather than adding speculative data-model fields.
+1. Build a repeatable 32-bit native oracle that loads the original hashed DLLs, captures their API tables/host callbacks, and completes a clean startup/shutdown cycle.
+2. Use one shipped AGE dialogue as the first differential vertical slice: original node/function/branch/snapshot trace versus `AGEParser` + `DialogueRuntime`.
+3. Recover SCR context construction, handler dispatch, core scheduling, variable lifetime, and host-call ABI before extending scenario behavior.
+4. Treat zero-ID AGE source names as unavailable unless dialogue-editor sources, symbols, or compiler logs appear; the serialized containers retain only numeric zero.
