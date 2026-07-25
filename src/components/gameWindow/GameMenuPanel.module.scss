@@ -419,13 +419,13 @@ $diary-height: 768;
 .diaryClose:active {
   background-image: url('/assets/engineres/diary/but/close_p.bmp');
 }
-$magic-width: 441;
-$magic-height: 440;
+$magic-width: 1024;
+$magic-height: 768;
 
 .panel.magic {
-  width: min(92%, 441px);
-  max-height: calc(100% - 16px);
-  aspect-ratio: 441 / 440;
+  width: 100%;
+  max-height: 100%;
+  aspect-ratio: 4 / 3;
   color: #1d1c16;
   font-family: "Palatino Linotype", Palatino, Georgia, serif;
   text-shadow: 0 1px rgb(255 255 255 / 24%);
@@ -441,11 +441,10 @@ $magic-height: 440;
 .magicSpell {
   position: absolute;
   width: to-percent(55, $magic-width);
-  aspect-ratio: 1;
+  height: to-percent(55, $magic-height);
   padding: 0;
   border: 0;
   background: transparent;
-  transform: translate(-50%, -50%);
   pointer-events: auto;
   cursor: grab;
 }
@@ -473,21 +472,21 @@ $magic-height: 440;
 .magicHint {
   position: absolute;
   z-index: 2;
-  left: to-percent(290, $magic-width);
-  width: to-percent(141, $magic-width);
+  left: to-percent(590, $magic-width);
+  width: to-percent(385, $magic-width);
   overflow: hidden;
-  font-size: clamp(8px, 1.18vw, 12px);
-  line-height: 1.15;
+  font-size: clamp(11px, 1.5vw, 17px);
+  line-height: 1.22;
 }
 
 .magicDescription {
-  top: to-percent(72, $magic-height);
-  height: to-percent(135, $magic-height);
+  top: to-percent(55, $magic-height);
+  height: to-percent(225, $magic-height);
 }
 
 .magicHint {
-  top: to-percent(235, $magic-height);
-  height: to-percent(126, $magic-height);
+  top: to-percent(338, $magic-height);
+  height: to-percent(250, $magic-height);
 }
 
 .magicDescription h2,
@@ -504,12 +503,12 @@ $magic-height: 440;
 .magicSchools {
   position: absolute;
   z-index: 3;
-  left: to-percent(4, $magic-width);
-  top: to-percent(366, $magic-height);
-  width: to-percent(252, $magic-width);
+  left: to-percent(13, $magic-width);
+  top: to-percent(652, $magic-height);
+  width: to-percent(553, $magic-width);
   height: to-percent(29, $magic-height);
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  display: flex;
+  justify-content: space-between;
 }
 .magicSchools button,
 .magicHotbar button {
@@ -520,51 +519,62 @@ $magic-height: 440;
   background: transparent;
 }
 
-.magicSchools img {
+.magicSchools button {
+  flex: 0 0 to-percent(86, 553);
+}
+
+.magicSchools span {
   position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 86px;
-  height: 29px;
-  max-width: none;
-  transform: translate(-50%, -50%);
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  color: #171912;
+  font-family: ZlatoCyrOld, ZlatoArial, sans-serif;
+  font-size: clamp(8px, 1.05vw, 12px);
+  line-height: 1;
+  pointer-events: none;
+  text-shadow: 0 1px rgb(255 255 255 / 35%);
+}
+
+.magicHotbar button {
+  flex: 0 0 to-percent(55, 539);
+}
+
+.magicSchools img {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .magicHotbar {
   position: absolute;
   z-index: 4;
-  left: to-percent(5, $magic-width);
-  top: to-percent(389, $magic-height);
-  width: to-percent(243, $magic-width);
-  height: to-percent(49, $magic-height);
-  display: grid;
-  grid-template-columns: repeat(9, 1fr);
+  left: to-percent(20, $magic-width);
+  top: to-percent(695, $magic-height);
+  width: to-percent(539, $magic-width);
+  height: to-percent(55, $magic-height);
+  display: flex;
+  justify-content: space-between;
 }
 
 .magicHotbar img {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 29px;
-  height: 29px;
-  max-width: none;
-  transform: translate(-50%, -50%);
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .magicCast,
 .magicClose {
   position: absolute;
   z-index: 4;
-  top: to-percent(374, $magic-height);
-  width: to-percent(64, $magic-width);
-  height: to-percent(64, $magic-height);
   padding: 0;
   border: 0;
   background: transparent center / 100% 100% no-repeat;
 }
 
-.magicCast { left: to-percent(342, $magic-width); }
-.magicClose { left: to-percent(405, $magic-width); }
+.magicCast { left: to-percent(731, $magic-width); top: to-percent(689, $magic-height); width: to-percent(74, $magic-width); height: to-percent(67, $magic-height); }
+.magicClose { left: to-percent(928, $magic-width); top: to-percent(692, $magic-height); width: to-percent(66, $magic-width); height: to-percent(62, $magic-height); }
 .magicCast:hover:not(:disabled),
 .magicCast:focus-visible:not(:disabled) { background-image: url('/assets/engineres/interface/magic_book/buttons/cast_glow.bmp'); outline: 0; }
 .magicCast:active:not(:disabled) { background-image: url('/assets/engineres/interface/magic_book/buttons/cast_down.bmp'); }

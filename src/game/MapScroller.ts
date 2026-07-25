@@ -8,7 +8,7 @@ export class MapScroller {
     private readonly canvas: HTMLCanvasElement;
     private mapSize: MapSize;
     private readonly offset: WorldPosition = { x: 0, y: 0 };
-    private readonly scrollStep = 7;
+    private scrollStep = 7;
     private readonly edgeThreshold = 10;
     private mouseX = 0;
     private mouseY = 0;
@@ -65,6 +65,10 @@ export class MapScroller {
     public setMapSize(mapSize: MapSize) {
         this.mapSize = mapSize;
         this.reset();
+    }
+
+    public setScrollSpeed(value: number): void {
+        this.scrollStep = Math.max(1, Math.min(13, 1 + Math.round(value) * 2));
     }
 
     public reset() {

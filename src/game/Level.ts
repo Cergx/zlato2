@@ -22,6 +22,7 @@ import { GameStateRuntime, type AreaTransitionRequest, type DynamicPersonDefinit
 import type { CursorType } from "../enums/CursorTypes.ts";
 import { chooseSoundWave, type SoundShaderDefinition } from "./SoundShaderRuntime.ts";
 
+import type { GameSettings } from "./GameSettingsRuntime.ts";
 
 const loadOptionalScript = async (path: string): Promise<string | undefined> => {
     const response = await fetch(path);
@@ -74,6 +75,10 @@ export interface LevelMask extends MaskDescription {
     foreground?: HTMLCanvasElement;
 }
 
+export interface LevelTriggerMask extends TriggerDescription {
+    image: HTMLCanvasElement;
+}
+
 export interface LevelDoor extends Door, SEFDoor {
     levelStatic: LevelStatic;
     nameOpened?: string;
@@ -95,6 +100,7 @@ export interface LevelData {
     levelDoors: LevelDoor[];
     levelMasks: LevelMask[];
     triggerCells: Record<string, TilePosition[]>;
+    triggerMasks: LevelTriggerMask[];
     levelPersons: LevelPerson[];
     player: LevelPerson;
 }
@@ -104,15 +110,18 @@ export interface LevelOptions {
     onGlobalMap?: () => void;
     onDialog?: (arguments_: readonly (number | string | boolean)[]) => void;
     onFinished?: (ending: number) => void;
+    onHeroDeath?: () => void;
     onCursorChange?: (cursor: CursorType) => void;
     onTrade?: () => void;
     onContainerOpen?: (owner: string, triggerName: string) => void;
+    onStatusText?: (text?: string) => void;
 }
 
 export class Level {
     private readonly audioWeather = new AudioWeatherRuntime({
         onPlaybackError: (error, source) => console.warn(`Не удалось воспроизвести ${source}`, error),
     });
+    private soundVolume = 0.5;
     private readonly runtime: GameStateRuntime;
     private canvas: HTMLCanvasElement;
     private mapRenderer: MapRenderer | null = null;
@@ -128,9 +137,13 @@ export class Level {
             onDynamicPerson: (person) => void this.addDynamicPerson(person).catch((error) => console.error(`Не удалось добавить персонажа ${person.name}`, error)),
             onDoorChange: ({ door }) => this.mapRenderer?.setDoorState(door.name, door.opened, door.cells, door.activationCells),
             onTriggerChange: (trigger) => this.mapRenderer?.setTriggerState(trigger),
-            onContainerOpen: (owner, triggerName) => {
-                const trigger = this.levelData?.sefData.triggers.find((candidate) => candidate.name === triggerName);
-                const title = trigger?.literaryName === undefined ? triggerName : this.levelData?.sdbData[trigger.literaryName] ?? triggerName;
+            onContainerOpen: (owner, targetName) => {
+                const trigger = this.levelData?.sefData.triggers.find((candidate) => candidate.name === targetName);
+                const person = this.levelData?.levelPersons.find((candidate) => candidate.name.toLowerCase() === targetName.toLowerCase());
+                const literaryName = trigger?.literaryName ?? person?.literaryName;
+                const title = literaryName === undefined
+                    ? person?.literaryLabel ?? targetName
+                    : this.levelData?.sdbData[literaryName] ?? person?.literaryLabel ?? targetName;
                 this.options.onContainerOpen?.(owner, title);
             },
             onPersonSound: (shader) => this.playPersonSound(shader),
@@ -183,11 +196,15 @@ export class Level {
             [...new Set(lvlData.triggerDescription.map((description) => description.number))]
                 .map(async (number) => [number, await loadCSX(Paths.LEVEL_TRIGGER(sefData.pack, number))] as const),
         ));
-        const triggerCells = Object.fromEntries(lvlData.triggerDescription.map((description) => {
+        const triggerMasks: LevelTriggerMask[] = lvlData.triggerDescription.map((description) => {
             const image = triggerImages.get(description.number);
             if (!image) throw new Error(`Не найдена маска триггера ${description.name}`);
-            return [description.name, buildTriggerCells(description, image, lvlData.mapSize)];
-        }));
+            return { ...description, image };
+        });
+        const triggerCells = Object.fromEntries(triggerMasks.map((trigger) => [
+            trigger.name,
+            buildTriggerCells(trigger, trigger.image, lvlData.mapSize),
+        ]));
 
         const levelDoors: LevelDoor[] = [];
         for (let i = 0; i < lvlData.doors.length; i++) {
@@ -285,7 +302,7 @@ export class Level {
 
         this.levelData = {
             gameMode, levelName: level, initScript, coreScript,
-            image: mapImage, sdbData, sefData, laoData, lvlData, levelStatics, levelAnimations, levelDoors, levelMasks, triggerCells, levelPersons, player
+            image: mapImage, sdbData, sefData, laoData, lvlData, levelStatics, levelAnimations, levelDoors, levelMasks, triggerCells, triggerMasks, levelPersons, player
         };
 
         this.mapRenderer?.destroy();
@@ -297,8 +314,11 @@ export class Level {
             this.levelData,
             (tick, simulationTimeMs, playerPosition) => this.runtime.update(tick, simulationTimeMs, playerPosition),
             (person) => {
-                const literaryName = person.literaryName === undefined ? undefined : this.levelData?.sdbData[person.literaryName];
-                this.options.onDialog?.([person.name, person.scriptDialog ?? "", literaryName ?? person.literaryLabel ?? person.name]);
+                void this.runtime.interactDeadPerson(person.name).then((opened) => {
+                    if (opened || !person.scriptDialog) return;
+                    const literaryName = person.literaryName === undefined ? undefined : this.levelData?.sdbData[person.literaryName];
+                    this.options.onDialog?.([person.name, person.scriptDialog, literaryName ?? person.literaryLabel ?? person.name]);
+                }).catch((error) => console.error(`Не удалось открыть инвентарь ${person.name}`, error));
             },
 
             (person) => {
@@ -308,6 +328,26 @@ export class Level {
             (name) => this.runtime.toggleDoor(name),
             (name) => void this.runtime.interactTrigger(name).catch((error) => console.error(`Не удалось взаимодействовать с ${name}`, error)),
             (cursor) => this.options.onCursorChange?.(cursor),
+            (kind, name) => {
+                if (!name) {
+                    this.options.onStatusText?.();
+                    return;
+                }
+                if (kind === "person") {
+                    const person = this.levelData?.levelPersons.find((candidate) => candidate.name === name);
+                    const text = person?.literaryName === undefined ? person?.literaryLabel : this.levelData?.sdbData[person.literaryName];
+                    this.options.onStatusText?.(text ?? name);
+                    return;
+                }
+                if (kind === "door") {
+                    const door = this.levelData?.levelDoors.find((candidate) => candidate.sefName === name);
+                    this.options.onStatusText?.((door?.isOpened ? door.nameOpened : door?.nameClosed) ?? name);
+                    return;
+                }
+                const trigger = this.levelData?.sefData.triggers.find((candidate) => candidate.name === name);
+                const text = trigger?.literaryName === undefined ? undefined : this.levelData?.sdbData[trigger.literaryName];
+                this.options.onStatusText?.(text ?? name);
+            },
         );
         for (const [technicalName, present] of Object.entries(this.runtime.snapshot().persons)) {
             this.mapRenderer.setPersonPresent(technicalName, present);
@@ -345,7 +385,7 @@ export class Level {
 
     private playPersonSound(shader: SoundShaderDefinition): void {
         const audio = new Audio(chooseSoundWave(shader));
-        audio.volume = Math.min(1, Math.max(0, shader.volume));
+        audio.volume = Math.min(1, Math.max(0, shader.volume * this.soundVolume));
         const cleanup = (): void => { this.oneShotAudio.delete(audio); };
         audio.addEventListener("ended", cleanup, { once: true });
         audio.addEventListener("error", cleanup, { once: true });
@@ -380,6 +420,20 @@ export class Level {
 
     public getMinimapState() {
         return this.mapRenderer?.getMinimapState() ?? null;
+    }
+
+    public centerCameraAt(position: Readonly<{ x: number; y: number }>): void {
+        this.mapRenderer?.centerCameraAt(position);
+    }
+
+    public applySettings(settings: Readonly<GameSettings>): void {
+        this.soundVolume = Math.max(0, Math.min(1, Number(settings[5]) / 100));
+        this.audioWeather.setVolumes({
+            master: 1,
+            music: Math.max(0, Math.min(1, Number(settings[6]) / 100)),
+            ambient: this.soundVolume,
+        });
+        this.mapRenderer?.applySettings(settings);
     }
 
 

@@ -18,20 +18,20 @@ interface MagicBookData {
 }
 
 const MAGIC_SCHOOLS = [
-    { name: "Магия богов", magicIds: [36, 27, 30, 33, 28, 32, 29, 34, 37, 26, 31, 35, 38] },
-    { name: "Магия стихий", magicIds: [15, 17, 18, 16, 21, 24, 14, 20, 23, 13, 25, 19, 22] },
-    { name: "Магия света", magicIds: [45, 40, 47, 42, 43, 46, 39, 50, 51, 48, 44, 41, 49] },
-    { name: "Магия тьмы", magicIds: [1, 11, 8, 0, 6, 12, 3, 9, 4, 2, 5, 7, 10] },
-    { name: "Магия теней", magicIds: [66, 69, 77, 73, 72, 70, 65, 71, 74, 68, 75, 76, 67] },
-    { name: "Магия природы", magicIds: [53, 60, 62, 52, 56, 61, 54, 59, 63, 58, 64, 55, 57] },
+    { name: "Магия богов", label: "Боги", magicIds: [36, 27, 30, 33, 28, 32, 29, 34, 37, 26, 31, 35, 38] },
+    { name: "Магия света", label: "Свет", magicIds: [45, 40, 47, 42, 43, 46, 39, 50, 51, 48, 44, 41, 49] },
+    { name: "Магия природы", label: "Природа", magicIds: [53, 60, 62, 52, 56, 61, 54, 59, 63, 58, 64, 55, 57] },
+    { name: "Магия стихий", label: "Стихии", magicIds: [15, 17, 18, 16, 21, 24, 14, 20, 23, 13, 25, 19, 22] },
+    { name: "Магия теней", label: "Тени", magicIds: [66, 69, 77, 73, 72, 70, 65, 71, 74, 68, 75, 76, 67] },
+    { name: "Магия тьмы", label: "Тьма", magicIds: [1, 11, 8, 0, 6, 12, 3, 9, 4, 2, 5, 7, 10] },
 ] as const;
 const SPELLS_PER_SCHOOL = 13;
 const SPELL_POSITIONS = [
-    [122, 41],
-    [96, 113], [144, 113],
-    [77, 188], [122, 188], [168, 188],
-    [65, 264], [122, 264], [176, 264],
-    [48, 339], [96, 339], [144, 339], [191, 339],
+    [83, 565], [201, 565], [319, 565], [436, 565],
+    [131, 434], [263, 434], [397, 434],
+    [155, 304], [263, 304], [368, 304],
+    [202, 174], [310, 174],
+    [257, 47],
 ] as const;
 
 const loadSdb = async (path: string): Promise<SDBData> => {
@@ -111,7 +111,7 @@ export const MagicBookPanel = ({ game, snapshot, onClose }: MagicBookPanelProps)
                 key={magicId}
                 type="button"
                 className={styles.magicSpell}
-                style={{ left: `${SPELL_POSITIONS[index][0] / 441 * 100}%`, top: `${SPELL_POSITIONS[index][1] / 440 * 100}%` }}
+                style={{ left: `${SPELL_POSITIONS[index][0] / 1024 * 100}%`, top: `${SPELL_POSITIONS[index][1] / 768 * 100}%` }}
                 aria-label={data?.spellNames[magicId] ?? `Заклинание ${magicId}`}
                 aria-pressed={selectedMagicId === magicId}
                 draggable
@@ -148,7 +148,7 @@ export const MagicBookPanel = ({ game, snapshot, onClose }: MagicBookPanelProps)
                 onMouseDown={() => setPressedSchool(index)}
                 onMouseUp={() => setPressedSchool(null)}
                 onClick={() => setSchoolAndReset(index)}
-            ><ColorKeyImage src={schoolButton(index, pressedSchool === index || hoveredSchool === index || school === index)} /></button>)}
+            ><ColorKeyImage src={schoolButton(index, pressedSchool === index || hoveredSchool === index || school === index)} /><span>{magicSchool.label}</span></button>)}
         </nav>
 
         <div className={styles.magicHotbar} aria-label="Быстрый доступ к магии">

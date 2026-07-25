@@ -13,86 +13,63 @@
     inset: 0;
     width: 100%;
     height: 100%;
+    pointer-events: none;
 }
 
-.panel > h1 {
+.traderName {
     position: absolute;
-    top: 5.5%;
-    right: 0;
-    left: 0;
-    margin: 0;
-    font-size: clamp(18px, 2.5vw, 34px);
+    left: 1.2%;
+    top: 1.2%;
+    z-index: 2;
+    width: 24.8%;
+    font-size: clamp(10px, 1.2vw, 16px);
+    font-weight: 700;
+    line-height: 2;
     text-align: center;
-    text-shadow: 0 1px #dfbd78;
+    text-shadow: 0 1px rgb(255 239 190 / 55%);
 }
 
-.panes {
+.itemStrip {
     position: absolute;
-    top: 18%;
-    right: 7%;
-    left: 7%;
+    z-index: 3;
     display: grid;
-    height: 62%;
-    grid-template-columns: 1fr 1fr;
-    gap: 8%;
+    gap: 2px;
+    box-sizing: border-box;
 }
 
-.inventory {
-    position: relative;
-    min-width: 0;
-    padding: 3.2rem 1rem 1rem;
-}
-
-.inventory h2 {
-    position: absolute;
-    top: 0;
-    right: 0;
-    left: 0;
-    margin: 0;
-    font-size: clamp(14px, 1.8vw, 24px);
-    text-align: center;
-}
-
-.grid {
-    display: grid;
-    height: 100%;
-    grid-template-columns: repeat(5, 1fr);
-    grid-auto-rows: 20%;
-    gap: 1%;
-}
-
-.grid button {
+.itemStrip button {
     position: relative;
     min-width: 0;
     min-height: 0;
     border: 1px solid transparent;
-    padding: 3px;
-    background: rgb(34 20 7 / 12%);
+    padding: 2px;
+    background: transparent;
     cursor: pointer;
 }
 
-.grid button:hover,
-.grid button:focus-visible,
-.grid button[aria-pressed='true'] {
-    z-index: 3;
-    border-color: #d7b35f;
-    outline: 0;
-    background: rgb(227 189 98 / 20%);
-    box-shadow: inset 0 0 12px rgb(255 224 133 / 65%);
+.itemStrip button:hover,
+.itemStrip button:focus-visible {
+    z-index: 5;
+    border-color: rgb(227 190 92 / 90%);
+    outline: 1px solid #e3be5c;
 }
 
-.grid button > img,
-.grid button > span:first-child {
+.itemStrip button > img,
+.itemStrip button > span:first-child {
     width: 100%;
     height: 100%;
     object-fit: contain;
+    pointer-events: none;
 }
 
-.grid button > strong {
+.itemStrip button > strong {
     position: absolute;
-    right: 2px;
+    right: 1px;
     bottom: 0;
+    padding: 0 2px;
     color: #fff0b2;
+    background: rgb(25 12 3 / 80%);
+    font: 700 clamp(8px, .9vw, 12px) Arial, sans-serif;
     text-shadow: 0 1px 2px #000;
 }
 
@@ -100,6 +77,7 @@
     position: absolute;
     bottom: calc(100% + 4px);
     left: 50%;
+    z-index: 8;
     display: none;
     width: 190px;
     padding: 6px;
@@ -113,72 +91,123 @@
 }
 
 .tooltip b { display: block; color: #f1d58c; }
-.grid button:hover .tooltip,
-.grid button:focus-visible .tooltip { display: block; }
+.itemStrip button:hover .tooltip,
+.itemStrip button:focus-visible .tooltip { display: block; }
+
+.authoredControls { z-index: 5; }
+.authoredControls :global([data-gui-type="GUI_DD_CONTAINER"]) { pointer-events: none; }
+
+.lootPanel { z-index: 31; }
+
+.lootBackground {
+    position: absolute;
+    left: 24.21875%;
+    top: 29.9479167%;
+    z-index: 1;
+    width: 51.5625%;
+    height: 35.9375%;
+    pointer-events: none;
+}
+
+.lootTitle {
+    position: absolute;
+    left: 34%;
+    top: 30.7%;
+    z-index: 3;
+    width: 32%;
+    overflow: hidden;
+    color: #c3bca5;
+    font: 700 clamp(9px, 1vw, 13px) ZlatoPalatino, serif;
+    text-align: center;
+    text-overflow: ellipsis;
+    text-shadow: 0 1px #000;
+    white-space: nowrap;
+}
+
+.lootScroll,
+.takeAll,
+.lootClose {
+    position: absolute;
+    z-index: 5;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+.lootScroll { width: 2.44140625%; height: 6.7708333%; }
+.lootOtherLeft { left: 32.03125%; top: 34.114583%; }
+.lootOtherRight { left: 65.52734375%; top: 34.114583%; }
+.lootHeroLeft { left: 32.03125%; top: 49.348958%; }
+.lootHeroRight { left: 65.52734375%; top: 49.348958%; }
+
+.takeAll {
+    left: 47.16796875%;
+    top: 43.359375%;
+    width: 5.2734375%;
+    height: 3.125%;
+}
+
+.takeAll:hover,
+.takeAll:focus-visible { background: url('/assets/engineres/gpanel/but13l.bmp') center / 100% 100% no-repeat; outline: 0; }
+.takeAll:active { background-image: url('/assets/engineres/gpanel/but13p.bmp'); }
+
+.lootClose {
+    left: 47.75390625%;
+    top: 58.0729167%;
+    width: 4.19921875%;
+    height: 4.9479167%;
+}
+
+.lootClose:hover,
+.lootClose:focus-visible { background: url('/assets/engineres/gpanel/but14l.bmp') center / 100% 100% no-repeat; outline: 0; }
+.lootClose:active { background-image: url('/assets/engineres/gpanel/but14p.bmp'); }
 
 .stackDialog {
     position: absolute;
-    top: 42%;
+    top: 50%;
     left: 50%;
-    z-index: 7;
-    display: grid;
-    width: 245px;
-    height: 140px;
-    padding: 20px 18px 12px;
-    box-sizing: border-box;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
+    z-index: 9;
+    width: 24.0234375%;
+    height: 26.171875%;
     transform: translate(-50%, -50%);
 }
 
 .stackDialog > img {
     position: absolute;
     inset: 0;
-    z-index: -1;
     width: 100%;
     height: 100%;
+    pointer-events: none;
 }
 
-.stackDialog > strong,
-.stackDialog > label { grid-column: 1 / -1; text-align: center; }
-.stackDialog input { width: 4rem; }
-.stackDialog button { border: 1px solid #6d5025; background: #c2a367; font: inherit; cursor: pointer; }
+.stackDialog > :global([data-gui-script="stacks_gui"]) { z-index: 3; }
 
-.takeAll {
+.stackItem {
     position: absolute;
-    right: 12%;
-    bottom: 4.5%;
-    z-index: 3;
-    min-width: 13rem;
-    height: 6%;
-    border: 1px solid #654719;
-    color: #2c1805;
-    background: #c5a566;
-    font: 700 clamp(12px, 1.4vw, 18px)/1 ZlatoPalatino, serif;
-    cursor: pointer;
+    z-index: 2;
 }
 
-.close {
+.stackItem > img,
+.stackItem > span:first-child {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.stackItem > strong {
     position: absolute;
-    right: 2.83203125%;
-    bottom: .78125%;
-    z-index: 4;
-    width: 7.32421875%;
-    height: 8.8541667%;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
+    right: 0;
+    bottom: 0;
+    color: #fff0b2;
+    text-shadow: 0 1px 2px #000;
 }
-
-.close:hover,
-.close:focus-visible { background: url('/assets/engineres/trade/exitl.bmp') center / 100% 100% no-repeat; outline: 0; }
-.close:active { background-image: url('/assets/engineres/trade/exit.bmp'); }
 
 .error {
     position: absolute;
     bottom: 11%;
     left: 50%;
-    z-index: 8;
+    z-index: 10;
     color: #ffd1bf;
     background: rgb(55 10 5 / 90%);
     transform: translateX(-50%);

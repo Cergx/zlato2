@@ -77,6 +77,18 @@
     left: 80.566406%;
 }
 
+.slotPlaceholder {
+    position: absolute;
+    z-index: 1;
+    top: 39.74359%;
+    width: 5.371094%;
+    height: 36.538462%;
+    pointer-events: none;
+}
+
+.crosierPlaceholder { left: 85.644531%; }
+.spellPlaceholder { left: 92.675781%; }
+
 .toolbarButton {
     position: absolute;
     z-index: 2;
@@ -194,6 +206,8 @@
     height: 21.875%;
     border: 1px solid #dfe2d5;
     background: #120f0b;
+    cursor: crosshair;
+    pointer-events: auto;
 }
 
 .minimapFrame[data-hidden='true'] {

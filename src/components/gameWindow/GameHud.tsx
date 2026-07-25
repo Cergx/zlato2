@@ -9,10 +9,12 @@ import styles from "./GameHud.module.scss";
 
 interface GameHudProps {
     getGame: () => Game | null;
+    statusText: string;
     onSkills: () => void;
     onInventory: () => void;
     onJournal: () => void;
     onMagic: () => void;
+    onRest: () => void;
     onPause: () => void;
     skillsActive: boolean;
     onCombatModeChange?: (active: boolean) => void;
@@ -27,6 +29,7 @@ interface HudInfo {
     energyRatio: number;
     worldMapAvailable: boolean;
     combatMode: boolean;
+    heroDead: boolean;
     combatMessage: string;
     hotbarSpellIds: readonly (number | null)[];
     castableSpellIds: readonly number[];
@@ -42,6 +45,7 @@ const initialInfo: HudInfo = {
     energyRatio: 1,
     worldMapAvailable: false,
     combatMode: false,
+    heroDead: false,
     combatMessage: "",
     hotbarSpellIds: Array.from({ length: 9 }, () => null),
     castableSpellIds: [],
@@ -93,7 +97,7 @@ const playHudSound = (reference: string): void => {
     void audio.play().catch(() => undefined);
 };
 
-export const GameHud = ({ getGame, onSkills, onInventory, onJournal, onMagic, onPause, skillsActive, onCombatModeChange }: GameHudProps) => {
+export const GameHud = ({ getGame, statusText, onSkills, onInventory, onJournal, onMagic, onPause, onRest, skillsActive, onCombatModeChange }: GameHudProps) => {
     const frameRef = useRef<HTMLCanvasElement>(null);
     const minimapRef = useRef<HTMLCanvasElement>(null);
     const [hudVisible, setHudVisible] = useState(true);
@@ -133,6 +137,7 @@ export const GameHud = ({ getGame, onSkills, onInventory, onJournal, onMagic, on
                 energyRatio: energyMaximum > 0 ? Math.max(0, Math.min(1, energyValue / energyMaximum)) : 1,
                 worldMapAvailable: game.canShowWorldMap(),
                 combatMode: game.isCombatMode(),
+                heroDead: heroCombat?.health === 0,
                 combatMessage: runtime.combat.message,
                 hotbarSpellIds: runtime.magic.hotbarSpellIds,
                 castableSpellIds: runtime.magic.castableSpellIds,
@@ -261,11 +266,22 @@ export const GameHud = ({ getGame, onSkills, onInventory, onJournal, onMagic, on
     return (
         <div className={styles.hud} data-hidden={!hudVisible}>
             <div className={styles.minimapFrame} data-hidden={!minimapVisible} aria-label="Миникарта">
-                <canvas ref={minimapRef} width={220} height={165} />
+                <canvas ref={minimapRef} width={220} height={165} onPointerDown={(event) => {
+                    const game = getGame();
+                    const mapSize = game?.getLevel()?.getData()?.lvlData.mapSize;
+                    if (!game || !mapSize) return;
+                    const bounds = event.currentTarget.getBoundingClientRect();
+                    game.centerCameraAt({
+                        x: (event.clientX - bounds.left) / Math.max(1, bounds.width) * mapSize.width,
+                        y: (event.clientY - bounds.top) / Math.max(1, bounds.height) * mapSize.height,
+                    });
+                }} />
             </div>
             <div className={styles.panel}>
                 <canvas ref={frameRef} width={1024} height={156} />
-                <span className={styles.status}>{info.combatMessage}</span>
+                <img className={`${styles.slotPlaceholder} ${styles.crosierPlaceholder}`} src="/assets/engineres/gpanel/zaglushka3.bmp" alt="" draggable={false} />
+                <img className={`${styles.slotPlaceholder} ${styles.spellPlaceholder}`} src="/assets/engineres/gpanel/zaglushka4.bmp" alt="" draggable={false} />
+                <span className={styles.status}>{info.heroDead ? "Игра окончена." : statusText || info.combatMessage}</span>
                 <span className={styles.lifeValue}>{Math.round(info.lifeValue)}</span>
                 <span className={styles.energyValue}>{Math.round(info.energyValue)}</span>
                 <div className={styles.magicHotbar} aria-label="Быстрые заклинания">
@@ -288,8 +304,8 @@ export const GameHud = ({ getGame, onSkills, onInventory, onJournal, onMagic, on
                 </div>
                 <button className={`${styles.toolbarButton} ${styles.buttonInventory}`} type="button" aria-label="Инвентарь" onClick={() => { playHudSound("sounds\\ui\\panel\\inventory"); onInventory(); }} />
                 <button className={`${styles.toolbarButton} ${styles.buttonCharacter}`} type="button" aria-label="Навыки" aria-pressed={skillsActive} onClick={() => { playHudSound("sounds\\ui\\panel\\navyki"); onSkills(); }} />
-                <button className={`${styles.toolbarButton} ${styles.buttonConsole}`} type="button" aria-label="Главное меню" onClick={() => { playHudSound("sounds\\ui\\panel\\mainmenu"); onPause(); }} />
-                <button className={`${styles.toolbarButton} ${styles.buttonRest}`} type="button" aria-label="Отдых" onClick={() => { playHudSound("sounds\\ui\\panel\\relax"); getGame()?.rest(); }} />
+                <button className={`${styles.toolbarButton} ${styles.buttonConsole}`} type="button" aria-label="Меню" onClick={() => { playHudSound("sounds\\ui\\panel\\mainmenu"); onPause(); }} />
+                <button className={`${styles.toolbarButton} ${styles.buttonRest}`} type="button" aria-label="Отдых" onClick={() => { playHudSound("sounds\\ui\\panel\\relax"); onRest(); }} />
                 <button className={`${styles.toolbarButton} ${styles.buttonJournal}`} type="button" aria-label="Дневник" onClick={() => { playHudSound("sounds\\ui\\panel\\journal"); onJournal(); }} />
                 <button className={`${styles.toolbarButton} ${styles.buttonMinimap}`} type="button" aria-label="Миникарта" aria-pressed={minimapVisible} onClick={() => { playHudSound("sounds\\ui\\panel\\minimap"); setMinimapVisible((visible) => !visible); }} />
                 <button className={`${styles.toolbarButton} ${styles.buttonMagic}`} type="button" aria-label="Книга магии" onClick={() => { playHudSound("sounds\\ui\\panel\\magicbook"); onMagic(); }} />

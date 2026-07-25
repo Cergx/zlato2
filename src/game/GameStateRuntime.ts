@@ -135,6 +135,7 @@ export interface GameStateRuntimeOptions {
     onDoorChange?: (change: ScenarioDoorChange) => void;
     onTriggerChange?: (trigger: ScenarioTriggerState) => void;
     onFinished?: (ending: number) => void;
+    onHeroDeath?: () => void;
     onTrade?: () => void;
     onContainerOpen?: (owner: string, triggerName: string) => void;
     onMessage?: (message: SCRValue) => void;
@@ -355,6 +356,8 @@ export class GameStateRuntime {
     private readonly equipped: Partial<Record<EquipmentSlot, string>> = {};
     private readonly combatants = new Map<string, Combatant>();
     private readonly personSounds = new Map<string, PersonCombatAssets["sounds"]>();
+    private readonly corpseInventorySources = new Map<string, string>();
+    private readonly lootableCorpses = new Set<string>();
     private readonly random: () => number;
     private readonly combatProfiles = new Map<string, OriginalCombatProfile>();
     private readonly combatItems = new Map<string, readonly ShippedItem[]>();
@@ -385,6 +388,8 @@ export class GameStateRuntime {
     private experience = 0;
     private elapsedMinutes = 0;
     private lastCoreTick = 0;
+    private lastSimulationTimeMs: number | undefined;
+    private clockAccumulatorMs = 0;
     private npcRoutes: readonly NpcRouteState[] = [];
 
     public constructor(private readonly options: GameStateRuntimeOptions) {
@@ -397,6 +402,8 @@ export class GameStateRuntime {
         this.levelData = levelData;
         this.coreProgram = levelData.coreScript ? parseSCR(levelData.coreScript, `${levelData.levelName}/core.scr`) : null;
         this.lastCoreTick = 0;
+        this.lastSimulationTimeMs = undefined;
+        this.clockAccumulatorMs = 0;
         this.pendingDynamicRoute = undefined;
         this.pendingDynamicCombatLoads = [];
         this.currentDynamicPersonLevel = dynamicPersonLevelKey(levelData);
@@ -432,6 +439,18 @@ export class GameStateRuntime {
         if (!this.scenario || !this.levelData) return;
         this.lastPlayerPosition = { ...playerPosition };
         this.scenario.setPlayerWorldPosition(playerPosition);
+        if (this.lastSimulationTimeMs !== undefined) {
+            const delta = simulationTimeMs - this.lastSimulationTimeMs;
+            if (delta >= 0 && delta < 60_000) {
+                this.clockAccumulatorMs += delta;
+                const elapsedGameMinutes = Math.floor(this.clockAccumulatorMs / 1000);
+                if (elapsedGameMinutes > 0) {
+                    this.clockAccumulatorMs -= elapsedGameMinutes * 1000;
+                    this.advanceClock(elapsedGameMinutes);
+                }
+            }
+        }
+        this.lastSimulationTimeMs = simulationTimeMs;
         this.npcRoutes = this.scenario.advanceRoutes(simulationTimeMs);
         if (this.coreProgram && tick - this.lastCoreTick >= 20) {
             this.lastCoreTick = tick;
@@ -544,6 +563,27 @@ export class GameStateRuntime {
 
     public transferInventoryAll(source: string, destination: string): void {
         this.transferAllItems(source, destination);
+    }
+
+    public async interactDeadPerson(technicalName: string): Promise<boolean> {
+        const resolvedName = this.resolveCombatantName(technicalName);
+        const normalized = resolvedName?.toLowerCase() ?? technicalName.toLowerCase();
+        const combatant = resolvedName ? this.combatants.get(resolvedName) : undefined;
+        const inventorySource = this.corpseInventorySources.get(normalized);
+        if (!combatant?.isDead || !this.lootableCorpses.has(normalized) || !inventorySource) return false;
+
+        const inventoryOwner = `corpse:${resolvedName ?? technicalName}`;
+        if (!this.inventories.has(this.inventoryOwner(inventoryOwner))) {
+            const fileName = inventorySource.toLowerCase().endsWith(".inv")
+                ? inventorySource.toLowerCase()
+                : `${inventorySource.toLowerCase()}.inv`;
+            const response = await fetch(`${Paths.SCRIPTS}/inventory/${fileName}`);
+            if (!response.ok) throw new Error(`Failed to load corpse inventory ${fileName}: HTTP ${response.status}`);
+            const source = new TextDecoder("windows-1251").decode(await response.arrayBuffer());
+            this.initializeInventory(inventoryOwner, materializeInventory(parseInventoryScript(source), this.random));
+        }
+        this.options.onContainerOpen?.(inventoryOwner, resolvedName ?? technicalName);
+        return true;
     }
 
     public registerItem(item: ShippedItem): void {
@@ -700,7 +740,7 @@ export class GameStateRuntime {
         this.currentCombatant = hero.isDead ? undefined : "hero";
         const heroProfile = this.combatProfiles.get("hero");
         if (heroProfile && !hero.isDead) this.remainingActionPoints.set("hero", heroProfile.actionPoints);
-        this.combatMessage = hero.isDead ? "Герой погиб" : `Раунд ${this.combatRound}: ход героя`;
+        this.combatMessage = hero.isDead ? "Игра окончена." : `Раунд ${this.combatRound}: ход героя`;
         this.syncCombatParameters("hero");
         return !hero.isDead;
     }
@@ -762,6 +802,7 @@ export class GameStateRuntime {
         }
         this.experience = save.experience;
         this.elapsedMinutes = save.clock.day * 24 * 60 + save.clock.minuteOfDay;
+        this.clockAccumulatorMs = 0;
         if (this.scenario) {
             for (const [name, opened] of Object.entries(save.doors)) this.scenario.setDoorOpened(name, opened);
             for (const [name, state] of Object.entries(save.triggers)) {
@@ -1133,6 +1174,8 @@ export class GameStateRuntime {
         this.combatantPositions.clear();
         this.persons.clear();
         this.personSounds.clear();
+        this.corpseInventorySources.clear();
+        this.lootableCorpses.clear();
         this.setCombatMode(false);
 
         this.refreshHeroCombatProfile();
@@ -1144,6 +1187,9 @@ export class GameStateRuntime {
         this.persons.set(person.name, true);
         this.combatantPositions.set(person.name, cellToWorld(person.position));
         if (personAssets?.sounds) this.personSounds.set(person.name.toLowerCase(), personAssets.sounds);
+        const normalizedName = person.name.toLowerCase();
+        if (person.scriptInventory) this.corpseInventorySources.set(normalizedName, person.scriptInventory);
+        if (personAssets?.resource?.containerAfterDie) this.lootableCorpses.add(normalizedName);
         const template = personAssets?.template;
         const parameters: Record<string, number> = template
             ? { ...template.attributes, ...template.skills }
@@ -1271,6 +1317,8 @@ export class GameStateRuntime {
         this.remainingActionPoints.set(attackerName, remaining - result.actionPointCost);
         target.health = result.healthAfter;
         target.isDead = result.killed;
+        const heroKilled = result.killed && targetName.toLowerCase() === "hero";
+        if (heroKilled) this.options.onHeroDeath?.();
         this.options.onCombatAnimation?.(attackerName, "attack");
         if (result.hit) this.options.onCombatAnimation?.(targetName, result.killed ? "die" : "suffer");
         const attackSound = this.findPersonSound(attackerName, result.hit ? ["attack_0.hit", "attack_0"] : ["attack_0.miss", "attack_0"]);
@@ -1279,11 +1327,13 @@ export class GameStateRuntime {
             const reactionSound = this.findPersonSound(targetName, result.killed ? ["die", "suffer"] : ["suffer"]);
             if (reactionSound) this.options.onPersonSound?.(reactionSound);
         }
-        this.combatMessage = result.critical
-            ? `Критический удар: ${result.appliedDamage}`
-            : result.hit
-                ? `Урон: ${result.appliedDamage}`
-                : result.criticalMiss ? "Критический промах" : "Промах";
+        this.combatMessage = heroKilled
+            ? "Игра окончена."
+            : result.critical
+                ? `Критический удар: ${result.appliedDamage}`
+                : result.hit
+                    ? `Урон: ${result.appliedDamage}`
+                    : result.criticalMiss ? "Критический промах" : "Промах";
         this.syncCombatParameters(attackerName);
         this.syncCombatParameters(targetName);
         return result;
@@ -1348,6 +1398,7 @@ export class GameStateRuntime {
                 }
             }
             target.isDead = target.health === 0;
+            if (target.isDead && targetName.toLowerCase() === "hero") this.options.onHeroDeath?.();
             this.options.onMagicEffect?.(magic.technicalName, targetName);
             if (damage > damageBeforeTarget) this.options.onCombatAnimation?.(targetName, target.isDead ? "die" : "suffer");
             if (target.isDead) this.activeEnemies.delete(targetName);

@@ -14,6 +14,7 @@ import { PauseMenu } from "../PauseMenu.tsx";
 import { readGameSettings, type GameSettings } from "../../game/GameSettingsRuntime.ts";
 import { LoadingScreen } from "./LoadingScreen";
 import { ItemTransferPanel } from "../ItemTransferPanel";
+import { RelaxPanel } from "./RelaxPanel.tsx";
 
 interface GameWindowProps {
     gameMode: "single" | "multiplayer";
@@ -90,21 +91,24 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu }: 
     const [worldMapLocations, setWorldMapLocations] = useState<readonly WorldMapLocationState[] | null>(null);
     const [finishedEnding, setFinishedEnding] = useState<number | null>(null);
     const [runtimeError, setRuntimeError] = useState<string | null>(null);
+    const [statusText, setStatusText] = useState("");
     const [loadingLevel, setLoadingLevel] = useState(level);
     const [loading, setLoading] = useState(true);
     const [transferPanel, setTransferPanel] = useState<{ owner: string; title: string; mode: "loot" | "trade" } | null>(null);
-    const [activePanel, setActivePanel] = useState<GameMenuPanelKind | "inventory" | "skills" | "characteristics" | "pause" | null>(null);
+    const [activePanel, setActivePanel] = useState<GameMenuPanelKind | "inventory" | "skills" | "characteristics" | "pause" | "relax" | null>(null);
     const [settings, setSettings] = useState<GameSettings>(() => readGameSettings());
     const chooseDialogue = useCallback((optionId: number) => {
         gameRef.current?.chooseDialogue(optionId);
     }, []);
     const travelWorldMap = useCallback((locationId: string) => gameRef.current?.travelWorldMap(locationId), []);
     const closeWorldMap = useCallback(() => gameRef.current?.closeWorldMap(), []);
-    const togglePanel = useCallback((panel: GameMenuPanelKind | "inventory" | "skills" | "characteristics" | "pause") => {
+    const togglePanel = useCallback((panel: GameMenuPanelKind | "inventory" | "skills" | "characteristics" | "pause" | "relax") => {
         setActivePanel((current) => current === panel ? null : panel);
     }, []);
     const closePanel = useCallback(() => setActivePanel(null), []);
     const getGame = useCallback(() => gameRef.current, []);
+
+    useEffect(() => gameRef.current?.applySettings(settings), [settings]);
 
 
     useEffect(() => {
@@ -119,8 +123,15 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu }: 
                 onDialogueStateChange: setDialogueState,
                 onWorldMapStateChange: setWorldMapLocations,
                 onGameFinished: setFinishedEnding,
+                onHeroDeath: () => {
+                    setActivePanel(null);
+                    setTransferPanel(null);
+                    setDialogueState(null);
+                    setWorldMapLocations(null);
+                },
                 onCursorChange: setCursor,
                 onError: (error) => setRuntimeError(error instanceof Error ? error.message : String(error)),
+                onStatusTextChange: (text) => setStatusText(text ?? ""),
                 onLoadingStateChange: (active, loadingName) => {
                     setLoadingLevel(loadingName);
                     setLoading(active);
@@ -181,19 +192,22 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu }: 
 
             <GameHud
                 getGame={getGame}
+                statusText={statusText}
 
                 onSkills={() => togglePanel("skills")}
                 onInventory={() => togglePanel("inventory")}
                 onJournal={() => togglePanel("journal")}
                 onMagic={() => togglePanel("magic")}
                 onPause={() => togglePanel("pause")}
+                onRest={() => togglePanel("relax")}
                 skillsActive={activePanel === "skills"}
             />
             {(activePanel === "inventory" || activePanel === "skills" || activePanel === "characteristics") && gameRef.current && <InventoryPanel game={gameRef.current} initialView={activePanel} onClose={closePanel} />}
-            {activePanel && activePanel !== "inventory" && activePanel !== "skills" && activePanel !== "characteristics" && activePanel !== "pause" && gameRef.current && <GameMenuPanel game={gameRef.current} kind={activePanel} onClose={closePanel} />}
+            {activePanel && activePanel !== "inventory" && activePanel !== "skills" && activePanel !== "characteristics" && activePanel !== "pause" && activePanel !== "relax" && gameRef.current && <GameMenuPanel game={gameRef.current} kind={activePanel} onClose={closePanel} />}
             {activePanel === "pause" && (
                 <PauseMenu getGame={getGame} onClose={closePanel} onMainMenu={onMainMenu} onApplySettings={setSettings} />
             )}
+            {activePanel === "relax" && gameRef.current && <RelaxPanel game={gameRef.current} onClose={closePanel} />}
 
             {transferPanel && gameRef.current && (
                 <ItemTransferPanel game={gameRef.current} {...transferPanel} onClose={() => setTransferPanel(null)} />

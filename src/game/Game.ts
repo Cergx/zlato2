@@ -35,6 +35,7 @@ import type { EquipmentSlot } from "./systems/Items.ts";
 import { EQUIPPED_INVENTORY_OWNER } from "./GameStateRuntime.ts";
 import type { GameRuntimeSnapshot } from "./GameStateRuntime.ts";
 import type { CursorType } from "../enums/CursorTypes.ts";
+import { readGameSettings, type GameSettings } from "./GameSettingsRuntime.ts";
 import { createBrowserAudio, resolveLevelAudioUrl, type BrowserAudio } from "./AudioWeatherRuntime.ts";
 import { parseHeroProfiles, selectHeroProfile, type HeroProfile } from "./HeroProfileRuntime.ts";
 
@@ -80,11 +81,13 @@ export interface GameEvents {
     onLevelChanged?: (gameMode: GameMode, levelName: string) => void;
     onError?: (error: unknown) => void;
     onGameFinished?: (ending: number) => void;
+    onHeroDeath?: () => void;
     onCursorChange?: (cursor: CursorType) => void;
     onLoadingStateChange?: (loading: boolean, levelName: string) => void;
     onCombatModeChange?: (active: boolean) => void;
     onContainerOpen?: (owner: string, title: string) => void;
     onTradeRequest?: (owner: string, title: string) => void;
+    onStatusTextChange?: (text?: string) => void;
 }
 
 export class Game {
@@ -104,6 +107,7 @@ export class Game {
     private currentWorldMapLocation: string | null = null;
     private combatMode = false;
     private dialogueSpeakerTechnical: string | null = null;
+    private settings: GameSettings = readGameSettings();
 
 
 
@@ -138,10 +142,13 @@ export class Game {
             onGlobalMap: () => this.openWorldMap(),
             onDialog: (arguments_) => void this.openDialogue(arguments_).catch((error) => this.reportError(error)),
             onFinished: (ending) => this.events.onGameFinished?.(ending),
+            onHeroDeath: () => this.events.onHeroDeath?.(),
             onCursorChange: (cursor) => this.events.onCursorChange?.(cursor),
             onContainerOpen: (owner, triggerName) => this.events.onContainerOpen?.(owner, triggerName),
             onTrade: () => void this.openCurrentTrade().catch((error) => this.reportError(error)),
+            onStatusText: (text) => this.events.onStatusTextChange?.(text),
         });
+        this.level.applySettings(this.settings);
         const heroProfile = await this.loadHeroProfile();
         this.level.initializeHeroProfile(heroProfile.parameters, heroProfile.experience);
 
@@ -201,6 +208,16 @@ export class Game {
 
     public getRuntimeSnapshot(): GameRuntimeSnapshot | null {
         return this.level?.getRuntimeSnapshot() ?? null;
+    }
+
+    public centerCameraAt(position: Readonly<{ x: number; y: number }>): void {
+        this.level?.centerCameraAt(position);
+    }
+
+    public applySettings(settings: Readonly<GameSettings>): void {
+        this.settings = { ...settings };
+        this.level?.applySettings(settings);
+        if (this.dialogueVoice) this.dialogueVoice.volume = Math.max(0, Math.min(1, Number(settings[7]) / 100));
     }
 
     public isCombatMode(): boolean {
@@ -613,6 +630,8 @@ export class Game {
         voice.pause();
         voice.src = url;
         voice.loop = false;
+        voice.volume = Math.max(0, Math.min(1, Number(this.settings[7]) / 100));
+
         voice.currentTime = 0;
         try {
             const playback = voice.play();

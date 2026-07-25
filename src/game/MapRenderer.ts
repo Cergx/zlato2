@@ -1,5 +1,5 @@
 import { MapScroller } from "./MapScroller";
-import type { LevelAnimation, LevelData, LevelDoor, LevelStatic } from "./Level.ts";
+import type { LevelAnimation, LevelData, LevelDoor, LevelStatic, LevelTriggerMask } from "./Level.ts";
 import { loadHeroSprites, type LevelPerson } from "./PersonSprite.ts";
 import type { MHDRTile } from "./parsers/LVLParser.ts";
 import type { Direction, TilePosition } from "./parsers/SEFParser.ts";
@@ -82,6 +82,8 @@ interface ActiveMagicAnimation {
     readonly startedAt: number;
 }
 
+type HoverTargetKind = "person" | "door" | "trigger";
+
 interface BackgroundSpriteHighlight extends RenderBounds {
     readonly centerX: number;
     readonly centerY: number;
@@ -125,6 +127,7 @@ export class MapRenderer {
     private readonly onPersonClick?: (person: LevelPerson) => void;
     private readonly onPersonAttack?: (person: LevelPerson) => void;
     private readonly hiddenPersons = new Set<string>();
+    private readonly deadPersons = new Set<string>();
     private pendingPersonInteraction: PendingInteraction | undefined;
     private readonly doors = new Map<string, DoorRuntime>();
     private readonly doorsByStatic = new Map<LevelStatic, DoorRuntime>();
@@ -132,6 +135,8 @@ export class MapRenderer {
     private interactiveStatics = new Set<LevelStatic>();
     private interactiveAnimations = new Set<LevelAnimation>();
     private interactiveBackgrounds: readonly BackgroundSpriteHighlight[] = [];
+    private interactiveTriggerMasks: readonly LevelTriggerMask[] = [];
+    private hoveredTargetKey = "";
     private currentCursor = CursorType.NORMAL;
     private flashInteractiveObjects = false;
     private readonly highlightCanvas = document.createElement("canvas");
@@ -141,17 +146,23 @@ export class MapRenderer {
     private readonly magicEffects: ActiveMagicAnimation[] = [];
 
     private readonly simulationStepMs = 1000 / 60;
-    private readonly walkingSpeed = 48;
-    private readonly runningSpeed = 96;
+    private walkingSpeed = 48;
+    private runningSpeed = 96;
+    private animationSpeed = 1;
+    private alwaysRun = false;
+    private showHints = true;
+    private transparentOccluders = true;
     private readonly interactionRangeCells = 3;
     private readonly randomMovementRadius = 8;
 
     private readonly handleClick = (event: MouseEvent) => {
         if (event.button !== 0) return;
+        if (this.deadPersons.has("hero")) return;
         const clickPosition = this.eventWorldPosition(event);
         const clickedPerson = this.findPersonAt(clickPosition);
-        const attack = event.shiftKey || this.combatMode || this.magicTargeting;
-        if (clickedPerson && (attack || clickedPerson.person.scriptDialog)) {
+        const deadPerson = clickedPerson ? this.deadPersons.has(clickedPerson.person.name.toLowerCase()) : false;
+        const attack = !deadPerson && (event.shiftKey || this.combatMode || this.magicTargeting);
+        if (clickedPerson && (attack || clickedPerson.person.scriptDialog || deadPerson)) {
             this.beginPersonInteraction(clickedPerson, attack, event.detail > 1);
             return;
         }
@@ -175,24 +186,32 @@ export class MapRenderer {
         const edgeCursor = this.edgeCursor(local);
 
         if (edgeCursor) {
+            this.setHoveredTarget();
             this.changeCursor(edgeCursor);
             return;
         }
         const world = { x: local.x + this.offset.x, y: local.y + this.offset.y };
         const person = this.findPersonAt(world);
         if (person) {
-            this.changeCursor(this.magicTargeting ? CursorType.CAST : event.shiftKey || this.combatMode ? CursorType.ATTACK : person.person.scriptDialog ? CursorType.TALK : CursorType.NPC_TURN);
+            this.setHoveredTarget("person", person.person.name);
+            this.changeCursor(this.deadPersons.has(person.person.name.toLowerCase()) ? CursorType.TAKE : this.magicTargeting ? CursorType.CAST : event.shiftKey || this.combatMode ? CursorType.ATTACK : person.person.scriptDialog ? CursorType.TALK : CursorType.NPC_TURN);
             return;
         }
-        if (this.findDoorAt(world)) {
+        const door = this.findDoorAt(world);
+        if (door) {
+            this.setHoveredTarget("door", door.name);
             this.changeCursor(CursorType.OPEN);
             return;
         }
         const trigger = this.findTriggerAt(world);
+        this.setHoveredTarget(trigger ? "trigger" : undefined, trigger?.name);
         this.changeCursor(trigger ? this.cursorForTrigger(trigger) : CursorType.NORMAL);
     };
 
-    private readonly handleMouseLeave = () => this.changeCursor(CursorType.NORMAL);
+    private readonly handleMouseLeave = () => {
+        this.setHoveredTarget();
+        this.changeCursor(CursorType.NORMAL);
+    };
 
     private readonly handleKeyDown = (event: KeyboardEvent) => {
         if (event.key !== "Alt") return;
@@ -218,6 +237,7 @@ export class MapRenderer {
         private readonly onDoorClick?: (name: string) => void,
         private readonly onTriggerClick?: (name: string) => void,
         private readonly onCursorChange?: (cursor: CursorType) => void,
+        private readonly onHoverTarget?: (kind?: HoverTargetKind, name?: string) => void,
     ) {
         this.canvas = canvas;
         this.ctx = canvas.getContext("2d");
@@ -276,6 +296,25 @@ export class MapRenderer {
         };
     }
 
+    public centerCameraAt(position: Readonly<WorldPosition>): void {
+        this.scroller.centerOn(position);
+        this.offset = this.scroller.getOffset();
+    }
+
+    public applySettings(settings: Readonly<Record<number, boolean | number | string>>): void {
+        const animation = Number(settings[9]);
+        this.animationSpeed = Number.isFinite(animation) ? Math.max(0.25, Math.min(2, 0.5 + animation / 100)) : 1;
+        const speed = Number(settings[9]);
+        const movementFactor = Number.isFinite(speed) ? Math.max(0.5, Math.min(1.5, 0.5 + speed / 100)) : 1;
+        this.walkingSpeed = 48 * movementFactor;
+        this.runningSpeed = 96 * movementFactor;
+        this.scroller.setScrollSpeed(Number(settings[10]) || 0);
+        this.alwaysRun = settings[12] === true;
+        this.showHints = settings[13] !== false;
+        this.transparentOccluders = settings[14] !== false;
+        if (!this.showHints) this.setHoveredTarget();
+    }
+
     public getMinimapState() {
         const cameraOffset = this.scroller.getOffset();
         return {
@@ -329,6 +368,7 @@ export class MapRenderer {
             ? this.player
             : this.persons.find((candidate) => candidate.person.name.toLowerCase() === normalized);
         if (!runtime) return;
+        if (kind === "die") this.deadPersons.add(normalized);
         runtime.combatAnimation = { kind, startedAt: this.simulationTick * this.simulationStepMs };
         runtime.route = [];
         runtime.targetIndex = 0;
@@ -384,6 +424,7 @@ export class MapRenderer {
         window.removeEventListener("keydown", this.handleKeyDown);
         window.removeEventListener("keyup", this.handleKeyUp);
         window.removeEventListener("blur", this.handleWindowBlur);
+        this.setHoveredTarget();
         this.magicEffects.length = 0;
     }
 
@@ -423,6 +464,7 @@ export class MapRenderer {
         this.drawMagicEffects(highlightTime);
         if (this.flashInteractiveObjects) {
             this.drawBackgroundSpriteHighlights(highlightTime);
+            this.drawTriggerMaskHighlights(highlightTime);
             this.drawTriggerHighlights();
         }
     }
@@ -481,6 +523,29 @@ export class MapRenderer {
         }
     }
 
+    private drawTriggerMaskHighlights(now: number): void {
+        const context = this.highlightContext;
+        if (!context) return;
+        for (const trigger of this.interactiveTriggerMasks) {
+            const drawX = trigger.position.x - this.offset.x;
+            const drawY = trigger.position.y - this.offset.y;
+            if (drawX > this.canvas.width || drawY > this.canvas.height
+                || drawX + trigger.image.width < 0 || drawY + trigger.image.height < 0) continue;
+            if (this.highlightCanvas.width !== trigger.image.width) this.highlightCanvas.width = trigger.image.width;
+            if (this.highlightCanvas.height !== trigger.image.height) this.highlightCanvas.height = trigger.image.height;
+            context.clearRect(0, 0, trigger.image.width, trigger.image.height);
+            context.drawImage(
+                this.levelData.image,
+                trigger.position.x, trigger.position.y, trigger.image.width, trigger.image.height,
+                0, 0, trigger.image.width, trigger.image.height,
+            );
+            context.save();
+            context.drawImage(trigger.image, 0, 0);
+            context.restore();
+            this.tintAndDrawHighlight(drawX, drawY, trigger.image.width, trigger.image.height, now);
+        }
+    }
+
     private drawTriggerHighlights(): void {
         const context = this.ctx;
         if (!context) return;
@@ -516,7 +581,7 @@ export class MapRenderer {
         if (!edgeDirection && this.isEdgeCursor(this.currentCursor)) this.changeCursor(CursorType.NORMAL);
 
         for (const levelAnimation of this.levelData.levelAnimations) {
-            levelAnimation.animation?.update(this.simulationStepMs);
+            levelAnimation.animation?.update(this.simulationStepMs * this.animationSpeed);
         }
         this.onSimulationStep?.(this.simulationTick, simulationTime, this.getPlayerWorldPosition());
     }
@@ -667,7 +732,7 @@ export class MapRenderer {
     private movePlayerTo(destination: Readonly<WorldPosition>, running: boolean): void {
         this.planRoute(this.player, destination);
         this.player.waitUntil = 0;
-        this.player.running = running && this.player.moving;
+        this.player.running = (running || this.alwaysRun) && this.player.moving;
     }
 
     private beginPersonInteraction(runtime: PersonRuntime, attack: boolean, running: boolean): void {
@@ -851,7 +916,7 @@ export class MapRenderer {
     private findPersonAt(position: Readonly<WorldPosition>): PersonRuntime | undefined {
         const now = this.simulationTick * this.simulationStepMs;
         const candidates = this.persons
-            .filter((runtime) => !this.hiddenPersons.has(runtime.person.name) && runtime.combatAnimation?.kind !== "die")
+            .filter((runtime) => !this.hiddenPersons.has(runtime.person.name))
             .sort((left, right) => right.position.y - left.position.y);
         for (const runtime of candidates) {
             const frame = this.personRenderFrame(runtime, now);
@@ -890,9 +955,21 @@ export class MapRenderer {
     }
 
     private findTriggerAt(position: Readonly<WorldPosition>): TriggerRuntime | undefined {
-        const cell = worldToCell(position);
-        return [...this.triggers.values()].find((trigger) => trigger.active && trigger.visible
-            && trigger.cells.some((candidate) => candidate.x === cell.x && candidate.y === cell.y));
+        for (const trigger of this.triggers.values()) {
+            if (!trigger.active || !trigger.visible) continue;
+            const mask = this.levelData.triggerMasks.find((candidate) => candidate.name.toLowerCase() === trigger.name.toLowerCase());
+            if (mask) {
+                const x = Math.floor(position.x - mask.position.x);
+                const y = Math.floor(position.y - mask.position.y);
+                if (x < 0 || y < 0 || x >= mask.image.width || y >= mask.image.height) continue;
+                const context = mask.image.getContext("2d", { willReadFrequently: true });
+                if ((context?.getImageData(x, y, 1, 1).data[3] ?? 0) > 16) return trigger;
+                continue;
+            }
+            const cell = worldToCell(position);
+            if (trigger.cells.some((candidate) => candidate.x === cell.x && candidate.y === cell.y)) return trigger;
+        }
+        return undefined;
     }
 
     private eventCanvasPosition(event: MouseEvent): WorldPosition {
@@ -925,6 +1002,14 @@ export class MapRenderer {
     private isEdgeCursor(cursor: CursorType): boolean {
         return cursor === CursorType.LEFT || cursor === CursorType.RIGHT || cursor === CursorType.UP || cursor === CursorType.DOWN
             || cursor === CursorType.LUP || cursor === CursorType.RUP || cursor === CursorType.LDOWN || cursor === CursorType.RDOWN;
+    }
+
+    private setHoveredTarget(kind?: HoverTargetKind, name?: string): void {
+        const key = kind && name ? `${kind}:${name}` : "";
+        if (key === this.hoveredTargetKey) return;
+        this.hoveredTargetKey = key;
+        if (this.showHints) this.onHoverTarget?.(kind, name);
+        else this.onHoverTarget?.();
     }
 
     private cursorForTrigger(trigger: TriggerRuntime): CursorType {
@@ -1089,6 +1174,7 @@ export class MapRenderer {
         const statics = new Set<LevelStatic>();
         const animations = new Set<LevelAnimation>();
         const backgrounds: BackgroundSpriteHighlight[] = [];
+        const triggerMasks: LevelTriggerMask[] = [];
         const distanceToBounds = (point: Readonly<WorldPosition>, x: number, y: number, width: number, height: number): number => {
             const dx = Math.max(x - point.x, 0, point.x - (x + width));
             const dy = Math.max(y - point.y, 0, point.y - (y + height));
@@ -1099,6 +1185,13 @@ export class MapRenderer {
             if (!trigger.inventoryName) continue;
             const runtime = this.triggers.get(trigger.name);
             if (runtime && (!runtime.active || !runtime.visible)) continue;
+            const exactMask = this.levelData.triggerMasks.find(
+                (candidate) => candidate.name.toLowerCase() === trigger.name.toLowerCase(),
+            );
+            if (exactMask) {
+                triggerMasks.push(exactMask);
+                continue;
+            }
             const points: WorldPosition[] = [];
             if (trigger.cellsName) {
                 for (const cell of this.levelData.sefData.cellGroups[trigger.cellsName] ?? []) points.push(cellToWorld(cell));
@@ -1156,6 +1249,7 @@ export class MapRenderer {
         this.interactiveStatics = statics;
         this.interactiveAnimations = animations;
         this.interactiveBackgrounds = backgrounds;
+        this.interactiveTriggerMasks = triggerMasks;
     }
 
     private tintAndDrawHighlight(drawX: number, drawY: number, width: number, height: number, now: number, strength = 1): void {
@@ -1219,6 +1313,7 @@ export class MapRenderer {
         if (occluders.length === 0) return;
 
         ctx.save();
+        ctx.globalAlpha = this.transparentOccluders ? 0.58 : 1;
         ctx.beginPath();
         ctx.rect(bounds.x - this.offset.x, bounds.y - this.offset.y, bounds.width, bounds.height);
         ctx.clip();

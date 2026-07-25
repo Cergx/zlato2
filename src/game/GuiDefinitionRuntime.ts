@@ -76,8 +76,9 @@ export const parseGuiDefinition = (name: string, source: string): GuiDefinition 
     let attributes: Record<string, string> | null = null;
 
     for (const rawLine of source.replace(/\r/g, "").split("\n")) {
-        const line = rawLine.trim();
-        if (!line || line.startsWith("//") || line.startsWith("#")) continue;
+        const comment = rawLine.indexOf("//");
+        const line = (comment < 0 ? rawLine : rawLine.slice(0, comment)).trim();
+        if (!line || line.startsWith("#")) continue;
         if (line === "OBJECT_START") {
             if (attributes) throw new Error(`${name}: nested OBJECT_START`);
             attributes = {};

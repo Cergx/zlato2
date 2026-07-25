@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import type { Game } from "../game/Game";
 import type { HeroInventoryItemView } from "../game/ItemCatalogRuntime";
 import { loadImage } from "../game/Assets";
+import { guiObjectStyle, OriginalGuiLayer } from "./OriginalGuiLayer.tsx";
+import { loadGuiDefinition, type GuiDefinition, type GuiObjectDefinition } from "../game/GuiDefinitionRuntime.ts";
+import { ColorKeyImage } from "./ColorKeyImage.tsx";
 import styles from "./ItemTransferPanel.module.scss";
 
 interface ItemTransferPanelProps {
@@ -11,6 +14,15 @@ interface ItemTransferPanelProps {
     readonly mode: "loot" | "trade";
     readonly onClose: () => void;
 }
+
+
+interface SelectedStack {
+    readonly owner: string;
+    readonly item: HeroInventoryItemView;
+}
+
+type TradeOffer = Readonly<Record<string, number>>;
+
 
 const ItemIcon = ({ item }: { readonly item: HeroInventoryItemView }) => {
     const [source, setSource] = useState<string | null>(null);
@@ -37,17 +49,57 @@ const ItemIcon = ({ item }: { readonly item: HeroInventoryItemView }) => {
     return source ? <img src={source} alt="" draggable={false} /> : <span>{item.literaryName.slice(0, 1)}</span>;
 };
 
-interface SelectedStack {
+interface ItemStripProps {
+    readonly items: readonly HeroInventoryItemView[];
     readonly owner: string;
-    readonly item: HeroInventoryItemView;
+    readonly container?: GuiObjectDefinition;
+    readonly columns: number;
+    readonly offset?: number;
+    readonly offer?: TradeOffer;
+    readonly onActivate: (stack: SelectedStack, amount: number) => void;
 }
+
+const ItemStrip = ({ items, owner, container, columns, offset = 0, offer, onActivate }: ItemStripProps) => {
+    const visible = items
+        .map((item) => offer ? { ...item, quantity: offer[item.technicalName] ?? 0 } : item)
+        .filter((item) => item.quantity > 0)
+        .slice(offset, offset + columns);
+    if (!container) return null;
+    return (
+        <div className={styles.itemStrip} style={{ ...guiObjectStyle(container), gridTemplateColumns: `repeat(${columns}, 1fr)` }}>
+            {visible.map((item) => (
+                <button key={item.technicalName} type="button" aria-label={`${item.literaryName}, ${item.quantity}`}
+                    onClick={() => onActivate({ owner, item }, 1)}
+                    onDoubleClick={() => onActivate({ owner, item }, item.quantity)}>
+                    <ItemIcon item={item} />
+                    {item.quantity > 1 && <strong>{item.quantity}</strong>}
+                    <span className={styles.tooltip}><b>{item.literaryName}</b>{item.description}</span>
+                </button>
+            ))}
+        </div>
+    );
+};
+
+const changeOffer = (offer: TradeOffer, item: HeroInventoryItemView, delta: number): TradeOffer => {
+    const quantity = Math.max(0, Math.min(item.quantity, (offer[item.technicalName] ?? 0) + delta));
+    const next = { ...offer };
+    if (quantity === 0) delete next[item.technicalName];
+    else next[item.technicalName] = quantity;
+    return next;
+};
 
 export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTransferPanelProps) => {
     const [heroItems, setHeroItems] = useState<readonly HeroInventoryItemView[]>([]);
     const [otherItems, setOtherItems] = useState<readonly HeroInventoryItemView[]>([]);
     const [selected, setSelected] = useState<SelectedStack | null>(null);
     const [quantity, setQuantity] = useState(1);
+    const [heroOffer, setHeroOffer] = useState<TradeOffer>({});
+    const [otherOffer, setOtherOffer] = useState<TradeOffer>({});
+    const [heroOffset, setHeroOffset] = useState(0);
+    const [otherOffset, setOtherOffset] = useState(0);
     const [error, setError] = useState("");
+    const [definition, setDefinition] = useState<GuiDefinition | null>(null);
+    const [stackDefinition, setStackDefinition] = useState<GuiDefinition | null>(null);
 
     const refresh = useCallback(async () => {
         try {
@@ -62,10 +114,30 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
 
     useEffect(() => { void refresh(); }, [refresh]);
     useEffect(() => {
+        let cancelled = false;
+        const script = mode === "trade" ? "trade" : "gpanel_new";
+        void loadGuiDefinition(script).then(
+            (loaded) => { if (!cancelled) setDefinition(loaded); },
+            (caught: unknown) => { if (!cancelled) setError(caught instanceof Error ? caught.message : String(caught)); },
+        );
+        return () => { cancelled = true; };
+    }, [mode]);
+    useEffect(() => {
+        let cancelled = false;
+        void loadGuiDefinition("stacks_gui").then(
+            (loaded) => { if (!cancelled) setStackDefinition(loaded); },
+            (caught: unknown) => { if (!cancelled) setError(caught instanceof Error ? caught.message : String(caught)); },
+        );
+        return () => { cancelled = true; };
+    }, []);
+    useEffect(() => {
         const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
         window.addEventListener("keydown", close);
         return () => window.removeEventListener("keydown", close);
     }, [onClose]);
+
+    const guiObject = (id: number): GuiObjectDefinition | undefined => definition?.objects.find((object) => object.id === id);
+    const stackGuiObject = (id: number): GuiObjectDefinition | undefined => stackDefinition?.objects.find((object) => object.id === id);
 
     const transfer = async (stack: SelectedStack, requested = quantity): Promise<void> => {
         const destination = stack.owner.toLowerCase() === "hero" ? owner : "Hero";
@@ -82,57 +154,89 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
         await refresh();
     };
 
-    const renderInventory = (items: readonly HeroInventoryItemView[], inventoryOwner: string, label: string) => (
-        <section className={styles.inventory} aria-label={label}
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={(event) => {
-                event.preventDefault();
-                const technicalName = event.dataTransfer.getData("application/x-zlato-item");
-                const sourceOwner = event.dataTransfer.getData("application/x-zlato-owner");
-                const item = (sourceOwner.toLowerCase() === "hero" ? heroItems : otherItems).find((candidate) => candidate.technicalName === technicalName);
-                if (item && sourceOwner.toLowerCase() !== inventoryOwner.toLowerCase()) {
-                    setSelected({ owner: sourceOwner, item });
-                    setQuantity(1);
-                }
-            }}>
-            <h2>{label}</h2>
-            <div className={styles.grid}>
-                {items.map((item) => <button key={item.technicalName} type="button" draggable
-                    aria-pressed={selected?.owner === inventoryOwner && selected.item.technicalName === item.technicalName}
-                    onClick={() => { setSelected({ owner: inventoryOwner, item }); setQuantity(1); }}
-                    onDoubleClick={() => void transfer({ owner: inventoryOwner, item }, 1)}
-                    onDragStart={(event) => {
-                        event.dataTransfer.setData("application/x-zlato-item", item.technicalName);
-                        event.dataTransfer.setData("application/x-zlato-owner", inventoryOwner);
-                    }}>
-                    <ItemIcon item={item} />
-                    {item.quantity > 1 && <strong>{item.quantity}</strong>}
-                    <span className={styles.tooltip}><b>{item.literaryName}</b>{item.description}</span>
-                </button>)}
-            </div>
-        </section>
-    );
+    const exchange = async (): Promise<void> => {
+        for (const [technicalName, amount] of Object.entries(heroOffer)) game.transferInventoryItem("Hero", owner, technicalName, amount);
+        for (const [technicalName, amount] of Object.entries(otherOffer)) game.transferInventoryItem(owner, "Hero", technicalName, amount);
+        setHeroOffer({});
+        setOtherOffer({});
+        await refresh();
+    };
+
+    const selectLootStack = (stack: SelectedStack, amount: number): void => {
+        setSelected(stack);
+        setQuantity(Math.max(1, Math.min(stack.item.quantity, amount)));
+    };
+
+    const selectTradeSource = (stack: SelectedStack, amount: number): void => {
+        if (stack.owner.toLowerCase() === "hero") setHeroOffer((current) => changeOffer(current, stack.item, amount));
+        else setOtherOffer((current) => changeOffer(current, stack.item, amount));
+    };
+
+    const removeTradeOffer = (stack: SelectedStack, amount: number): void => {
+        if (stack.owner.toLowerCase() === "hero") setHeroOffer((current) => changeOffer(current, stack.item, -amount));
+        else setOtherOffer((current) => changeOffer(current, stack.item, -amount));
+    };
+
+    if (mode === "loot") {
+        return (
+            <section className={`${styles.panel} ${styles.lootPanel}`} role="dialog" aria-label={`Содержимое: ${title}`}>
+                <img className={styles.lootBackground} src="/assets/engineres/gpanel/exchange.bmp" alt="" draggable={false} />
+                <div className={styles.lootTitle}>{title}</div>
+                <ItemStrip items={otherItems} owner={owner} columns={8} offset={otherOffset}
+                    container={guiObject(22)} onActivate={selectLootStack} />
+                <ItemStrip items={heroItems} owner="Hero" columns={8} offset={heroOffset}
+                    container={guiObject(23)} onActivate={selectLootStack} />
+                <OriginalGuiLayer className={styles.authoredControls} script="gpanel_new" objectIds={[9, 10, 11, 12, 20, 21]} onAction={(object) => {
+                    if (object.id === 9) setOtherOffset(Math.max(0, otherOffset - 8));
+                    if (object.id === 10) setOtherOffset(Math.min(Math.max(0, otherItems.length - 8), otherOffset + 8));
+                    if (object.id === 11) setHeroOffset(Math.max(0, heroOffset - 8));
+                    if (object.id === 12) setHeroOffset(Math.min(Math.max(0, heroItems.length - 8), heroOffset + 8));
+                    if (object.id === 20) void takeAll();
+                    if (object.id === 21) onClose();
+                }} />
+                {selected && (
+                    <div className={styles.stackDialog}>
+                        <ColorKeyImage src="/assets/engineres/stacks/main.bmp" draggable={false} />
+                        <div className={styles.stackItem} style={stackGuiObject(5) ? guiObjectStyle(stackGuiObject(5)!, 246, 201) : undefined}>
+                            <ItemIcon item={selected.item} />
+                            {quantity > 1 && <strong>{quantity}</strong>}
+                        </div>
+                        <OriginalGuiLayer script="stacks_gui" canvasWidth={246} canvasHeight={201} values={{ 4: quantity }}
+                            onValueChange={(object, value) => { if (object.id === 4 && typeof value === "number") setQuantity(Math.max(1, Math.min(selected.item.quantity, value))); }}
+                            onAction={(object) => {
+                                if (object.id === 1) void transfer(selected);
+                                if (object.id === 2) setSelected(null);
+                                if (object.id === 3) void transfer(selected, selected.item.quantity);
+                                if (object.id === 7) setQuantity((current) => Math.max(1, current - 1));
+                                if (object.id === 8) setQuantity((current) => Math.min(selected.item.quantity, current + 1));
+                            }} />
+                    </div>
+                )}
+                {error && <output className={styles.error}>{error}</output>}
+            </section>
+        );
+    }
 
     return (
-        <section className={styles.panel} role="dialog" aria-label={mode === "trade" ? "Торговля" : "Содержимое"}>
+        <section className={`${styles.panel} ${styles.tradePanel}`} role="dialog" aria-label={`Торговля: ${title}`}>
             <img className={styles.background} src="/assets/engineres/trade/trade.bmp" alt="" draggable={false} />
-            <h1>{mode === "trade" ? `Торговля: ${title}` : title}</h1>
-            <div className={styles.panes}>
-                {renderInventory(otherItems, owner, mode === "trade" ? title : "Сундук")}
-                {renderInventory(heroItems, "Hero", "Герой")}
-            </div>
-            {selected && (
-                <div className={styles.stackDialog}>
-                    <img src="/assets/engineres/stacks/main.bmp" alt="" draggable={false} />
-                    <strong>{selected.item.literaryName}</strong>
-                    <label>Количество <input type="number" min={1} max={selected.item.quantity} value={quantity}
-                        onChange={(event) => setQuantity(Math.max(1, Math.min(selected.item.quantity, event.currentTarget.valueAsNumber || 1)))} /></label>
-                    <button type="button" onClick={() => void transfer(selected)}>Переместить</button>
-                    <button type="button" onClick={() => void transfer(selected, selected.item.quantity)}>Весь стек</button>
-                </div>
-            )}
-            {mode === "loot" && <button className={styles.takeAll} type="button" onClick={() => void takeAll()}>Взять всё</button>}
-            <button className={styles.close} type="button" onClick={onClose} aria-label="Закрыть" />
+            <div className={styles.traderName}>{title}</div>
+            <ItemStrip items={heroItems} owner="Hero" columns={12} offset={heroOffset}
+                container={guiObject(1)} onActivate={selectTradeSource} />
+            <ItemStrip items={otherItems} owner={owner} columns={10} offset={otherOffset}
+                container={guiObject(50)} onActivate={selectTradeSource} />
+            <ItemStrip items={heroItems} owner="Hero" columns={10} offer={heroOffer}
+                container={guiObject(48)} onActivate={removeTradeOffer} />
+            <ItemStrip items={otherItems} owner={owner} columns={10} offer={otherOffer}
+                container={guiObject(49)} onActivate={removeTradeOffer} />
+            <OriginalGuiLayer className={styles.authoredControls} script="trade" onAction={(object) => {
+                if (object.id === 3) setHeroOffset(Math.max(0, heroOffset - 12));
+                if (object.id === 4) setHeroOffset(Math.min(Math.max(0, heroItems.length - 12), heroOffset + 12));
+                if (object.id === 41) setOtherOffset(Math.max(0, otherOffset - 10));
+                if (object.id === 42) setOtherOffset(Math.min(Math.max(0, otherItems.length - 10), otherOffset + 10));
+                if (object.id === 44) void exchange();
+                if (object.id === 7) onClose();
+            }} />
             {error && <output className={styles.error}>{error}</output>}
         </section>
     );

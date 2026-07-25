@@ -17,13 +17,16 @@ interface OriginalGuiLayerProps {
     readonly onAction?: (object: GuiObjectDefinition) => void;
     readonly onValueChange?: (object: GuiObjectDefinition, value: GuiControlValue) => void;
     readonly className?: string;
+    readonly objectIds?: readonly number[];
+    readonly canvasWidth?: number;
+    readonly canvasHeight?: number;
 }
 
-const objectStyle = (object: GuiObjectDefinition): CSSProperties => ({
-    left: `${object.left / 10.24}%`,
-    top: `${object.top / 7.68}%`,
-    width: `${object.width / 10.24}%`,
-    height: `${object.height / 7.68}%`,
+export const guiObjectStyle = (object: GuiObjectDefinition, canvasWidth = 1024, canvasHeight = 768): CSSProperties => ({
+    left: `${object.left / canvasWidth * 100}%`,
+    top: `${object.top / canvasHeight * 100}%`,
+    width: `${object.width / canvasWidth * 100}%`,
+    height: `${object.height / canvasHeight * 100}%`,
 });
 
 const playClickSound = (object: GuiObjectDefinition): void => {
@@ -59,9 +62,11 @@ interface GuiSliderProps {
     readonly object: GuiObjectDefinition;
     readonly value: GuiControlValue | undefined;
     readonly onValueChange: OriginalGuiLayerProps["onValueChange"];
+    readonly canvasWidth: number;
+    readonly canvasHeight: number;
 }
 
-const GuiSlider = ({ object, value, onValueChange }: GuiSliderProps) => {
+const GuiSlider = ({ object, value, onValueChange, canvasWidth, canvasHeight }: GuiSliderProps) => {
     const [thumb, setThumb] = useState<string | null>(null);
     useEffect(() => {
         const source = guiImageUrl(object.imageLighted);
@@ -76,7 +81,7 @@ const GuiSlider = ({ object, value, onValueChange }: GuiSliderProps) => {
     return (
         <input
             className={object.type === "GUI_VSLIDER" ? styles.verticalSlider : styles.slider}
-            style={{ ...objectStyle(object), "--gui-thumb": thumb ? `url(${JSON.stringify(thumb)})` : "none" } as CSSProperties}
+            style={{ ...guiObjectStyle(object, canvasWidth, canvasHeight), "--gui-thumb": thumb ? `url(${JSON.stringify(thumb)})` : "none" } as CSSProperties}
             type="range"
             aria-label={labelFor(object)}
             disabled={!object.enabled}
@@ -95,8 +100,10 @@ const renderObject = (
     value: GuiControlValue | undefined,
     onAction: OriginalGuiLayerProps["onAction"],
     onValueChange: OriginalGuiLayerProps["onValueChange"],
+    canvasWidth: number,
+    canvasHeight: number,
 ) => {
-    const style = objectStyle(object);
+    const style = guiObjectStyle(object, canvasWidth, canvasHeight);
     const activate = (): void => {
         playClickSound(object);
         onAction?.(object);
@@ -125,7 +132,7 @@ const renderObject = (
     }
 
     if (object.type === "GUI_SLIDER" || object.type === "GUI_VSLIDER") {
-        return <GuiSlider key={object.id} object={object} value={value} onValueChange={onValueChange} />;
+        return <GuiSlider key={object.id} object={object} value={value} onValueChange={onValueChange} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />;
     }
 
     if (object.type === "GUI_EDIT") {
@@ -145,7 +152,7 @@ const renderObject = (
     return <div key={object.id} className={styles.containerObject} style={style} data-gui-type={object.type} />;
 };
 
-export const OriginalGuiLayer = ({ script, values = {}, onAction, onValueChange, className }: OriginalGuiLayerProps) => {
+export const OriginalGuiLayer = ({ script, values = {}, onAction, onValueChange, className, objectIds, canvasWidth = 1024, canvasHeight = 768 }: OriginalGuiLayerProps) => {
     const [definition, setDefinition] = useState<GuiDefinition | null>(null);
     const [error, setError] = useState<string | null>(null);
 
@@ -163,7 +170,7 @@ export const OriginalGuiLayer = ({ script, values = {}, onAction, onValueChange,
     if (error) return <div className={`${styles.layer} ${className ?? ""}`} role="alert">{error}</div>;
     return (
         <div className={`${styles.layer} ${className ?? ""}`} data-gui-script={script}>
-            {definition?.objects.filter((object) => object.visible).map((object) => renderObject(object, values[object.id], onAction, onValueChange))}
+            {definition?.objects.filter((object) => object.visible && (!objectIds || objectIds.includes(object.id))).map((object) => renderObject(object, values[object.id], onAction, onValueChange, canvasWidth, canvasHeight))}
         </div>
     );
 };

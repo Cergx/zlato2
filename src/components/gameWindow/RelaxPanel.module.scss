@@ -1,0 +1,45 @@
+.overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    color: #27271f;
+    font-family: ZlatoCyrOld, ZlatoArial, sans-serif;
+    text-shadow: 0 1px rgb(255 255 255 / 32%);
+}
+
+.background {
+    position: absolute;
+    left: 35.839844%;
+    top: 38.020833%;
+    width: 28.320313%;
+    height: 25.520833%;
+}
+
+.period,
+.calendar {
+    position: absolute;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    text-align: center;
+}
+
+.period {
+    left: 39.746094%;
+    top: 43.489583%;
+    width: 8.398438%;
+    height: 4.947917%;
+    font-size: clamp(12px, 1.8vw, 20px);
+}
+
+.calendar {
+    left: 50.488281%;
+    top: 40.104167%;
+    width: 12.402344%;
+    height: 8.723958%;
+    font-size: clamp(10px, 1.3vw, 14px);
+    line-height: 1.15;
+}
+
+.calendar span { display: block; }
