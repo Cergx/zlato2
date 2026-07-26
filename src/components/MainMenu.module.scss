@@ -1,8 +1,8 @@
 .viewport,
 .splash {
     position: relative;
-    width: min(100vw, calc(100vh * 4 / 3));
-    height: min(100vh, calc(100vw * 3 / 4));
+    width: 1024px;
+    height: 768px;
     overflow: hidden;
     border: 0;
     margin: 0;
@@ -54,7 +54,7 @@
     position: absolute;
     width: 29%;
     color: #322d25;
-    font: clamp(8px, 1.35vw, 18px)/1 "GoldenLand", Georgia, serif;
+    font: 18px/1 "GoldenLand", Georgia, serif;
     text-align: center;
     text-shadow: 0 1px rgb(255 255 255 / 45%);
     transform: translate(-50%, -50%);
@@ -68,7 +68,7 @@
     border: 1px solid rgb(203 169 101 / 55%);
     padding: 0.45em 0.8em;
     color: #e8d5a2;
-    font: clamp(10px, 1.4vw, 18px)/1.2 Georgia, serif;
+    font: 18px/1.2 Georgia, serif;
     background: rgb(12 8 4 / 82%);
 }
 

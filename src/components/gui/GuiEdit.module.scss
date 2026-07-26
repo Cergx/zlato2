@@ -1,0 +1,11 @@
+.edit {
+    position: absolute;
+    box-sizing: border-box;
+    border: 1px solid rgb(179 145 86 / 70%);
+    padding: 0 .35em;
+    color: #e7d4a1;
+    font: inherit;
+    background: rgb(17 10 4 / 80%);
+}
+
+.edit[data-gui-visible="false"] { opacity: 0; }

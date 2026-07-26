@@ -1,15 +1,16 @@
 .gameWindow {
     position: relative;
-    width: min(100vw, calc(100vh * 4 / 3));
-    height: min(100vh, calc(100vw * 3 / 4));
+    width: 1024px;
+    height: 768px;
     overflow: hidden;
     background-color: black;
     box-shadow: 0 0 40px #000;
 }
 
-.gameWindow canvas {
-    width: 100%;
-    height: 100%;
+.gameWindow > canvas {
+    display: block;
+    width: 1024px;
+    height: 768px;
 }
 
 .gameWindow .weather {
@@ -20,12 +21,7 @@
 }
 
 .dialogue {
-    position: absolute;
-    right: 2%;
-    bottom: 18%;
-    left: 2%;
     z-index: 10;
-    margin-inline: auto;
 }
 
 .finished {

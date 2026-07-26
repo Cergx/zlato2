@@ -7,6 +7,8 @@ import { singleLevels, multiplayerLevels, type GameMode } from "./constants/leve
 
 
 export const App = () => {
+    const strictScriptAbi = typeof window !== "undefined"
+        && new URLSearchParams(window.location.search).get("strictScriptAbi") === "1";
     const [launch, setLaunch] = useState<GameLaunchRequest | null>(null);
     const [menuVisited, setMenuVisited] = useState(false);
     const gameMode = launch?.gameMode ?? "single";
@@ -32,6 +34,7 @@ export const App = () => {
                             entrance={launch.entrance}
                             saveSlot={launch.saveSlot}
                             onMainMenu={() => setLaunch(null)}
+                            strictScriptAbi={strictScriptAbi}
                         />
 
                         <details className={styles.debugControls}>

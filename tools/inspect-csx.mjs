@@ -73,11 +73,11 @@ function parseScanline(bytes, start, end, width, paletteSize, file, line) {
         break;
       }
       case 107: {
-        requireBytes(1, 'overlap');
+        requireBytes(1, 'escaped literal');
         const color = bytes[byteOffset++];
-        requirePaletteIndex(color, 'overlap');
+        requirePaletteIndex(color, 'escaped literal');
         pixelCount += 1;
-        add('overlap');
+        add('escapedLiteral');
         break;
       }
       case 108: {

@@ -35,6 +35,7 @@ export interface DialogueRuntimeHost {
     invokeFunction?: (call: DialogueFunctionCall) => DialogueValue | void;
     isOptionEnabled?: (option: Readonly<Pick<DialogueOption, "id" | "text">>) => boolean;
     onStateChange?: (state: DialogueState) => void;
+    onFunctionCall?: (call: DialogueFunctionCall) => void;
     onEnd?: (state: DialogueState) => void;
 }
 
@@ -247,6 +248,13 @@ export class DialogueRuntime {
 
     private evaluateFunction(record: AGEFunctionRecord, visiting: Set<number>): DialogueValue {
         const args = record.argumentIndexes.map((index) => this.evaluate(this.requireRecord(index), visiting));
+        const call: DialogueFunctionCall = {
+            id: record.functionId,
+            name: record.functionName,
+            arguments: args,
+            record,
+        };
+        this.host.onFunctionCall?.(call);
         switch (record.functionName) {
             case "D_Say": {
                 const phraseId = this.requirePhraseId(record, args[0]);
@@ -278,12 +286,7 @@ export class DialogueRuntime {
                     const label = record.functionName ?? `0x${record.functionId.toString(16)}`;
                     throw new Error(`AGE function ${label} at record ${record.index} has no host handler`);
                 }
-                return this.host.invokeFunction({
-                    id: record.functionId,
-                    name: record.functionName,
-                    arguments: args,
-                    record,
-                }) ?? 0;
+                return this.host.invokeFunction(call) ?? 0;
         }
     }
 

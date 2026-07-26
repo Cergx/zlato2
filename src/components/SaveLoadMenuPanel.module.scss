@@ -11,86 +11,95 @@
 .background {
     position: absolute;
     inset: 0;
-    width: 100%;
-    height: 100%;
+    z-index: 0;
+    width: 1024px;
+    height: 768px;
+    pointer-events: none;
 }
 
-.slotsFrame {
+.preview,
+.slotsFrame,
+.slotFocus {
     position: absolute;
-    left: 8.3984375%;
-    top: 12.109375%;
-    width: 29.39453125%;
-    height: 76.4322917%;
+    pointer-events: none;
 }
 
-.preview {
-    position: absolute;
-    left: 42.67578125%;
-    top: 12.5%;
-    width: 48.828125%;
-    height: 48.828125%;
-    object-fit: fill;
-}
-
-.title {
-    position: absolute;
-    top: 4.4%;
-    left: 42.7%;
-    width: 48.8%;
-    margin: 0;
-    color: #2b1a0b;
-    font: 700 clamp(18px, 2.5vw, 34px)/1 ZlatoPalatino, serif;
-    text-align: center;
-    text-shadow: 0 1px #d9bb7c;
-}
+.preview { z-index: 1; object-fit: fill; }
+.slotsFrame { z-index: 2; }
+.slotFocus { z-index: 3; }
 
 .slotList {
     position: absolute;
-    left: 9.05%;
-    top: 12.8%;
-    z-index: 3;
-    width: 28.1%;
-    height: 74.5%;
-    margin: 0;
-    padding: 0;
-    list-style: none;
+    inset: 0;
+    z-index: 7;
+    pointer-events: none;
 }
 
-.slotList li {
-    height: 10%;
-}
-
-.slotList button {
-    width: 100%;
-    height: 100%;
+.slot {
+    position: absolute;
+    box-sizing: border-box;
     overflow: hidden;
     border: 0;
-    padding: 0 0.8em;
+    padding: 0;
     color: #241508;
     background: transparent;
-    font: 700 clamp(10px, 1.35vw, 16px)/1 ZlatoPalatino, serif;
-    text-align: left;
+    text-align: center;
+    text-shadow: 0 1px rgb(238 209 144 / 45%);
+    cursor: pointer;
+    pointer-events: auto;
+}
+
+.slot:hover {
+    outline: 2px solid #b9d98a;
+}
+
+.slot:focus-visible {
+    outline: 0;
+}
+
+.slotTitle,
+.slotMetadata {
+    position: absolute;
+    left: 0;
+    display: grid;
+    width: 100%;
+    place-items: center;
+    overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    cursor: pointer;
+    pointer-events: none;
 }
 
-.slotList button:hover,
-.slotList button:focus-visible,
-.slotList button[aria-pressed="true"] {
-    outline: 0;
-    color: #f2dd9d;
-    background: linear-gradient(90deg, rgb(35 19 4 / 68%), rgb(85 57 20 / 45%), rgb(35 19 4 / 68%));
-    text-shadow: 0 1px #000;
+.slotTitle {
+    top: 5px;
+    height: 20px;
 }
 
-.message {
+.slotMetadata {
+    top: 30px;
+    height: 20px;
+}
+
+.authoredControls {
+    z-index: 6;
+}
+
+.title,
+.details {
     position: absolute;
-    left: 42.7%;
-    top: 64%;
-    width: 48.8%;
-    color: #ead7a7;
-    font: 700 clamp(11px, 1.35vw, 17px)/1.2 ZlatoPalatino, serif;
+    z-index: 7;
+    box-sizing: border-box;
+    margin: 0;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    color: #201408;
     text-align: center;
-    text-shadow: 0 1px 2px #000;
+    text-shadow: 0 1px rgb(217 187 124 / 75%);
+    white-space: pre-wrap;
+    pointer-events: none;
+}
+
+.details {
+    align-content: center;
 }

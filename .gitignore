@@ -24,6 +24,7 @@ dist-ssr
 *.sw?
 /public/assets/
 /public/Data/
+/info/
 
 # Local scratch artifacts
 /.tmp/

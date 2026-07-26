@@ -1,6 +1,6 @@
 # Executable-first reverse-engineering handoff
 
-Updated: 2026-07-23.
+Updated: 2026-07-25.
 
 This file is the binding direction for the next session. The verified technical corpus remains in [`reverse-engineering.md`](./reverse-engineering.md); do not duplicate or discard it.
 
@@ -231,6 +231,9 @@ Once native-compatible VMs and ABI services cover a path:
 - `tools/inspect-csx.mjs`: CSX decoder validator.
 - `tools/inspect-pak.mjs`: Burut PAK decoder/comparator.
 - `tools/ghidra/*.java`: headless Ghidra scripts for functions, references, strings, memory, AGE loader, and dialogue handlers.
+- `tools/native-oracle/oracle.cpp`: Win32/x86-only hashed DLL loader with 256 traced HostAPI stubs, bounded API-table capture, and optional initializer calls; it does not launch `GoldenLand.exe`.
+- `tools/replay-assets.mjs`: deterministic clean-room replay of `demon.d1.age.cs`, its phrase database, and representative `l1_1` `init/core` scripts; SCR host results are explicitly simulated unless `--strict-host` is supplied.
+- `tools/validate-scr-runtime.mjs`: gameplay `.scr` parser/lifecycle corpus validator.
 
 Useful baseline commands:
 
@@ -243,6 +246,27 @@ node tools/inspect-pak.mjs E:/Games/zlato22/Data --compare-root public/assets
 ```
 
 The exact flags supported by each inspector are defined in the script itself; do not assume old command examples if a script has changed.
+
+### Current implementation milestone
+
+The browser runtime parses complete gameplay `.scr` assets into structured programs with top-level `init/core` statements and four handler slots. Trigger execution selects the native lifecycle slot (`OnEnter` + `OnHover`, `OnClick`, or `OnLeave`) and caches the phase-specific parsed program by level/script/phase. `DialogueRuntime` exposes an execution trace hook for every AGE function call, including `D_Say`, `D_Answer`, `D_CloseDialog`, and `Exit`.
+
+The 32-bit native oracle now completes both verified `Server.dll` and `Client.dll` initializers without launching `GoldenLand.exe`. The successful differential command is `.tmp/native-oracle.exe --game-root E:/Games/zlato22 --asset-root G:/ws/zlato2/public/assets --host-facades --probe-config-object --initialize --quiet-stubs`.
+
+The completed trace records 925 resource requests, resolves 914 of them, directly loads `scripts\ui\main_menu.scr` and `scripts\weather.scr` through Client.dll, records no unhandled exception, returns from the Client initializer at `Client.dll+0xc9cc0`, and emits `oracle_complete initialized=true`. The 11 fail-closed misses are three unavailable loading-background requests and eight empty `.csx`/`.bmp` requests. The matching clean-room GUI parser accepts the same CP1251 `main_menu.scr` and yields its six authored buttons with IDs `1..6`.
+
+The browser GUI path now resolves shipped `#INCLUDE` and `#DEFINE` directives before parsing UI objects. `scripts/include/script_types.age.h` is the runtime source of GUI type IDs; the previous hand-maintained numeric mapping is gone. All 22 `OBJECT_START` UI scripts parse successfully through the shared loader: 534/534 objects, with source locations, raw authored attributes, include dependencies, and no failures. `OriginalGuiLayer` renders all seven object families present in the shipped declarations (`GUI_SIMPLE_BUTTON`, `GUI_CHECK_BUTTON`, `GUI_SLIDER`, `GUI_VSLIDER`, `GUI_EDIT`, `GUI_LISTBOX`, and `GUI_DD_CONTAINER`; `GUI_DD_OBJECT` is also implemented for the declared ABI). Browser smoke verification confirms that `main_menu.scr` produces its six controls at the authored bounds and `options_menu.scr` produces all 17 controls, including interactive slider and check-button state.
+
+The browser does not responsively rescale that authored interface. Main menu, game canvas, weather canvas, and overlays share a fixed 1024-by-768 logical surface; SCR bounds are applied as literal pixel coordinates. There is no `viewport-scale`, viewport-unit layout, resize-driven scale state, or CSS `transform: scale(...)`. If the browser's CSS viewport is smaller, the fixed canvas scrolls rather than changing game geometry.
+
+Three corrected contracts removed the previous boundary: Client HostAPI `+0x14`, vtable `+0x30`, is a one-argument `thiscall`; Client state `+0x4424` is a separate interface whose slots `+0x0c` and `+0x10` use explicit stdcall argument shapes; and resource slot `+0x20` returns the actual byte count with valid short-read behavior. The last point is proven by `test.f2d`, whose `0xe1c` bytes are consumed as a `0x2c` header plus a short `0xdf0` result for a requested `0xe00` body.
+
+The HostAPI `+0x14`, vtable `+0x30`, SDB lookup is no longer fail-closed. The oracle parses `public/assets/sdb/user_interface.sdb`, returns stable CP1251 record pointers, and captures 23 Client selectors. All 23 native-returned byte strings match the clean-room SDB mapping exactly; representative values are `0x8f -> Вы хотите выйти?`, `0x8e -> Выход из игры`, and `0x90 -> Восстановить настройки?`.
+
+This is a startup and native asset-parse milestone, not full behavioral equivalence. Event registration effects, graphics descriptors, object ownership, active Server dialogue context, and script-state transition traces remain provisional or absent.
+
+The verified clean-room baseline remains 556/556 AGE containers, 571/571 gameplay SCR files, 261 scenarios, 461 trigger bindings, 63 `init.scr`, and 57 `core.scr`; simulated replay output is marked `simulated: true`. `GameOptions.strictScriptAbi` is propagated through `Game` and `Level` into `GameStateRuntime`. Non-strict mode keeps shipped levels runnable by warning once per unrecovered side-effect host function and returning success; strict mode fails at the first such call for differential validation.
+Executable asset checks are also part of the baseline: `node tools/validate-scr-runtime.mjs public/assets/levels` reports `files: 571`, `handlers: 1792`, `statements: 1380`, `failures: []`; `node tools/replay-assets.mjs > tools/replay-assets.clean-room.ndjson` executes the shipped `demon.d1.age.cs`, `l1_1/init.scr`, and `l1_1/core.scr` paths. The captured stdout is [`tools/replay-assets.clean-room.ndjson`](../tools/replay-assets.clean-room.ndjson) and contains `age_program`/`age_function`/`dialogue_state` plus `scr_host_call`/`scr_result` events; the AGE-only normalized excerpt remains in `tools/demon-age.clean-room.ndjson`.
 
 ## Known corpus facts useful for oracle tests
 
@@ -283,4 +307,4 @@ Address-only guesses are not enough. A behavior observed only in the current bro
 
 ## Explicit stop condition for the next session
 
-Do not declare progress merely because another gameplay feature works in the browser. The next meaningful milestone is a repeatable, traced execution of at least one shipped AGE or SCR asset through the original module path and a matching clean-room/runtime trace.
+The prior stop condition is satisfied: a shipped SCR asset (`scripts\ui\main_menu.scr`) now executes through the original Client module path and the clean-room parser accepts the same six-object definition. The next meaningful milestone is an active native dialogue or gameplay-script context with state-transition snapshots that match the clean-room runtime, while replacing the remaining successful-but-provisional host facade results.

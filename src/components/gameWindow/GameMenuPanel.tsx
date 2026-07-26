@@ -1,8 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { DIARY_CONTENT_RECTS, DIARY_TAB_TEXT_DRAWS, type DiaryTabTextDraw, type NativeRect } from "../../constants/clientDll.ts";
+import { MAIN_INTERFACE_FONT, MAIN_INTERFACE_STRIKEOUT_FONT } from "../../constants/fontsScr.ts";
 import type { Game } from "../../game/Game.ts";
 import type { GameRuntimeSnapshot } from "../../game/GameStateRuntime.ts";
 import { SDBParser, type SDBData } from "../../game/parsers/SDBParser.ts";
 import { MagicBookPanel } from "./MagicBookPanel.tsx";
+import { OriginalGuiLayer, type GuiControlValue } from "../OriginalGuiLayer.tsx";
+import { ColorKeyImage } from "../ColorKeyImage.tsx";
 
 import styles from "./GameMenuPanel.module.scss";
 
@@ -92,12 +96,12 @@ interface DiaryEntry {
     readonly count?: number;
 }
 
-const DIARY_TABS: readonly Readonly<{ id: DiaryTab; labelId: number; page: number }>[] = [
-    { id: "story", labelId: 104, page: 1 },
-    { id: "side", labelId: 105, page: 2 },
-    { id: "biography", labelId: 106, page: 3 },
-    { id: "creatures", labelId: 107, page: 4 },
-    { id: "history", labelId: 108, page: 5 },
+const DIARY_TABS: readonly Readonly<{ id: DiaryTab; labelId: number; page: number; objectId: number }>[] = [
+    { id: "story", labelId: 104, page: 1, objectId: 1 },
+    { id: "side", labelId: 105, page: 2, objectId: 2 },
+    { id: "biography", labelId: 106, page: 3, objectId: 3 },
+    { id: "creatures", labelId: 107, page: 4, objectId: 4 },
+    { id: "history", labelId: 108, page: 5, objectId: 5 },
 ];
 
 const STORYLINE_QUESTS = new Set([
@@ -160,28 +164,36 @@ const sideQuestCity = (technicalName: string): string => {
     return "other";
 };
 
-const paginateText = (text: string, pageLength = 1350): readonly string[] => {
-    const normalized = text.trim();
-    if (!normalized) return [""];
-    const pages: string[] = [];
-    let rest = normalized;
-    while (rest.length > pageLength) {
-        let split = rest.lastIndexOf(" ", pageLength);
-        if (split < pageLength / 2) split = pageLength;
-        pages.push(rest.slice(0, split).trim());
-        rest = rest.slice(split).trim();
-    }
-    pages.push(rest);
-    return pages;
-};
 
 const playDiarySound = (file: "prevnext" | "close"): void => {
     const path = file === "prevnext" ? "/assets/sounds/ui/journal/prevnext.wav" : "/assets/sounds/ui/inventory/okcancelclick.wav";
     void new Audio(path).play().catch(() => undefined);
 };
 
+const diaryTabTextStyle = (draw: DiaryTabTextDraw, selected: boolean): CSSProperties => ({
+    left: `${draw.x}px`,
+    top: `${selected ? draw.selectedY : draw.unselectedY}px`,
+    width: `${draw.boxWidth}px`,
+    height: `${draw.boxHeight}px`,
+    fontFamily: `ZlatoPalatino, "${MAIN_INTERFACE_FONT.typeFace}", serif`,
+    fontSize: `${MAIN_INTERFACE_FONT.size}px`,
+    fontWeight: MAIN_INTERFACE_FONT.weight,
+    color: selected ? "#000080" : "#000000",
+});
 
-export const GameMenuPanel = ({ game, kind, onClose }: GameMenuPanelProps) => {
+const diaryContentStyle = (rect: NativeRect): CSSProperties => ({
+    position: "absolute",
+    left: `${rect.left}px`,
+    top: `${rect.top}px`,
+    width: `${rect.width}px`,
+    height: `${rect.height}px`,
+    fontFamily: `ZlatoPalatino, "${MAIN_INTERFACE_FONT.typeFace}", serif`,
+    fontSize: `${MAIN_INTERFACE_FONT.size}px`,
+    fontWeight: MAIN_INTERFACE_FONT.weight,
+});
+
+
+export const RecoveredGameMenuPanel = ({ game, kind, onClose }: GameMenuPanelProps) => {
     const [snapshot, setSnapshot] = useState<GameRuntimeSnapshot | null>(() => game.getRuntimeSnapshot());
     const [characterTab, setCharacterTab] = useState<CharacterTab>("characteristics");
     const [interfaceStrings, setInterfaceStrings] = useState<SDBData>({});
@@ -189,8 +201,10 @@ export const GameMenuPanel = ({ game, kind, onClose }: GameMenuPanelProps) => {
     const [diaryTab, setDiaryTab] = useState<DiaryTab>("story");
     const [diarySelection, setDiarySelection] = useState<string | null>(null);
     const [sideCity, setSideCity] = useState<string | null>(null);
-    const [leftPage, setLeftPage] = useState(0);
-    const [rightPage, setRightPage] = useState(0);
+    const leftPageRef = useRef<HTMLDivElement>(null);
+    const rightPageRef = useRef<HTMLElement>(null);
+    const [leftScroll, setLeftScroll] = useState({ position: 0, maximum: 0 });
+    const [rightScroll, setRightScroll] = useState({ position: 0, maximum: 0 });
 
     useEffect(() => {
         const update = () => setSnapshot(game.getRuntimeSnapshot());
@@ -280,18 +294,19 @@ export const GameMenuPanel = ({ game, kind, onClose }: GameMenuPanelProps) => {
 
     const creatureEntries = useMemo<readonly DiaryEntry[]>(() => {
         if (!diaryData || !snapshot || diaryTab !== "creatures") return [];
-        const counts = new Map<number, number>();
-        for (const [name, combatant] of Object.entries(snapshot.combat.combatants)) {
-            if (name.toLowerCase() === "hero" || !combatant.dead) continue;
-            const id = databaseId(diaryData.creatureTechnical, name);
-            if (id !== undefined) counts.set(id, (counts.get(id) ?? 0) + 1);
-        }
-        return [...counts].map(([id, count]) => ({
-            id: String(id),
-            title: diaryData.creatureLiterary[id] ?? diaryData.creatureTechnical[id],
-            description: diaryData.creatureDescriptions[id] ?? "",
-            count,
-        })).sort((left, right) => left.title.localeCompare(right.title, "ru"));
+        return Object.entries(snapshot.bestiaryKills)
+            .filter(([, count]) => count > 0)
+            .flatMap(([technicalName, count]): DiaryEntry[] => {
+                const id = databaseId(diaryData.creatureTechnical, technicalName);
+                if (id === undefined) return [];
+                return [{
+                    id: String(id),
+                    title: diaryData.creatureLiterary[id] ?? diaryData.creatureTechnical[id],
+                    description: diaryData.creatureDescriptions[id] ?? "",
+                    count,
+                }];
+            })
+            .sort((left, right) => left.title.localeCompare(right.title, "ru"));
     }, [diaryData, diaryTab, snapshot]);
 
     const historyEntries = useMemo<readonly DiaryEntry[]>(() => {
@@ -311,20 +326,38 @@ export const GameMenuPanel = ({ game, kind, onClose }: GameMenuPanelProps) => {
                     ? creatureEntries
                     : historyEntries;
     const selectedEntry = activeEntries.find((entry) => entry.id === diarySelection) ?? activeEntries[0];
-    const rightPages = paginateText(selectedEntry?.description ?? "");
-    const visibleRightPage = Math.min(rightPage, rightPages.length - 1);
-    const leftPageSize = 12;
-    const leftPageCount = Math.max(1, Math.ceil(activeEntries.length / leftPageSize));
-    const visibleLeftPage = Math.min(leftPage, leftPageCount - 1);
-    const visibleEntries = activeEntries.slice(visibleLeftPage * leftPageSize, (visibleLeftPage + 1) * leftPageSize);
+    useEffect(() => {
+        const animationFrame = window.requestAnimationFrame(() => {
+            const left = leftPageRef.current;
+            const right = rightPageRef.current;
+            if (left) {
+                left.scrollTop = 0;
+                setLeftScroll({ position: 0, maximum: Math.max(0, left.scrollHeight - left.clientHeight) });
+            }
+            if (right) {
+                right.scrollTop = 0;
+                setRightScroll({ position: 0, maximum: Math.max(0, right.scrollHeight - right.clientHeight) });
+            }
+        });
+        return () => window.cancelAnimationFrame(animationFrame);
+    }, [activeEntries.length, diaryData, diaryTab, selectedEntry?.description, selectedEntry?.id, sideCity]);
+
+    const scrollDiaryPage = (
+        element: HTMLElement | null,
+        direction: -1 | 1,
+        update: (state: { position: number; maximum: number }) => void,
+    ): void => {
+        if (!element) return;
+        const maximum = Math.max(0, element.scrollHeight - element.clientHeight);
+        const position = Math.max(0, Math.min(maximum, element.scrollTop + direction * element.clientHeight));
+        element.scrollTop = position;
+        update({ position, maximum });
+    };
     const diaryLabel = (id: number, fallback: string): string => diaryData?.interfaceStrings[id] ?? fallback;
     const selectDiaryTab = (tab: DiaryTab): void => {
-        playDiarySound("prevnext");
         setDiaryTab(tab);
         setDiarySelection(null);
         setSideCity(null);
-        setLeftPage(0);
-        setRightPage(0);
     };
 
     if (kind === "magic") {
@@ -333,52 +366,87 @@ export const GameMenuPanel = ({ game, kind, onClose }: GameMenuPanelProps) => {
 
     if (kind === "journal") {
         const page = DIARY_TABS.find((tab) => tab.id === diaryTab)?.page ?? 1;
+        const activeTab = DIARY_TABS.find((tab) => tab.id === diaryTab) ?? DIARY_TABS[0];
+        const controlValues: Record<number, GuiControlValue> = Object.fromEntries(
+            DIARY_TABS.map((tab) => [tab.objectId, tab.id === diaryTab]),
+        );
+        const controlLabels = Object.fromEntries(DIARY_TABS.map((tab) => [tab.objectId, diaryLabel(tab.labelId, tab.id)]));
+        const inactiveControls = [
+            ...(leftScroll.position <= 0 ? [6] : []),
+            ...(leftScroll.position >= leftScroll.maximum ? [7] : []),
+            ...(rightScroll.position <= 0 ? [8] : []),
+            ...(rightScroll.position >= rightScroll.maximum ? [9] : []),
+        ];
         return <section className={`${styles.panel} ${styles.journal}`} role="dialog" aria-label="Дневник">
             <img className={styles.background} src="/assets/engineres/diary/main.bmp" alt="" draggable={false} />
             <img className={styles.diaryPageArt} src={`/assets/engineres/diary/page${page}.bmp`} alt="" draggable={false} />
-            {diaryTab === "creatures" && <img className={styles.diaryCreatureFrame} src="/assets/engineres/diary/page4_add.bmp" alt="" draggable={false} />}
-            <nav className={styles.diaryTabs} aria-label="Разделы дневника">
-                {DIARY_TABS.map((tab) => <button key={tab.id} type="button" data-tab={tab.id} aria-pressed={diaryTab === tab.id} onClick={() => selectDiaryTab(tab.id)}>
-                    {diaryLabel(tab.labelId, tab.id)}
-                </button>)}
-            </nav>
-            <div className={styles.diaryLeftPage}>
+            {diaryTab === "creatures" && <ColorKeyImage className={styles.diaryCreatureFrame} src="/assets/engineres/diary/page4_add.bmp" />}
+            <OriginalGuiLayer className={styles.diaryAuthoredControls} script="diary"
+                objectIds={[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}
+                values={controlValues}
+                labels={{
+                    ...controlLabels,
+                    6: "Предыдущая страница списка",
+                    7: "Следующая страница списка",
+                    8: "Предыдущая страница записи",
+                    9: "Следующая страница записи",
+                    10: "Закрыть дневник",
+                }}
+                inactiveObjectIds={inactiveControls}
+                onValueChange={(object, value) => {
+                    if (value !== true) return;
+                    const tab = DIARY_TABS.find((candidate) => candidate.objectId === object.id);
+                    if (tab) selectDiaryTab(tab.id);
+                }}
+                onAction={(object) => {
+                    if (object.id === 6) scrollDiaryPage(leftPageRef.current, -1, setLeftScroll);
+                    else if (object.id === 7) scrollDiaryPage(leftPageRef.current, 1, setLeftScroll);
+                    else if (object.id === 8) scrollDiaryPage(rightPageRef.current, -1, setRightScroll);
+                    else if (object.id === 9) scrollDiaryPage(rightPageRef.current, 1, setRightScroll);
+                    else if (object.id === 10) onClose();
+                }}
+            />
+            {DIARY_TAB_TEXT_DRAWS.map((draw) => {
+                const selected = activeTab.objectId === draw.objectId;
+                return <span className={styles.diaryNativeText} style={diaryTabTextStyle(draw, selected)}
+                    data-interface-string-id={draw.stringId} key={draw.objectId}>
+                    {diaryLabel(draw.stringId, String(draw.stringId))}
+                </span>;
+            })}
+            <div ref={leftPageRef} className={styles.diaryLeftPage} style={diaryContentStyle(DIARY_CONTENT_RECTS.leftList)}>
                 {!diaryData && <p>Загрузка дневника…</p>}
                 {diaryData && diaryTab === "side" && sideCity === null && sideCities.map((city) => <button key={city.technicalName} type="button" onClick={() => {
                     playDiarySound("prevnext");
                     setSideCity(city.technicalName);
                     setDiarySelection(null);
-                    setLeftPage(0);
-                    setRightPage(0);
                 }}>{city.title}</button>)}
                 {diaryTab === "side" && sideCity !== null && <button className={styles.diaryBack} type="button" onClick={() => {
                     playDiarySound("prevnext");
                     setSideCity(null);
                     setDiarySelection(null);
-                    setLeftPage(0);
-                    setRightPage(0);
                 }}>← Города</button>}
-                {(diaryTab !== "side" || sideCity !== null) && visibleEntries.map((entry) => <button
+                {(diaryTab !== "side" || sideCity !== null) && activeEntries.map((entry) => <button
                     key={entry.id}
                     type="button"
                     className={entry.id === selectedEntry?.id ? styles.diarySelected : undefined}
                     data-completed={entry.completed || undefined}
-                    onClick={() => { playDiarySound("prevnext"); setDiarySelection(entry.id); setRightPage(0); }}
+                    style={entry.completed && MAIN_INTERFACE_STRIKEOUT_FONT.strikeout
+                        ? { textDecoration: "line-through" }
+                        : undefined}
+                    onClick={() => { playDiarySound("prevnext"); setDiarySelection(entry.id); }}
                 >{entry.title}{entry.count === undefined ? "" : ` — ${entry.count}`}</button>)}
                 {diaryData && ((diaryTab === "side" && sideCity === null && sideCities.length === 0) || ((diaryTab !== "side" || sideCity !== null) && activeEntries.length === 0)) && <p>Нет записей.</p>}
             </div>
-            <article className={`${styles.diaryRightPage} ${diaryTab === "creatures" ? styles.diaryCreatureText : ""}`}>
+            {diaryTab === "creatures" && selectedEntry && <h2 className={styles.diaryCreatureTitle}
+                style={diaryContentStyle(DIARY_CONTENT_RECTS.creatureTitle)}>{selectedEntry.title}</h2>}
+            <article ref={rightPageRef} className={`${styles.diaryRightPage} ${diaryTab === "creatures" ? styles.diaryCreatureText : ""}`}
+                style={diaryContentStyle(diaryTab === "creatures"
+                    ? DIARY_CONTENT_RECTS.creatureDescription
+                    : DIARY_CONTENT_RECTS.rightList)}>
                 {selectedEntry && <>
-                    <h2>{selectedEntry.title}</h2>
-                    {selectedEntry.completed && <strong className={styles.diaryCompleted}>Завершено</strong>}
-                    {rightPages[visibleRightPage].split(/\r?\n+/).filter(Boolean).map((paragraph, index) => <p key={index}>{paragraph}</p>)}
+                    {selectedEntry.description.split(/\r?\n+/).filter(Boolean).map((paragraph, index) => <p key={index}>{paragraph}</p>)}
                 </>}
             </article>
-            <button className={`${styles.diaryArrow} ${styles.diaryLeftPrevious}`} type="button" aria-label="Предыдущая страница списка" disabled={visibleLeftPage === 0} onClick={() => { playDiarySound("prevnext"); setLeftPage((value) => Math.max(0, value - 1)); }} />
-            <button className={`${styles.diaryArrow} ${styles.diaryLeftNext}`} type="button" aria-label="Следующая страница списка" disabled={visibleLeftPage + 1 >= leftPageCount} onClick={() => { playDiarySound("prevnext"); setLeftPage((value) => Math.min(leftPageCount - 1, value + 1)); }} />
-            <button className={`${styles.diaryArrow} ${styles.diaryRightPrevious}`} type="button" aria-label="Предыдущая страница записи" disabled={visibleRightPage === 0} onClick={() => { playDiarySound("prevnext"); setRightPage((value) => Math.max(0, value - 1)); }} />
-            <button className={`${styles.diaryArrow} ${styles.diaryRightNext}`} type="button" aria-label="Следующая страница записи" disabled={visibleRightPage + 1 >= rightPages.length} onClick={() => { playDiarySound("prevnext"); setRightPage((value) => Math.min(rightPages.length - 1, value + 1)); }} />
-            <button className={styles.diaryClose} type="button" aria-label="Закрыть дневник" onClick={() => { playDiarySound("close"); onClose(); }} />
         </section>;
     }
 

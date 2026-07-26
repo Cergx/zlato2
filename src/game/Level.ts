@@ -115,6 +115,7 @@ export interface LevelOptions {
     onTrade?: () => void;
     onContainerOpen?: (owner: string, triggerName: string) => void;
     onStatusText?: (text?: string) => void;
+    strictScriptAbi?: boolean;
 }
 
 export class Level {

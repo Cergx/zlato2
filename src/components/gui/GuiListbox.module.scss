@@ -1,0 +1,12 @@
+.listbox {
+    position: absolute;
+    box-sizing: border-box;
+    border: 1px solid rgb(82 59 30 / 85%);
+    padding: 0;
+    color: #241b10;
+    background: rgb(223 205 158 / 88%);
+}
+
+.listbox option { padding-inline: .35em; }
+
+.listbox[data-gui-visible="false"] { opacity: 0; }

@@ -1,0 +1,27 @@
+.slider {
+    position: absolute;
+    box-sizing: border-box;
+    margin: 0;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+    writing-mode: vertical-lr;
+    direction: rtl;
+}
+
+.slider::-webkit-slider-runnable-track {
+    height: 3px;
+    border: 1px solid #1c1208;
+    background: #7d5f32;
+}
+
+.slider::-webkit-slider-thumb {
+    width: 20px;
+    height: 20px;
+    margin-top: -9px;
+    border: 0;
+    appearance: none;
+    background: var(--gui-thumb) center / 100% 100% no-repeat;
+}
+
+.slider[data-gui-visible="false"] { opacity: 0; }

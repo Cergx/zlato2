@@ -178,8 +178,14 @@ const BINARY_PRECEDENCE: Readonly<Record<string, number>> = {
 
 export type SCREventHandlerName = "OnEnter" | "OnHover" | "OnLeave" | "OnClick";
 
-/** Returns the body of a top-level trigger handler, preserving source text for the normal parser. */
-export const extractSCREventHandler = (source: string, handler: SCREventHandlerName): string | undefined => {
+export interface SCRScript {
+    readonly type: "script";
+    readonly sourceName: string;
+    readonly program: SCRProgram;
+    readonly handlers: Readonly<Partial<Record<SCREventHandlerName, SCRProgram>>>;
+}
+
+const extractSCRHandlerBody = (source: string, handler: SCREventHandlerName): string | undefined => {
     const header = new RegExp(`^\\s*${handler}\\s*$`, "m").exec(source);
     if (!header) return undefined;
     let cursor = header.index + header[0].length;
@@ -203,6 +209,28 @@ export const extractSCREventHandler = (source: string, handler: SCREventHandlerN
         cursor++;
     }
     throw new Error(`SCR handler ${handler} is missing its closing brace`);
+};
+
+export const parseSCRScript = (
+    source: string,
+    sourceName = "script",
+    overrides?: Partial<SCRParseLimits>,
+    requestedHandlers: readonly SCREventHandlerName[] = ["OnEnter", "OnHover", "OnLeave", "OnClick"],
+): SCRScript => {
+    const handlers: Partial<Record<SCREventHandlerName, SCRProgram>> = {};
+    let hasHandlers = false;
+    for (const handler of requestedHandlers) {
+        const body = extractSCRHandlerBody(source, handler);
+        if (body === undefined) continue;
+        hasHandlers = true;
+        handlers[handler] = parseSCR(body, `${sourceName}:${handler}`, overrides);
+    }
+    return {
+        type: "script",
+        sourceName,
+        program: requestedHandlers.length === 4 && !hasHandlers ? parseSCR(source, sourceName, overrides) : parseSCR("", sourceName, overrides),
+        handlers,
+    };
 };
 
 export const normalizeSCRIdentifier = (identifier: string): string => identifier.toLowerCase();
@@ -244,12 +272,15 @@ class Lexer {
     private line = 1;
     private column = 1;
     private readonly tokens: SCRToken[] = [];
+    private readonly source: string;
+    private readonly sourceName: string;
+    private readonly limits: SCRParseLimits;
 
-    constructor(
-        private readonly source: string,
-        private readonly sourceName: string,
-        private readonly limits: SCRParseLimits,
-    ) {}
+    constructor(source: string, sourceName: string, limits: SCRParseLimits) {
+        this.source = source;
+        this.sourceName = sourceName;
+        this.limits = limits;
+    }
 
     tokenize(): readonly SCRToken[] {
         if (this.source.length > this.limits.maxSourceLength) {
@@ -460,12 +491,15 @@ class Lexer {
 class Parser {
     private index = 0;
     private nestingDepth = 0;
+    private readonly tokens: readonly SCRToken[];
+    private readonly sourceName: string;
+    private readonly limits: SCRParseLimits;
 
-    constructor(
-        private readonly tokens: readonly SCRToken[],
-        private readonly sourceName: string,
-        private readonly limits: SCRParseLimits,
-    ) {}
+    constructor(tokens: readonly SCRToken[], sourceName: string, limits: SCRParseLimits) {
+        this.tokens = tokens;
+        this.sourceName = sourceName;
+        this.limits = limits;
+    }
 
     parseProgram(): SCRProgram {
         const statements: SCRStatement[] = [];

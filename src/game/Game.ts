@@ -90,6 +90,10 @@ export interface GameEvents {
     onStatusTextChange?: (text?: string) => void;
 }
 
+export interface GameOptions {
+    strictScriptAbi?: boolean;
+}
+
 export class Game {
     private readonly ctx: CanvasRenderingContext2D | null;
     private readonly dialogue: DialogueRuntime;
@@ -111,7 +115,11 @@ export class Game {
 
 
 
-    constructor(private readonly canvas: HTMLCanvasElement, private readonly events: GameEvents = {}) {
+    constructor(
+        private readonly canvas: HTMLCanvasElement,
+        private readonly events: GameEvents = {},
+        private readonly options: GameOptions = {},
+    ) {
         this.ctx = canvas.getContext("2d");
         if (!this.ctx) throw new Error("Не удалось получить контекст `2d`");
 
@@ -147,6 +155,7 @@ export class Game {
             onContainerOpen: (owner, triggerName) => this.events.onContainerOpen?.(owner, triggerName),
             onTrade: () => void this.openCurrentTrade().catch((error) => this.reportError(error)),
             onStatusText: (text) => this.events.onStatusTextChange?.(text),
+            strictScriptAbi: this.options.strictScriptAbi,
         });
         this.level.applySettings(this.settings);
         const heroProfile = await this.loadHeroProfile();
@@ -200,6 +209,17 @@ export class Game {
 
     public getDialogueState(): DialogueState {
         return this.dialogue.getState();
+    }
+
+    public canTradeWithDialogueSpeaker(): boolean {
+        const speaker = this.dialogueSpeakerTechnical;
+        return Boolean(speaker && this.level?.getData()?.levelPersons.some(
+            (person) => person.name.toLowerCase() === speaker.toLowerCase() && person.scriptInventory,
+        ));
+    }
+
+    public tradeWithDialogueSpeaker(): Promise<void> {
+        return this.openCurrentTrade();
     }
 
     public getLevel(): Level | null {
@@ -422,6 +442,7 @@ export class Game {
         save.persons = { ...runtime.persons };
         save.stageFlags = { ...runtime.stageFlags };
         save.locationAccess = { ...runtime.locationAccess };
+        save.bestiaryKills = { ...runtime.bestiaryKills };
         save.personParameters = Object.fromEntries(Object.entries(runtime.personParameters).map(([person, values]) => [person, { ...values }]));
         save.magicEffects = runtime.magic.activeEffects.map((effect) => ({ ...effect }));
         save.regenerationElapsed = Object.fromEntries(

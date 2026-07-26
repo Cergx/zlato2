@@ -1,8 +1,8 @@
 .container {
     position: relative;
-    display: grid;
-    min-height: 100vh;
-    place-items: center;
+    display: block;
+    width: 1024px;
+    height: 768px;
     overflow: hidden;
     background: #050505;
 }

@@ -86,16 +86,15 @@ export class CSXParser {
     }
 
     private decodeLine(bytes: number[], byteIndex: number, pixels: number[], pixelIndex: number, widthLeft: number, byteCount: number) {
-        const startPixelIndex = pixelIndex;
+        // Each row is an independent command stream.
         while (widthLeft > 0 && byteCount > 0) {
             let x = bytes[byteIndex];
             byteIndex++;
             byteCount--;
 
             switch (x) {
-                case 107: // WTF-case
+                case 107: // Escape: the next byte is a literal palette index.
                     pixels[pixelIndex] = bytes[byteIndex];
-                    if (pixelIndex !== startPixelIndex) pixels[pixelIndex - 1] = bytes[byteIndex];
                     byteIndex++;
                     byteCount--;
                     pixelIndex++;
@@ -105,10 +104,9 @@ export class CSXParser {
                     pixelIndex++;
                     widthLeft--;
                     break;
-                case 106: // Заполненный цвет
+                case 106: // Run: palette index followed by run length.
                     x = Math.min(widthLeft, bytes[byteIndex + 1]);
                     for (let i = 0; i < x; i++) pixels[pixelIndex + i] = bytes[byteIndex];
-                    if (pixelIndex !== startPixelIndex) pixels[pixelIndex - 1] = bytes[byteIndex];
                     byteCount -= 2;
                     byteIndex += 2;
                     pixelIndex += x;

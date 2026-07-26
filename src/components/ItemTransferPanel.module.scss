@@ -22,7 +22,7 @@
     top: 1.2%;
     z-index: 2;
     width: 24.8%;
-    font-size: clamp(10px, 1.2vw, 16px);
+    font-size: 12px;
     font-weight: 700;
     line-height: 2;
     text-align: center;
@@ -69,7 +69,7 @@
     padding: 0 2px;
     color: #fff0b2;
     background: rgb(25 12 3 / 80%);
-    font: 700 clamp(8px, .9vw, 12px) Arial, sans-serif;
+    font: 700 9px Arial, sans-serif;
     text-shadow: 0 1px 2px #000;
 }
 
@@ -117,7 +117,7 @@
     width: 32%;
     overflow: hidden;
     color: #c3bca5;
-    font: 700 clamp(9px, 1vw, 13px) ZlatoPalatino, serif;
+    font: 700 10px ZlatoPalatino, serif;
     text-align: center;
     text-overflow: ellipsis;
     text-shadow: 0 1px #000;

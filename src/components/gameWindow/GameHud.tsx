@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { Game } from "../../game/Game.ts";
 import { loadCSX, loadImage } from "../../game/Assets.ts";
+import { HUD_GAUGE_ANIMATION_ORIGINS, HUD_NATIVE_ANIMATION_FRAME_HEIGHTS } from "../../constants/clientDll.ts";
+import { CONSOLE_FONT, MAIN_INTERFACE_FONT } from "../../constants/fontsScr.ts";
 import { Paths } from "../../constants/paths.ts";
-import { guiSoundUrl } from "../../game/GuiDefinitionRuntime.ts";
+import { loadGuiDefinition, type GuiDefinition } from "../../game/GuiDefinitionRuntime.ts";
 import { loadMagicCatalog, type MagicDefinition } from "../../game/MagicCatalogRuntime.ts";
 import { ColorKeyImage } from "../ColorKeyImage.tsx";
+import { guiObjectStyle, OriginalGuiLayer, type GuiControlValue } from "../OriginalGuiLayer.tsx";
 import styles from "./GameHud.module.scss";
 
 interface GameHudProps {
@@ -51,10 +54,6 @@ const initialInfo: HudInfo = {
     castableSpellIds: [],
 };
 
-const GAUGE_FRAME_COUNT = 43;
-const GAUGE_FRAME_HEIGHT = 141;
-const GAUGE_CONTENT_TOP = 24;
-
 const readValue = (parameters: Readonly<Record<string, number>>, names: readonly string[]): number | undefined => {
     for (const name of names) {
         const value = parameters[name];
@@ -89,27 +88,40 @@ const drawColorKeyed = (
     target.drawImage(buffer, destinationX, destinationY);
 };
 
-const playHudSound = (reference: string): void => {
-    const url = guiSoundUrl(reference);
-    if (!url) return;
-    const audio = new Audio(url);
-    audio.volume = 0.7;
-    void audio.play().catch(() => undefined);
-};
+
+const HUD_STATUS_FONT_STYLE: CSSProperties = Object.freeze({
+    fontFamily: `ZlatoPalatino, "${MAIN_INTERFACE_FONT.typeFace}", serif`,
+    fontSize: `${MAIN_INTERFACE_FONT.size}px`,
+    fontWeight: MAIN_INTERFACE_FONT.weight,
+});
+
+const HUD_VALUE_FONT_STYLE: CSSProperties = Object.freeze({
+    fontFamily: `ZlatoConsole, "${CONSOLE_FONT.typeFace}", monospace`,
+    fontSize: `${CONSOLE_FONT.size}px`,
+});
 
 export const GameHud = ({ getGame, statusText, onSkills, onInventory, onJournal, onMagic, onPause, onRest, skillsActive, onCombatModeChange }: GameHudProps) => {
     const frameRef = useRef<HTMLCanvasElement>(null);
+    const healthFrameRef = useRef<number | null>(null);
+    const energyFrameRef = useRef<number | null>(null);
     const minimapRef = useRef<HTMLCanvasElement>(null);
     const [hudVisible, setHudVisible] = useState(true);
     const [minimapVisible, setMinimapVisible] = useState(true);
     const [info, setInfo] = useState(initialInfo);
     const [magicDefinitions, setMagicDefinitions] = useState<readonly MagicDefinition[]>([]);
+    const [guiDefinition, setGuiDefinition] = useState<GuiDefinition | null>(null);
+    const guiObjects = useMemo(
+        () => new Map(guiDefinition?.objects.map((object) => [object.id, object]) ?? []),
+        [guiDefinition],
+    );
 
     useEffect(() => {
         let cancelled = false;
-        void loadMagicCatalog().then((definitions) => {
-            if (!cancelled) setMagicDefinitions(definitions);
-        }).catch((error) => console.error("Не удалось загрузить панель заклинаний", error));
+        void Promise.all([loadMagicCatalog(), loadGuiDefinition("gpanel_new")]).then(([definitions, gui]) => {
+            if (cancelled) return;
+            setMagicDefinitions(definitions);
+            setGuiDefinition(gui);
+        }).catch((error) => console.error("Не удалось загрузить HUD", error));
         return () => { cancelled = true; };
     }, []);
 
@@ -151,6 +163,7 @@ export const GameHud = ({ getGame, statusText, onSkills, onInventory, onJournal,
 
     useEffect(() => {
         let cancelled = false;
+        let animationFrame = 0;
         void Promise.all([
             loadImage(`${Paths.ENGINERES}/gpanel/std.bmp`),
             loadImage(`${Paths.ENGINERES}/gpanel/anim/health.bmp`),
@@ -160,17 +173,51 @@ export const GameHud = ({ getGame, statusText, onSkills, onInventory, onJournal,
             const canvas = frameRef.current;
             const context = canvas?.getContext("2d");
             if (!canvas || !context) return;
-            context.clearRect(0, 0, canvas.width, canvas.height);
-            drawColorKeyed(context, frame, 0, 0, 1024, 156, 0, 0);
-            const healthFrame = Math.round(info.lifeRatio * (GAUGE_FRAME_COUNT - 1));
-            const energyFrame = Math.round(info.energyRatio * (GAUGE_FRAME_COUNT - 1));
-            drawColorKeyed(context, health, 6, healthFrame * GAUGE_FRAME_HEIGHT + GAUGE_CONTENT_TOP, 34, 95, 164, 23);
-            drawColorKeyed(context, energy, 4, energyFrame * GAUGE_FRAME_HEIGHT + GAUGE_CONTENT_TOP, 27, 95, 823, 23);
+            const healthObject = guiObjects.get(34);
+            const energyObject = guiObjects.get(36);
+            if (!healthObject || !energyObject) return;
+            const panelTop = 768 - canvas.height;
+            const healthFrameCount = Math.max(1, Math.floor(health.height / HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.health));
+            const energyFrameCount = Math.max(1, Math.floor(energy.height / HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.energy));
+            const healthTarget = Math.floor(info.lifeRatio * (healthFrameCount - 1));
+            const energyTarget = Math.floor(info.energyRatio * (energyFrameCount - 1));
+            const advance = (current: number | null, target: number): number =>
+                current === null ? target : current < target ? current + 1 : current > target ? current - 1 : current;
+            const draw = (): void => {
+                if (cancelled) return;
+                const healthFrame = advance(healthFrameRef.current, healthTarget);
+                const energyFrame = advance(energyFrameRef.current, energyTarget);
+                healthFrameRef.current = healthFrame;
+                energyFrameRef.current = energyFrame;
+                context.clearRect(0, 0, canvas.width, canvas.height);
+                drawColorKeyed(context, frame, 0, 0, 1024, canvas.height, 0, 0);
+                drawColorKeyed(context, health,
+                    healthObject.left - HUD_GAUGE_ANIMATION_ORIGINS.health.left,
+                    healthFrame * HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.health
+                        + healthObject.top - HUD_GAUGE_ANIMATION_ORIGINS.health.top,
+                    healthObject.width,
+                    healthObject.height,
+                    healthObject.left,
+                    healthObject.top - panelTop);
+                drawColorKeyed(context, energy,
+                    energyObject.left - HUD_GAUGE_ANIMATION_ORIGINS.energy.left,
+                    energyFrame * HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.energy
+                        + energyObject.top - HUD_GAUGE_ANIMATION_ORIGINS.energy.top,
+                    energyObject.width,
+                    energyObject.height,
+                    energyObject.left,
+                    energyObject.top - panelTop);
+                if (healthFrame !== healthTarget || energyFrame !== energyTarget) {
+                    animationFrame = window.requestAnimationFrame(draw);
+                }
+            };
+            draw();
         });
         return () => {
             cancelled = true;
+            window.cancelAnimationFrame(animationFrame);
         };
-    }, [info.lifeRatio, info.energyRatio]);
+    }, [guiObjects, info.lifeRatio, info.energyRatio]);
 
     useEffect(() => {
         const canvas = minimapRef.current;
@@ -263,6 +310,32 @@ export const GameHud = ({ getGame, statusText, onSkills, onInventory, onJournal,
     }, [getGame, onInventory]);
 
 
+    const hudValues: Record<number, GuiControlValue> = { 2: skillsActive, 6: minimapVisible };
+    const hudLabels = {
+        1: "Инвентарь",
+        2: "Навыки",
+        3: "Меню",
+        4: "Отдых",
+        5: "Дневник",
+        6: "Миникарта",
+        7: "Книга магии",
+        8: "Глобальная карта",
+        14: "Боевой режим",
+    };
+    const handleHudAction = (id: number): void => {
+        if (id === 1) onInventory();
+        else if (id === 3) onPause();
+        else if (id === 4) onRest();
+        else if (id === 5) onJournal();
+        else if (id === 7) onMagic();
+        else if (id === 8) getGame()?.showWorldMap();
+        else if (id === 14) {
+            const active = getGame()?.toggleCombatMode() ?? false;
+            setInfo((current) => ({ ...current, combatMode: active }));
+            onCombatModeChange?.(active);
+        }
+    };
+
     return (
         <div className={styles.hud} data-hidden={!hudVisible}>
             <div className={styles.minimapFrame} data-hidden={!minimapVisible} aria-label="Миникарта">
@@ -279,44 +352,50 @@ export const GameHud = ({ getGame, statusText, onSkills, onInventory, onJournal,
             </div>
             <div className={styles.panel}>
                 <canvas ref={frameRef} width={1024} height={156} />
-                <img className={`${styles.slotPlaceholder} ${styles.crosierPlaceholder}`} src="/assets/engineres/gpanel/zaglushka3.bmp" alt="" draggable={false} />
-                <img className={`${styles.slotPlaceholder} ${styles.spellPlaceholder}`} src="/assets/engineres/gpanel/zaglushka4.bmp" alt="" draggable={false} />
-                <span className={styles.status}>{info.heroDead ? "Игра окончена." : statusText || info.combatMessage}</span>
-                <span className={styles.lifeValue}>{Math.round(info.lifeValue)}</span>
-                <span className={styles.energyValue}>{Math.round(info.energyValue)}</span>
-                <div className={styles.magicHotbar} aria-label="Быстрые заклинания">
-                    {info.hotbarSpellIds.map((magicId, slot) => {
-                        const magic = magicId === null ? undefined : magicDefinitions[magicId];
-                        const castable = magic !== undefined && info.castableSpellIds.includes(magic.id);
-                        return <button
-                            key={slot}
-                            type="button"
-                            aria-label={magic ? `${slot + 1}: ${magic.literaryName}` : `Пустой слот ${slot + 1}`}
-                            aria-pressed={magicId !== null && info.selectedSpellId === magicId}
-                            disabled={!castable}
-                            title={magic ? `${slot + 1}. ${magic.literaryName}` : `${slot + 1}. Пусто`}
-                            onClick={() => getGame()?.activateHeroMagicSlot(slot)}
-                            onContextMenu={(event) => { event.preventDefault(); getGame()?.cancelHeroMagicTargeting(); }}
-                        >
-                            {magic && <ColorKeyImage src={`/assets/engineres/interface/magic_book/magic_icons/${info.selectedSpellId === magic.id ? "cast" : "glow"}/${magic.technicalName}.bmp`} />}
-                        </button>;
-                    })}
-                </div>
-                <button className={`${styles.toolbarButton} ${styles.buttonInventory}`} type="button" aria-label="Инвентарь" onClick={() => { playHudSound("sounds\\ui\\panel\\inventory"); onInventory(); }} />
-                <button className={`${styles.toolbarButton} ${styles.buttonCharacter}`} type="button" aria-label="Навыки" aria-pressed={skillsActive} onClick={() => { playHudSound("sounds\\ui\\panel\\navyki"); onSkills(); }} />
-                <button className={`${styles.toolbarButton} ${styles.buttonConsole}`} type="button" aria-label="Меню" onClick={() => { playHudSound("sounds\\ui\\panel\\mainmenu"); onPause(); }} />
-                <button className={`${styles.toolbarButton} ${styles.buttonRest}`} type="button" aria-label="Отдых" onClick={() => { playHudSound("sounds\\ui\\panel\\relax"); onRest(); }} />
-                <button className={`${styles.toolbarButton} ${styles.buttonJournal}`} type="button" aria-label="Дневник" onClick={() => { playHudSound("sounds\\ui\\panel\\journal"); onJournal(); }} />
-                <button className={`${styles.toolbarButton} ${styles.buttonMinimap}`} type="button" aria-label="Миникарта" aria-pressed={minimapVisible} onClick={() => { playHudSound("sounds\\ui\\panel\\minimap"); setMinimapVisible((visible) => !visible); }} />
-                <button className={`${styles.toolbarButton} ${styles.buttonMagic}`} type="button" aria-label="Книга магии" onClick={() => { playHudSound("sounds\\ui\\panel\\magicbook"); onMagic(); }} />
-                <button className={`${styles.toolbarButton} ${styles.buttonWorldMap}`} type="button" aria-label="Глобальная карта" disabled={!info.worldMapAvailable} onClick={() => { playHudSound("sounds\\ui\\panel\\worldmap"); getGame()?.showWorldMap(); }} />
-                <button className={styles.combatButton} type="button" aria-label="Боевой режим" aria-pressed={info.combatMode} onClick={() => {
-                    playHudSound("sounds\\ui\\panel\\battlemode");
-                    const active = getGame()?.toggleCombatMode() ?? false;
-                    setInfo((current) => ({ ...current, combatMode: active }));
-                    onCombatModeChange?.(active);
-                }} />
             </div>
+            {guiObjects.get(18) && <img className={styles.slotPlaceholder} style={guiObjectStyle(guiObjects.get(18)!)}
+                src="/assets/engineres/gpanel/zaglushka3.bmp" alt="" draggable={false} />}
+            {guiObjects.get(19) && <img className={styles.slotPlaceholder} style={guiObjectStyle(guiObjects.get(19)!)}
+                src="/assets/engineres/gpanel/zaglushka4.bmp" alt="" draggable={false} />}
+            {guiObjects.get(38) && <span className={styles.status}
+                style={{ ...guiObjectStyle(guiObjects.get(38)!), ...HUD_STATUS_FONT_STYLE }}>
+                {info.heroDead ? "Игра окончена." : statusText || info.combatMessage}
+            </span>}
+            {guiObjects.get(35) && <span className={styles.lifeValue}
+                style={{ ...guiObjectStyle(guiObjects.get(35)!), ...HUD_VALUE_FONT_STYLE }}>
+                {Math.round(info.lifeValue)}/{Math.round(info.lifeMaximum)}
+            </span>}
+            {guiObjects.get(37) && <span className={styles.energyValue}
+                style={{ ...guiObjectStyle(guiObjects.get(37)!), ...HUD_VALUE_FONT_STYLE }}>
+                {Math.round(info.energyValue)}/{Math.round(info.energyMaximum)}
+            </span>}
+            <OriginalGuiLayer className={styles.authoredControls} script="gpanel_new"
+                objectIds={[1, 2, 3, 4, 5, 6, 7, 8, 14]}
+                values={hudValues}
+                labels={hudLabels}
+                inactiveObjectIds={info.worldMapAvailable ? [] : [8]}
+                onAction={(object) => handleHudAction(object.id)}
+                onValueChange={(object, value) => {
+                    if (object.id === 2) onSkills();
+                    else if (object.id === 6) setMinimapVisible(value === true);
+                }}
+            />
+            {info.hotbarSpellIds.map((magicId, slot) => {
+                const object = guiObjects.get(24 + slot);
+                if (!object) return null;
+                const magic = magicId === null ? undefined : magicDefinitions[magicId];
+                const castable = magic !== undefined && info.castableSpellIds.includes(magic.id);
+                return <button className={styles.magicSlot} style={guiObjectStyle(object)}
+                    key={slot} type="button"
+                    aria-label={magic ? `${slot + 1}: ${magic.literaryName}` : `Пустой слот ${slot + 1}`}
+                    aria-pressed={magicId !== null && info.selectedSpellId === magicId}
+                    disabled={!castable}
+                    title={magic ? `${slot + 1}. ${magic.literaryName}` : `${slot + 1}. Пусто`}
+                    onClick={() => getGame()?.activateHeroMagicSlot(slot)}
+                    onContextMenu={(event) => { event.preventDefault(); getGame()?.cancelHeroMagicTargeting(); }}>
+                    {magic && <ColorKeyImage src={`/assets/engineres/interface/magic_book/magic_icons/${info.selectedSpellId === magic.id ? "cast" : "glow"}/${magic.technicalName}.bmp`} />}
+                </button>;
+            })}
         </div>
     );
 };

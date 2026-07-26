@@ -9,9 +9,8 @@ import {
 } from "./ScenarioRuntime.ts";
 import {
     SCRRuntime,
-    extractSCREventHandler,
-    parseSCR,
-    type SCRProgram,
+    parseSCRScript,
+    type SCRScript,
     type SCRValue,
 } from "./scripts/SCRRuntime.ts";
 import type { GameSaveData } from "./PersistenceRuntime.ts";
@@ -118,6 +117,7 @@ export interface GameRuntimeSnapshot {
     questFlags: Readonly<Record<string, boolean>>;
     stageFlags: Readonly<Record<string, boolean>>;
     locationAccess: Readonly<Record<string, number>>;
+    bestiaryKills: Readonly<Record<string, number>>;
     personParameters: Readonly<Record<string, Readonly<Record<string, number>>> >;
     experience: number;
     elapsedMinutes: number;
@@ -147,6 +147,7 @@ export interface GameStateRuntimeOptions {
     random?: () => number;
     now?: () => Date;
     addonMode?: boolean;
+    strictScriptAbi?: boolean;
 }
 
 const relationScores: Readonly<Record<FactionRelation, number>> = {
@@ -226,6 +227,7 @@ interface CombatProfileSource {
     readonly parameters: Readonly<Record<string, number>>;
     readonly items: readonly ShippedItem[];
     readonly base: Partial<Pick<Parameters<typeof createOriginalCombatProfile>[0], "baseHealth" | "baseEnergy" | "baseHitChance" | "baseActionPoints" | "baseArmorClass">>;
+    readonly bestiaryName?: string;
 }
 const EQUIPMENT_SLOTS: readonly EquipmentSlot[] = [
     "mainHand", "offHand", "ammo", "head", "body", "arms", "bracelet", "amulet", "ringLeft", "ringRight",
@@ -352,6 +354,7 @@ export class GameStateRuntime {
     private readonly stageFlags = new Map<string, boolean>();
     private readonly locationAccess = new Map<string, number>();
     private readonly personParameters = new Map<string, Map<string, number>>();
+    private readonly bestiaryKills = new Map<string, number>();
     private readonly personConditions = new Map<string, Map<string, number | boolean>>();
     private readonly equipped: Partial<Record<EquipmentSlot, string>> = {};
     private readonly combatants = new Map<string, Combatant>();
@@ -383,7 +386,8 @@ export class GameStateRuntime {
     private remainingActionPoints = new Map<string, number>();
     private scenario: ScenarioRuntime | null = null;
     private levelData: LevelData | null = null;
-    private coreProgram: SCRProgram | null = null;
+    private coreScript: SCRScript | null = null;
+    private readonly scrScripts = new Map<string, SCRScript>();
     private generation = 0;
     private experience = 0;
     private elapsedMinutes = 0;
@@ -400,7 +404,11 @@ export class GameStateRuntime {
     public async loadLevel(levelData: LevelData): Promise<void> {
         const generation = ++this.generation;
         this.levelData = levelData;
-        this.coreProgram = levelData.coreScript ? parseSCR(levelData.coreScript, `${levelData.levelName}/core.scr`) : null;
+        this.scrScripts.clear();
+        this.coreScript = levelData.coreScript ? parseSCRScript(levelData.coreScript, `${levelData.levelName}/core.scr`) : null;
+        if (this.coreScript && Object.keys(this.coreScript.handlers).length > 0) {
+            throw new Error(`${levelData.levelName}/core.scr contains event handlers; native core context expects top-level statements`);
+        }
         this.lastCoreTick = 0;
         this.lastSimulationTimeMs = undefined;
         this.clockAccumulatorMs = 0;
@@ -431,7 +439,13 @@ export class GameStateRuntime {
         const assets = new Map(personAssets);
         this.createCombatants(levelData, assets, heroAssets);
         for (const person of this.dynamicPersons) this.registerPersonCombatant(person, assets.get(person.name.toLowerCase()));
-        if (levelData.initScript) this.scr.execute(levelData.initScript, `${levelData.levelName}/init.scr`);
+        if (levelData.initScript) {
+            const initScript = parseSCRScript(levelData.initScript, `${levelData.levelName}/init.scr`);
+            if (Object.keys(initScript.handlers).length > 0) {
+                throw new Error(`${levelData.levelName}/init.scr contains event handlers; native init context expects top-level statements`);
+            }
+            this.scr.executeProgram(initScript.program);
+        }
         await Promise.all(this.pendingDynamicCombatLoads);
     }
 
@@ -452,9 +466,9 @@ export class GameStateRuntime {
         }
         this.lastSimulationTimeMs = simulationTimeMs;
         this.npcRoutes = this.scenario.advanceRoutes(simulationTimeMs);
-        if (this.coreProgram && tick - this.lastCoreTick >= 20) {
+        if (this.coreScript && tick - this.lastCoreTick >= 20) {
             this.lastCoreTick = tick;
-            this.scr.executeProgram(this.coreProgram);
+            this.scr.executeProgram(this.coreScript.program);
         }
     }
 
@@ -800,6 +814,8 @@ export class GameStateRuntime {
         for (const [person, values] of Object.entries(save.personParameters)) {
             this.personParameters.set(person, new Map(Object.entries(values).map(([name, value]) => [name.toLowerCase(), value])));
         }
+        this.bestiaryKills.clear();
+        for (const [name, count] of Object.entries(save.bestiaryKills)) this.bestiaryKills.set(name.toLowerCase(), count);
         this.experience = save.experience;
         this.elapsedMinutes = save.clock.day * 24 * 60 + save.clock.minuteOfDay;
         this.clockAccumulatorMs = 0;
@@ -849,6 +865,7 @@ export class GameStateRuntime {
             stageFlags: Object.fromEntries(this.stageFlags),
             locationAccess: Object.fromEntries(this.locationAccess),
             personParameters: Object.fromEntries([...this.personParameters].map(([person, values]) => [person, Object.fromEntries(values)])),
+            bestiaryKills: Object.fromEntries(this.bestiaryKills),
             experience: this.experience,
             elapsedMinutes: this.elapsedMinutes,
             magic: this.magicSnapshot(),
@@ -920,17 +937,29 @@ export class GameStateRuntime {
         const levelData = this.levelData;
         if (!levelData) return;
         const scriptFileName = (request.scriptName.toLowerCase().endsWith(".scr") ? request.scriptName : `${request.scriptName}.scr`).toLowerCase();
-        const source = await decodeScript(Paths.LEVEL_SCRIPT(levelData.levelName, levelData.gameMode, scriptFileName));
-        if (generation !== this.generation) return;
         const handlers = request.phase === "enter"
             ? ["OnEnter", "OnHover"] as const
             : request.phase === "click"
                 ? ["OnClick"] as const
                 : ["OnLeave"] as const;
-        for (const handler of handlers) {
-            const body = extractSCREventHandler(source, handler);
-            if (body?.trim()) this.scr.execute(body, `${levelData.levelName}/${scriptFileName}:${handler}`);
+        const sourcePath = Paths.LEVEL_SCRIPT(levelData.levelName, levelData.gameMode, scriptFileName);
+        if (generation !== this.generation) return;
+        const cacheKey = `${levelData.gameMode}:${levelData.levelName.toLowerCase()}:${scriptFileName}:${request.phase}`;
+        let script = this.scrScripts.get(cacheKey);
+        if (!script) {
+            const source = await decodeScript(sourcePath);
+            if (generation !== this.generation) return;
+            script = parseSCRScript(source, `${levelData.levelName}/${scriptFileName}`, undefined, handlers);
+            this.scrScripts.set(cacheKey, script);
         }
+        for (const handler of handlers) {
+            const program = script.handlers[handler];
+            if (program) this.scr.executeProgram(program);
+        }
+    }
+
+    private unrecoveredHostCall(name: string): never {
+        throw new Error(`${name} is not recovered; native host semantics are unavailable`);
     }
 
     private callHost(name: string, arguments_: readonly SCRValue[]): SCRValue | undefined {
@@ -1092,15 +1121,14 @@ export class GameStateRuntime {
                 return 1;
             }
             case "wd_setcellsgroupflag":
-                return 1;
+                return this.unrecoveredHostCall(name);
             case "rs_setundeadstate":
             case "rs_setinjured":
                 return this.setPersonCondition(name, stringArgument(arguments_, 0, name), numberArgument(arguments_, 1, name) !== 0);
             case "le_casteffect":
             case "le_castmagic":
-                return this.setPersonCondition(name, String(arguments_[0] ?? "world"), String(arguments_[1] ?? "effect"));
             case "le_deleffect":
-                return 1;
+                return this.unrecoveredHostCall(name);
             case "c_finished":
                 this.options.onFinished?.(numberArgument(arguments_, 0, name));
                 return 1;
@@ -1203,7 +1231,12 @@ export class GameStateRuntime {
             baseArmorClass: personAssets?.monster?.armorClass,
         };
         this.combatItems.set(person.name, items);
-        this.combatProfileSources.set(person.name, { parameters, items, base });
+        this.combatProfileSources.set(person.name, {
+            parameters,
+            items,
+            base,
+            bestiaryName: (template?.resourceId ?? person.name).toLowerCase(),
+        });
         const profile = this.createProfile(parameters, items, base, person.name);
         this.combatProfiles.set(person.name, profile);
         this.combatants.set(person.name, createCombatant({
@@ -1319,6 +1352,7 @@ export class GameStateRuntime {
         target.isDead = result.killed;
         const heroKilled = result.killed && targetName.toLowerCase() === "hero";
         if (heroKilled) this.options.onHeroDeath?.();
+        if (result.killed && attackerName.toLowerCase() === "hero") this.recordBestiaryKill(targetName);
         this.options.onCombatAnimation?.(attackerName, "attack");
         if (result.hit) this.options.onCombatAnimation?.(targetName, result.killed ? "die" : "suffer");
         const attackSound = this.findPersonSound(attackerName, result.hit ? ["attack_0.hit", "attack_0"] : ["attack_0.miss", "attack_0"]);
@@ -1337,6 +1371,12 @@ export class GameStateRuntime {
         this.syncCombatParameters(attackerName);
         this.syncCombatParameters(targetName);
         return result;
+    }
+
+    private recordBestiaryKill(targetName: string): void {
+        const bestiaryName = this.combatProfileSources.get(targetName)?.bestiaryName;
+        if (!bestiaryName) return;
+        this.bestiaryKills.set(bestiaryName, Math.min(0xffff, (this.bestiaryKills.get(bestiaryName) ?? 0) + 1));
     }
 
     private performHeroMagic(magicId: number, technicalName: string): MagicCastResult | undefined {
@@ -1399,6 +1439,7 @@ export class GameStateRuntime {
             }
             target.isDead = target.health === 0;
             if (target.isDead && targetName.toLowerCase() === "hero") this.options.onHeroDeath?.();
+            if (target.isDead && targetName.toLowerCase() !== "hero") this.recordBestiaryKill(targetName);
             this.options.onMagicEffect?.(magic.technicalName, targetName);
             if (damage > damageBeforeTarget) this.options.onCombatAnimation?.(targetName, target.isDead ? "die" : "suffer");
             if (target.isDead) this.activeEnemies.delete(targetName);

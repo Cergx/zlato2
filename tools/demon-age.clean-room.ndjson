@@ -1,0 +1,9 @@
+{"event":"age_program","bytes":3710,"encoding":"plain","records":240,"openingRecord":193}
+{"event":"age_function","id":16777220,"name":"D_Say","record":230,"arguments":[2684]}
+{"event":"age_function","id":16777222,"name":"D_Answer","record":234,"arguments":[2686]}
+{"event":"age_function","id":16777222,"name":"D_Answer","record":238,"arguments":[2696]}
+{"event":"dialogue_state","revision":1,"status":"active","phraseId":2684,"options":[{"id":2686,"enabled":true},{"id":2696,"enabled":true}]}
+{"event":"age_function","id":16777220,"name":"D_Say","record":180,"arguments":[2719]}
+{"event":"age_function","id":16777222,"name":"D_Answer","record":187,"arguments":[1529]}
+{"event":"age_function","id":16777222,"name":"D_Answer","record":191,"arguments":[2721]}
+{"event":"dialogue_state","revision":2,"status":"active","phraseId":2719,"options":[{"id":1529,"enabled":true},{"id":2721,"enabled":true}]}

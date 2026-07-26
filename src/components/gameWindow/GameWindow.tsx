@@ -9,7 +9,7 @@ import { WorldMapPanel } from "./WorldMapPanel.tsx";
 import { GameHud } from "./GameHud.tsx";
 import type { WorldMapLocationState } from "../../game/WorldMapRuntime.ts";
 import InventoryPanel from "../InventoryPanel.tsx";
-import { GameMenuPanel, type GameMenuPanelKind } from "./GameMenuPanel.tsx";
+import { RecoveredGameMenuPanel, type GameMenuPanelKind } from "./GameMenuPanel.tsx";
 import { PauseMenu } from "../PauseMenu.tsx";
 import { readGameSettings, type GameSettings } from "../../game/GameSettingsRuntime.ts";
 import { LoadingScreen } from "./LoadingScreen";
@@ -21,6 +21,7 @@ interface GameWindowProps {
     level: string;
     entrance?: string;
     saveSlot?: string;
+    strictScriptAbi?: boolean;
     onMainMenu: () => void;
 
 }
@@ -82,7 +83,7 @@ const WeatherOverlay = ({ getGame }: { getGame: () => Game | null }) => {
     return <canvas className={styles.weather} width={1024} height={768} ref={canvasRef} aria-hidden="true" />;
 };
 
-export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu }: GameWindowProps) => {
+export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu, strictScriptAbi = false }: GameWindowProps) => {
 
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const gameRef = useRef<Game | null>(null);
@@ -99,6 +100,11 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu }: 
     const [settings, setSettings] = useState<GameSettings>(() => readGameSettings());
     const chooseDialogue = useCallback((optionId: number) => {
         gameRef.current?.chooseDialogue(optionId);
+    }, []);
+    const openDialogueTrade = useCallback(() => {
+        void gameRef.current?.tradeWithDialogueSpeaker().catch(
+            (error) => setRuntimeError(error instanceof Error ? error.message : String(error)),
+        );
     }, []);
     const travelWorldMap = useCallback((locationId: string) => gameRef.current?.travelWorldMap(locationId), []);
     const closeWorldMap = useCallback(() => gameRef.current?.closeWorldMap(), []);
@@ -138,7 +144,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu }: 
                 },
                 onContainerOpen: (owner, title) => setTransferPanel({ owner, title, mode: "loot" }),
                 onTradeRequest: (owner, title) => setTransferPanel({ owner, title, mode: "trade" }),
-            });
+            }, { strictScriptAbi });
             const start = async (): Promise<void> => {
                 await gameRef.current?.start(gameMode, level, entrance);
                 if (saveSlot) await gameRef.current?.load(saveSlot);
@@ -150,7 +156,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu }: 
             ? gameRef.current.load(saveSlot)
             : gameRef.current.changeLevel(gameMode, level, entrance);
         void change.catch((error) => setRuntimeError(error instanceof Error ? error.message : String(error)));
-    }, [entrance, gameMode, level, saveSlot, setCursor]);
+    }, [entrance, gameMode, level, saveSlot, setCursor, strictScriptAbi]);
 
     useEffect(() => () => {
         gameRef.current?.stop();
@@ -203,7 +209,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu }: 
                 skillsActive={activePanel === "skills"}
             />
             {(activePanel === "inventory" || activePanel === "skills" || activePanel === "characteristics") && gameRef.current && <InventoryPanel game={gameRef.current} initialView={activePanel} onClose={closePanel} />}
-            {activePanel && activePanel !== "inventory" && activePanel !== "skills" && activePanel !== "characteristics" && activePanel !== "pause" && activePanel !== "relax" && gameRef.current && <GameMenuPanel game={gameRef.current} kind={activePanel} onClose={closePanel} />}
+            {activePanel && activePanel !== "inventory" && activePanel !== "skills" && activePanel !== "characteristics" && activePanel !== "pause" && activePanel !== "relax" && gameRef.current && <RecoveredGameMenuPanel game={gameRef.current} kind={activePanel} onClose={closePanel} />}
             {activePanel === "pause" && (
                 <PauseMenu getGame={getGame} onClose={closePanel} onMainMenu={onMainMenu} onApplySettings={setSettings} />
             )}
@@ -217,6 +223,8 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu }: 
                     className={styles.dialogue}
                     state={dialogueState}
                     onChoose={chooseDialogue}
+                    canTrade={gameRef.current?.canTradeWithDialogueSpeaker() ?? false}
+                    onTrade={openDialogueTrade}
                 />
             )}
             {worldMapLocations && (
