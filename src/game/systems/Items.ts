@@ -108,6 +108,7 @@ export interface ParsedItemAsset {
     readonly iconPath: string;
     /** Native signed 32-bit fields after the common item header. */
     readonly nativeProperties: readonly number[];
+    readonly weaponTemplate?: string;
 }
 
 export interface ItemDefinitionOverrides {
@@ -241,17 +242,30 @@ export function parseItemAsset(data: ArrayBuffer | Uint8Array): ParsedItemAsset 
     offset = icon.nextOffset;
 
     const nativeProperties: number[] = [];
-    if ((bytes.byteLength - offset) % 4 !== 0 && typeCode === 28) {
-        const weaponPrefixWords = 11;
-        if (bytes.byteLength - offset < weaponPrefixWords * 4 + 4) {
-            throw new Error(`Malformed item asset ${numericId}: truncated weapon property block`);
+    let weaponTemplate: string | undefined;
+    const weaponPrefixWords = 11;
+    const templateOffset = offset + weaponPrefixWords * 4;
+    if (templateOffset + 4 <= bytes.byteLength) {
+        const templateLength = view.getUint32(templateOffset, true);
+        const templateEnd = templateOffset + 4 + templateLength;
+        const templateBytes = templateEnd <= bytes.byteLength
+            ? bytes.subarray(templateOffset + 4, templateEnd)
+            : undefined;
+        const templateCandidate = templateBytes
+            && templateBytes.length > 0
+            && [...templateBytes].every((byte) => byte >= 0x20 && byte < 0x7f)
+            && (bytes.byteLength - templateEnd) % 4 === 0
+            ? new TextDecoder("ascii").decode(templateBytes)
+            : undefined;
+        if (templateCandidate?.startsWith("WPN_")) {
+            for (let index = 0; index < weaponPrefixWords; index++) {
+                nativeProperties.push(view.getInt32(offset, true));
+                offset += 4;
+            }
+            const parsedTemplate = readLengthPrefixedString(view, bytes, offset, `item asset ${numericId} weapon template`);
+            weaponTemplate = parsedTemplate.value;
+            offset = parsedTemplate.nextOffset;
         }
-        for (let index = 0; index < weaponPrefixWords; index++) {
-            nativeProperties.push(view.getInt32(offset, true));
-            offset += 4;
-        }
-        const weaponTemplate = readLengthPrefixedString(view, bytes, offset, `item asset ${numericId} weapon template`);
-        offset = weaponTemplate.nextOffset;
     }
 
     const remaining = bytes.byteLength - offset;
@@ -274,6 +288,7 @@ export function parseItemAsset(data: ArrayBuffer | Uint8Array): ParsedItemAsset 
         worldImagePath: worldImage.value,
         iconPath: icon.value,
         nativeProperties,
+        weaponTemplate,
     };
 }
 

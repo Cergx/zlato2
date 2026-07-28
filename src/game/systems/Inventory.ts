@@ -2,9 +2,13 @@ import {
     createItemInstance,
     itemInstancesCanStack,
     type EquipmentSlot,
-    type ItemCatalog,
+    type ItemDefinition,
     type ItemInstance,
 } from "./Items.ts";
+
+export interface InventoryCatalog {
+    get(id: string): ItemDefinition;
+}
 
 export interface InventoryOptions {
     /** Maximum number of occupied bag stacks. Equipped items do not consume bag capacity. */
@@ -21,7 +25,7 @@ export interface InventorySnapshot {
     readonly capacity: number;
     readonly revision: number;
     readonly stacks: readonly InventoryStack[];
-    readonly equipped: Readonly<Partial<Record<EquipmentSlot, ItemInstance>>>;
+    readonly equipped: Readonly<Partial<Record<EquipmentSlot, InventoryStack>>>;
 }
 
 type InventoryOperation =
@@ -34,7 +38,7 @@ type InventoryOperation =
         readonly item: ItemInstance;
         readonly quantity: number;
     }
-    | { readonly kind: "equip"; readonly inventory: Inventory; readonly item: ItemInstance; readonly slot: EquipmentSlot }
+    | { readonly kind: "equip"; readonly inventory: Inventory; readonly item: ItemInstance; readonly quantity: number; readonly slot: EquipmentSlot }
     | { readonly kind: "unequip"; readonly inventory: Inventory; readonly slot: EquipmentSlot };
 
 interface MutableStack {
@@ -44,7 +48,7 @@ interface MutableStack {
 
 interface InventoryDraft {
     stacks: MutableStack[];
-    equipped: Partial<Record<EquipmentSlot, ItemInstance>>;
+    equipped: Partial<Record<EquipmentSlot, MutableStack>>;
 }
 
 const ALL_EQUIPMENT_SLOTS: Readonly<Record<EquipmentSlot, true>> = {
@@ -76,12 +80,12 @@ const DEFAULT_EQUIPMENT_SLOTS: readonly EquipmentSlot[] = [
 export class Inventory {
     private readonly capacity: number;
     private readonly equipmentSlots: readonly EquipmentSlot[];
-    private readonly catalog: ItemCatalog;
+    private readonly catalog: InventoryCatalog;
     private stacks: MutableStack[] = [];
-    private equipped: Partial<Record<EquipmentSlot, ItemInstance>> = {};
+    private equipped: Partial<Record<EquipmentSlot, MutableStack>> = {};
     private revision = 0;
 
-    constructor(catalog: ItemCatalog, options: InventoryOptions) {
+    constructor(catalog: InventoryCatalog, options: InventoryOptions) {
         if (!Number.isSafeInteger(options.capacity) || options.capacity < 0) {
             throw new Error("Inventory capacity must be a non-negative safe integer");
         }
@@ -111,10 +115,10 @@ export class Inventory {
     }
 
     snapshot(): InventorySnapshot {
-        const equipped: Partial<Record<EquipmentSlot, ItemInstance>> = {};
+        const equipped: Partial<Record<EquipmentSlot, InventoryStack>> = {};
         for (const slot of this.equipmentSlots) {
-            const item = this.equipped[slot];
-            if (item) equipped[slot] = item;
+            const stack = this.equipped[slot];
+            if (stack) equipped[slot] = { item: stack.item, quantity: stack.quantity };
         }
         return {
             capacity: this.capacity,
@@ -122,6 +126,33 @@ export class Inventory {
             stacks: this.stacks.map(({ item, quantity }) => ({ item, quantity })),
             equipped,
         };
+    }
+
+    restore(
+        stacks: readonly InventoryStack[],
+        equipped: Readonly<Partial<Record<EquipmentSlot, InventoryStack>>> = {},
+    ): void {
+        if (stacks.length > this.capacity) throw new Error(`Inventory capacity ${this.capacity} cannot hold ${stacks.length} stacks`);
+        const restoredStacks = stacks.map(({ item, quantity }) => {
+            validateItemInstance(item);
+            assertPositiveQuantity(quantity);
+            return { item: createItemInstance(item.definitionId, item), quantity };
+        });
+        const restoredEquipped: Partial<Record<EquipmentSlot, MutableStack>> = {};
+        for (const [rawSlot, stack] of Object.entries(equipped)) {
+            const slot = rawSlot as EquipmentSlot;
+            this.assertKnownSlot(slot);
+            if (!stack) continue;
+            validateItemInstance(stack.item);
+            assertPositiveQuantity(stack.quantity);
+            restoredEquipped[slot] = {
+                item: createItemInstance(stack.item.definitionId, stack.item),
+                quantity: stack.quantity,
+            };
+        }
+        this.stacks = restoredStacks;
+        this.equipped = restoredEquipped;
+        this.revision += 1;
     }
 
     countItem(definitionId: string): number {
@@ -132,9 +163,10 @@ export class Inventory {
         return count;
     }
 
-    getEquipped(slot: EquipmentSlot): ItemInstance | undefined {
+    getEquipped(slot: EquipmentSlot): InventoryStack | undefined {
         this.assertKnownSlot(slot);
-        return this.equipped[slot];
+        const stack = this.equipped[slot];
+        return stack ? { item: stack.item, quantity: stack.quantity } : undefined;
     }
 
     add(item: ItemInstance, quantity = 1): void {
@@ -149,12 +181,46 @@ export class Inventory {
         new InventoryTransaction().transfer(this, target, item, quantity).commit();
     }
 
-    equip(item: ItemInstance, slot: EquipmentSlot): void {
-        new InventoryTransaction().equip(this, item, slot).commit();
+    equip(item: ItemInstance, slot: EquipmentSlot, quantity = 1): void {
+        new InventoryTransaction().equip(this, item, slot, quantity).commit();
     }
 
     unequip(slot: EquipmentSlot): void {
         new InventoryTransaction().unequip(this, slot).commit();
+    }
+
+    consumeEquipped(slot: EquipmentSlot, quantity = 1): void {
+        this.assertKnownSlot(slot);
+        assertPositiveQuantity(quantity);
+        const stack = this.equipped[slot];
+        if (!stack || stack.quantity < quantity) {
+            throw new Error(`Equipment slot ${slot} does not contain ${quantity} items`);
+        }
+        stack.quantity -= quantity;
+        if (stack.quantity === 0) delete this.equipped[slot];
+        this.revision += 1;
+    }
+
+    damageEquipped(slot: EquipmentSlot, amount = 1): number | undefined {
+        this.assertKnownSlot(slot);
+        assertPositiveQuantity(amount);
+        const stack = this.equipped[slot];
+        if (!stack) return undefined;
+        const durability = (stack.item.durability ?? 100) - amount;
+        if (durability > 0) {
+            stack.item = createItemInstance(stack.item.definitionId, { ...stack.item, durability });
+            this.revision += 1;
+            return durability;
+        }
+        if (stack.quantity > 1) {
+            stack.quantity -= 1;
+            stack.item = createItemInstance(stack.item.definitionId, { ...stack.item, durability: 100 });
+            this.revision += 1;
+            return 100;
+        }
+        delete this.equipped[slot];
+        this.revision += 1;
+        return 0;
     }
 
     private assertKnownSlot(slot: EquipmentSlot): void {
@@ -189,7 +255,7 @@ export class Inventory {
                     Inventory.addToDraft(operation.target, draftFor(operation.target), operation.item, operation.quantity);
                     break;
                 case "equip":
-                    Inventory.equipInDraft(operation.inventory, draftFor(operation.inventory), operation.item, operation.slot);
+                    Inventory.equipInDraft(operation.inventory, draftFor(operation.inventory), operation.item, operation.slot, operation.quantity);
                     break;
                 case "unequip":
                     Inventory.unequipInDraft(operation.inventory, draftFor(operation.inventory), operation.slot);
@@ -246,25 +312,33 @@ export class Inventory {
         }
     }
 
-    private static equipInDraft(inventory: Inventory, draft: InventoryDraft, item: ItemInstance, slot: EquipmentSlot): void {
+    private static equipInDraft(
+        inventory: Inventory,
+        draft: InventoryDraft,
+        item: ItemInstance,
+        slot: EquipmentSlot,
+        quantity: number,
+    ): void {
         inventory.assertKnownSlot(slot);
+        assertPositiveQuantity(quantity);
         const definition = inventory.catalog.get(item.definitionId);
         if (!definition.equipSlots?.includes(slot)) {
             throw new Error(`Item ${item.definitionId} cannot be equipped in ${slot}`);
         }
-        const equippedItem = draft.equipped[slot];
-        if (equippedItem && equippedItem.id === item.id && itemInstancesCanStack(equippedItem, item)) return;
+        const equippedStack = draft.equipped[slot];
+        if (equippedStack && equippedStack.item.id === item.id
+            && itemInstancesCanStack(equippedStack.item, item) && equippedStack.quantity === quantity) return;
 
-        Inventory.removeFromDraft(inventory, draft, item, 1);
-        if (equippedItem) Inventory.addToDraft(inventory, draft, equippedItem, 1);
-        draft.equipped[slot] = createItemInstance(item.definitionId, item);
+        Inventory.removeFromDraft(inventory, draft, item, quantity);
+        if (equippedStack) Inventory.addToDraft(inventory, draft, equippedStack.item, equippedStack.quantity);
+        draft.equipped[slot] = { item: createItemInstance(item.definitionId, item), quantity };
     }
 
     private static unequipInDraft(inventory: Inventory, draft: InventoryDraft, slot: EquipmentSlot): void {
         inventory.assertKnownSlot(slot);
-        const item = draft.equipped[slot];
-        if (!item) throw new Error(`No item is equipped in ${slot}`);
-        Inventory.addToDraft(inventory, draft, item, 1);
+        const stack = draft.equipped[slot];
+        if (!stack) throw new Error(`No item is equipped in ${slot}`);
+        Inventory.addToDraft(inventory, draft, stack.item, stack.quantity);
         delete draft.equipped[slot];
     }
 }
@@ -294,9 +368,10 @@ export class InventoryTransaction {
         return this;
     }
 
-    equip(inventory: Inventory, item: ItemInstance, slot: EquipmentSlot): this {
+    equip(inventory: Inventory, item: ItemInstance, slot: EquipmentSlot, quantity = 1): this {
         this.assertOpen();
-        this.operations.push({ kind: "equip", inventory, item, slot });
+        assertPositiveQuantity(quantity);
+        this.operations.push({ kind: "equip", inventory, item, quantity, slot });
         return this;
     }
 

@@ -1,0 +1,31 @@
+.panel {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 22;
+    width: 923px;
+    height: 453px;
+    overflow: hidden;
+    pointer-events: auto;
+}
+
+.background {
+    position: absolute;
+    inset: 0;
+    width: 923px;
+    height: 453px;
+    pointer-events: none;
+}
+
+.tabArtwork {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 299px;
+    height: 32px;
+    pointer-events: none;
+}
+
+.authoredControls {
+    z-index: 1;
+}

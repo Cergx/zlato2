@@ -1,3 +1,6 @@
+/** GoldenLand.ini `cl_username`, CP1251 file offset 0x4a in the original installation. */
+export const DEFAULT_HERO_NAME = "Вертас";
+
 export interface HeroProfile {
     readonly name: string;
     readonly parameters: Readonly<Record<string, number>>;

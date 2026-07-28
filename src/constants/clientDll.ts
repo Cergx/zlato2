@@ -29,6 +29,202 @@ export const INVENTORY_FONT_NAMES = Object.freeze({
  * browser line-height as if it were native.
  */
 
+export interface ClientHeroParameterDefinition {
+    readonly parameter: string;
+    readonly interfaceStringId: number;
+}
+
+export interface HeroGeneratorParameterDraw extends ClientHeroParameterDefinition {
+    readonly label: InventoryTextDraw;
+    readonly valueRect: NativeRect;
+}
+
+/**
+ * Client.dll character-generator renderer 0x1209DE78 and button handler
+ * 0x1209DBB0. The skill parameter order is the 27-entry dispatch table at
+ * 0x1212E0A0; every text and numeric rectangle below is passed to
+ * 0x12030A04/0x12030A88 by the renderer.
+ */
+const HERO_GENERATOR_LIMITS = Object.freeze({
+    primaryMinimum: 5,
+    primaryMaximum: 30,
+    skillMinimum: 0,
+    skillMaximum: 15,
+});
+
+const HERO_GENERATOR_CHARACTERISTICS: readonly HeroGeneratorParameterDraw[] = Object.freeze([
+    { parameter: "strength", interfaceStringId: 6, label: { stringId: 6, x: 30, y: 61, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 197, top: 60, width: 30, height: 18 } },
+    { parameter: "constitution", interfaceStringId: 7, label: { stringId: 7, x: 30, y: 87, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 197, top: 87, width: 30, height: 18 } },
+    { parameter: "dexterity", interfaceStringId: 8, label: { stringId: 8, x: 30, y: 114, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 197, top: 115, width: 30, height: 18 } },
+    { parameter: "perception", interfaceStringId: 9, label: { stringId: 9, x: 30, y: 142, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 197, top: 143, width: 30, height: 18 } },
+    { parameter: "wisdom", interfaceStringId: 10, label: { stringId: 10, x: 30, y: 169, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 197, top: 171, width: 30, height: 18 } },
+    { parameter: "intelligence", interfaceStringId: 11, label: { stringId: 11, x: 30, y: 197, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 197, top: 198, width: 30, height: 18 } },
+    { parameter: "luck", interfaceStringId: 12, label: { stringId: 12, x: 30, y: 224, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 197, top: 225, width: 30, height: 18 } },
+]);
+
+const HERO_GENERATOR_SKILLS: readonly HeroGeneratorParameterDraw[] = Object.freeze([
+    { parameter: "skill_wpn_sword", interfaceStringId: 49, label: { stringId: 49, x: 295, y: 124, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 460, top: 123, width: 31, height: 18 } },
+    { parameter: "skill_wpn_axe", interfaceStringId: 50, label: { stringId: 50, x: 295, y: 156, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 460, top: 156, width: 31, height: 18 } },
+    { parameter: "skill_wpn_crush", interfaceStringId: 51, label: { stringId: 51, x: 295, y: 188, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 460, top: 188, width: 31, height: 18 } },
+    { parameter: "skill_wpn_staff", interfaceStringId: 52, label: { stringId: 52, x: 544, y: 124, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 706, top: 123, width: 31, height: 18 } },
+    { parameter: "skill_wpn_dist", interfaceStringId: 53, label: { stringId: 53, x: 544, y: 156, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 706, top: 156, width: 31, height: 18 } },
+    { parameter: "skill_wpn_spear", interfaceStringId: 54, label: { stringId: 54, x: 544, y: 188, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 706, top: 188, width: 31, height: 18 } },
+    { parameter: "skill_wpn_throw", interfaceStringId: 55, label: { stringId: 55, x: 790, y: 124, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 952, top: 123, width: 31, height: 18 } },
+    { parameter: "skill_wpn_hand", interfaceStringId: 56, label: { stringId: 56, x: 790, y: 156, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 952, top: 156, width: 31, height: 18 } },
+    { parameter: "skill_critical_hit", interfaceStringId: 57, label: { stringId: 57, x: 790, y: 188, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 952, top: 188, width: 31, height: 18 } },
+    { parameter: "skill_shadmag", interfaceStringId: 58, label: { stringId: 58, x: 295, y: 309, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 460, top: 310, width: 31, height: 18 } },
+    { parameter: "skill_natrmag", interfaceStringId: 59, label: { stringId: 59, x: 295, y: 342, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 460, top: 342, width: 31, height: 18 } },
+    { parameter: "skill_godsmag", interfaceStringId: 60, label: { stringId: 60, x: 295, y: 375, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 460, top: 374, width: 31, height: 18 } },
+    { parameter: "skill_elemmag", interfaceStringId: 61, label: { stringId: 61, x: 544, y: 309, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 706, top: 310, width: 31, height: 18 } },
+    { parameter: "skill_lghtmag", interfaceStringId: 62, label: { stringId: 62, x: 544, y: 342, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 706, top: 342, width: 31, height: 18 } },
+    { parameter: "skill_darkmag", interfaceStringId: 63, label: { stringId: 63, x: 544, y: 375, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 706, top: 374, width: 31, height: 18 } },
+    { parameter: "skill_magicuse", interfaceStringId: 64, label: { stringId: 64, x: 790, y: 309, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 952, top: 310, width: 31, height: 18 } },
+    { parameter: "skill_alchemy", interfaceStringId: 65, label: { stringId: 65, x: 790, y: 342, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 952, top: 342, width: 31, height: 18 } },
+    { parameter: "skill_identify", interfaceStringId: 66, label: { stringId: 66, x: 790, y: 375, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 952, top: 374, width: 31, height: 18 } },
+    { parameter: "skill_tactic", interfaceStringId: 67, label: { stringId: 67, x: 295, y: 494, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 460, top: 494, width: 31, height: 18 } },
+    { parameter: "skill_scout", interfaceStringId: 68, label: { stringId: 68, x: 295, y: 526, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 460, top: 527, width: 31, height: 18 } },
+    { parameter: "skill_healing", interfaceStringId: 69, label: { stringId: 69, x: 295, y: 558, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 460, top: 559, width: 31, height: 18 } },
+    { parameter: "skill_speech", interfaceStringId: 70, label: { stringId: 70, x: 544, y: 494, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 706, top: 494, width: 31, height: 18 } },
+    { parameter: "skill_trade", interfaceStringId: 71, label: { stringId: 71, x: 544, y: 526, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 706, top: 527, width: 31, height: 18 } },
+    { parameter: "skill_hack", interfaceStringId: 72, label: { stringId: 72, x: 544, y: 558, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 706, top: 559, width: 31, height: 18 } },
+    { parameter: "skill_science", interfaceStringId: 73, label: { stringId: 73, x: 790, y: 494, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 952, top: 494, width: 31, height: 18 } },
+    { parameter: "skill_smith", interfaceStringId: 74, label: { stringId: 74, x: 790, y: 526, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 952, top: 527, width: 31, height: 18 } },
+    { parameter: "skill_athletic", interfaceStringId: 75, label: { stringId: 75, x: 790, y: 558, boxWidth: -1, boxHeight: -1 }, valueRect: { left: 952, top: 559, width: 31, height: 18 } },
+]);
+
+export interface HeroGeneratorPresetCaption {
+    readonly objectId: number;
+    readonly stringId: number;
+    readonly rect: NativeRect;
+}
+
+/**
+ * Preset caption strings are user_interface.sdb IDs 213..216. Their boxes are
+ * the exact GUI_CHECK_BUTTON rectangles authored as objects 1..4 in
+ * scripts/ui/hero_generator.scr; centering therefore uses the button bounds,
+ * not inferred text offsets.
+ */
+const HERO_GENERATOR_PRESET_CAPTIONS = Object.freeze([
+    { objectId: 1, stringId: 213, rect: { left: 33, top: 696, width: 162, height: 53 } },
+    { objectId: 2, stringId: 214, rect: { left: 219, top: 696, width: 162, height: 53 } },
+    { objectId: 3, stringId: 215, rect: { left: 405, top: 696, width: 162, height: 53 } },
+    { objectId: 4, stringId: 216, rect: { left: 592, top: 696, width: 162, height: 53 } },
+] satisfies readonly HeroGeneratorPresetCaption[]);
+
+/**
+ * Client.dll:0x1209E095 selects `heads_interface`; the draw at
+ * 0x1209E0A5..0x1209E0C9 renders user_interface.sdb ID 2 at (474, 6).
+ */
+const HERO_GENERATOR_TOP_TITLE_DRAW: InventoryTextDraw = Object.freeze({
+    stringId: 2, x: 474, y: 6, boxWidth: -1, boxHeight: -1,
+});
+
+const HERO_GENERATOR_SECTION_TITLE_DRAWS = Object.freeze([
+    { stringId: 83, x: 535, y: 78, boxWidth: 230, boxHeight: -1 },
+    { stringId: 84, x: 535, y: 264, boxWidth: 230, boxHeight: -1 },
+    { stringId: 85, x: 535, y: 449, boxWidth: 230, boxHeight: -1 },
+] satisfies readonly InventoryTextDraw[]);
+
+const HERO_GENERATOR_PRIMARY_POINTS_LABEL_DRAW: InventoryTextDraw = Object.freeze({
+    stringId: 13, x: 30, y: 261, boxWidth: -1, boxHeight: -1,
+});
+const HERO_GENERATOR_SKILL_POINTS_LABEL_DRAW: InventoryTextDraw = Object.freeze({
+    stringId: 76, x: 526, y: 626, boxWidth: -1, boxHeight: -1,
+});
+const HERO_GENERATOR_PRIMARY_POINTS_VALUE_RECT: NativeRect = Object.freeze({
+    left: 216, top: 261, width: 38, height: 18,
+});
+const HERO_GENERATOR_SKILL_POINTS_VALUE_RECT: NativeRect = Object.freeze({
+    left: 739, top: 623, width: 45, height: 23,
+});
+
+export const HERO_GENERATOR_NATIVE_LAYOUT = Object.freeze({
+    limits: HERO_GENERATOR_LIMITS,
+    characteristics: HERO_GENERATOR_CHARACTERISTICS,
+    skills: HERO_GENERATOR_SKILLS,
+    topTitle: HERO_GENERATOR_TOP_TITLE_DRAW,
+    sectionTitles: HERO_GENERATOR_SECTION_TITLE_DRAWS,
+    presetCaptions: HERO_GENERATOR_PRESET_CAPTIONS,
+    primaryPoints: Object.freeze({
+        label: HERO_GENERATOR_PRIMARY_POINTS_LABEL_DRAW,
+        valueRect: HERO_GENERATOR_PRIMARY_POINTS_VALUE_RECT,
+    }),
+    skillPoints: Object.freeze({
+        label: HERO_GENERATOR_SKILL_POINTS_LABEL_DRAW,
+        valueRect: HERO_GENERATOR_SKILL_POINTS_VALUE_RECT,
+    }),
+});
+
+export type ProfessionSkillId = "theft" | "smith" | "repair" | "alchemy" | "recharge_staff";
+
+export interface ProfessionSkillDefinition {
+    readonly id: ProfessionSkillId;
+    readonly parameter: "skill_hack" | "skill_smith" | "skill_alchemy";
+    readonly minimumExclusive: number;
+    readonly interfaceStringId: number;
+}
+
+/**
+ * Client.dll FUN_1204C4A8 compact HUD profession-skill list. Calls to
+ * FUN_1204F09C use indices 0..4; table 0x120F82D8 maps them to
+ * user_interface.sdb IDs 82, 77, 78, 79, and 80. Native parameter IDs are
+ * 0x12, 0x16, and 0x19.
+ */
+export const PROFESSION_SKILLS: readonly ProfessionSkillDefinition[] = Object.freeze([
+    { id: "theft", parameter: "skill_hack", minimumExclusive: 0, interfaceStringId: 82 },
+    { id: "smith", parameter: "skill_smith", minimumExclusive: 0, interfaceStringId: 77 },
+    { id: "repair", parameter: "skill_smith", minimumExclusive: 4, interfaceStringId: 78 },
+    { id: "alchemy", parameter: "skill_alchemy", minimumExclusive: 0, interfaceStringId: 79 },
+    { id: "recharge_staff", parameter: "skill_alchemy", minimumExclusive: 4, interfaceStringId: 80 },
+]);
+
+export type ProfessionCraftMode = 0 | 1 | 2 | 3;
+
+/**
+ * Client.dll compact-profession handler 0x12054A20 maps HUD actions to the
+ * profession window's independent mode field +0x68: smith -> 1, repair -> 3,
+ * alchemy -> 0, recharge staff -> 2. Theft (HUD index 0) does not open this
+ * window. The mode indexes four independent selected-level fields at
+ * +0x58..+0x64.
+ */
+export const PROFESSION_CRAFT_MODES: Readonly<Partial<Record<ProfessionSkillId, ProfessionCraftMode>>> = Object.freeze({
+    smith: 1,
+    repair: 3,
+    alchemy: 0,
+    recharge_staff: 2,
+});
+
+export interface ProfessionLevelTabDefinition {
+    readonly level: 1 | 2 | 3 | 4 | 5;
+    readonly objectId: 5 | 6 | 7 | 8 | 9;
+    readonly artwork?: string;
+}
+
+/**
+ * skills_gui.scr objects 5..9 are levels I..V of the currently opened
+ * profession. Client.dll event handler 0x12097446..0x120974EC stores
+ * objectId - 5 in +0x58 + mode*4, then 0x1208FC8C filters recipes by the
+ * corresponding one-based level. All five authored buttons remain enabled.
+ */
+export const PROFESSION_LEVEL_TABS = Object.freeze([
+    { level: 1, objectId: 5 },
+    { level: 2, objectId: 6, artwork: "/assets/engineres/skills/tab2.bmp" },
+    { level: 3, objectId: 7, artwork: "/assets/engineres/skills/tab3.bmp" },
+    { level: 4, objectId: 8, artwork: "/assets/engineres/skills/tab4.bmp" },
+    { level: 5, objectId: 9, artwork: "/assets/engineres/skills/tab5.bmp" },
+] satisfies readonly ProfessionLevelTabDefinition[]);
+
+/**
+ * Recipe-page loops in Client.dll 0x1208FCFD..0x1208FE3C. Mode 0 (alchemy)
+ * scans 48 records and compares record +0x04 with the selected one-based
+ * level; mode 1 (smith) scans 288 records with the same comparison. Learned
+ * recipes are gated by bitsets at global player-state offsets +0x6B0/+0x6B6.
+ */
+export const PROFESSION_RECIPE_TABLES = Object.freeze({
+    alchemy: { mode: 0, recordCount: 48, recordStride: 0x14, levelOffset: 0x04, learnedBitsetOffset: 0x6b0 },
+    smith: { mode: 1, recordCount: 288, recordStride: 0x14, levelOffset: 0x04, learnedBitsetOffset: 0x6b6 },
+});
+
 export interface DiaryTabTextDraw {
     readonly objectId: number;
     readonly stringId: number;
@@ -332,24 +528,50 @@ export const INVENTORY_WEAPON_OVERLAY_POSITION = Object.freeze({ left: 9, top: 4
  */
 export const HUD_RESOURCE_NAMES = Object.freeze([
     "engineres\\gpanel\\std",
-    "engineres\\gpanel\\but1",
-    "engineres\\gpanel\\but2",
-    "engineres\\gpanel\\but3",
-    "engineres\\gpanel\\but4",
-    "engineres\\gpanel\\newbut1",
-    "engineres\\gpanel\\newbut2",
-    "engineres\\gpanel\\damage\\noarmor",
-    "engineres\\gpanel\\damage\\noveapon",
+    "engineres\\gpanel\\dialog_panel",
+    "engineres\\gpanel\\skill_panel",
+    "engineres\\gpanel\\big_sel",
+    "engineres\\gpanel\\small_sel",
+    "engineres\\gpanel\\podlozhka",
+    "engineres\\gpanel\\status_bar_new",
+    "engineres\\gpanel\\exchange",
+    "engineres\\gpanel\\damage\\cannot",
     "engineres\\gpanel\\damage\\hacking",
     "engineres\\gpanel\\damage\\crushing",
     "engineres\\gpanel\\damage\\pricking",
-    "engineres\\gpanel\\damage\\throwing",
-    "engineres\\gpanel\\damage\\fire",
-    "engineres\\gpanel\\damage\\cold",
-    "engineres\\gpanel\\damage\\poison",
+    "engineres\\gpanel\\damage\\distance",
+    "engineres\\gpanel\\damage\\magic",
+    "engineres\\gpanel\\damage\\noweapon",
+    "engineres\\gpanel\\damage\\noweapon_alpha",
     "engineres\\gpanel\\zaglushka3",
     "engineres\\gpanel\\zaglushka4",
 ]);
+
+/**
+ * Client.dll attack-mode resolver 0x12057638 maps item-header capability bits
+ * to the four physical HUD modes. The selected resource is loaded from
+ * HUD field `+0x1c8 + mode * 4` at 0x12055042 and drawn into SCR object 17.
+ */
+export type HudDamageMode = 0 | 1 | 2 | 3;
+export const HUD_DAMAGE_MODE_FLAGS: Readonly<Record<HudDamageMode, number>> = Object.freeze({
+    0: 0x100,
+    1: 0x40,
+    2: 0x80,
+    3: 0x20,
+});
+export const HUD_DAMAGE_RESOURCE_BY_MODE: Readonly<Record<HudDamageMode, string>> = Object.freeze({
+    0: "hacking",
+    1: "crushing",
+    2: "pricking",
+    3: "distance",
+});
+export const HUD_DAMAGE_MODE_SEQUENCE = Object.freeze([0, 1, 2, 3] satisfies readonly HudDamageMode[]);
+
+/** Client.dll 0x12055026..0x12055049 and gpanel_new.scr object 17. */
+export const HUD_DAMAGE_SLOT_POSITION = Object.freeze({ left: 89, top: 674, width: 55, height: 55 });
+
+/** Client.dll 0x12055052..0x1205506e draws noweapon with noweapon_alpha here. */
+export const HUD_NO_WEAPON_POSITION = Object.freeze({ left: 19, top: 674, width: 55, height: 55 });
 
 /**
  * Exact five-entry animation-resource table 0x120f829c..0x120f82ac.
@@ -391,14 +613,93 @@ export const HUD_NATIVE_ANIMATION_FRAME_HEIGHTS = Object.freeze({
 });
 
 /**
- * Native animation origins passed to `0x12021880`: health at
+ * Full-frame destinations passed to animation renderer `0x12021880`: health at
  * `0x12056181..0x1205619c`, energy at `0x1205620c..0x12056226`.
- * `gpanel_new.scr` gauge rectangles clip these larger 141px frames.
+ * The shipped atlases are 46x6063 and 47x6063: 43 full-height 141px frames.
+ * SCR objects 34 and 36 are separate authored GUI rectangles and do not crop
+ * the animation renderer's destination.
  */
 export const HUD_GAUGE_ANIMATION_ORIGINS = Object.freeze({
     health: Object.freeze({ left: 158, top: 611 }),
     energy: Object.freeze({ left: 819, top: 611 }),
 });
+
+/**
+ * Client.dll wheel renderer 0x12054b68..0x12054c33 draws the 42x36 frame at
+ * (490, 732). It divides the 1440-minute day into the atlas frame count and
+ * rotates the sequence so frame zero represents 14:00.
+ */
+export const HUD_WHEEL_ANIMATION_ORIGIN = Object.freeze({ left: 490, top: 732 });
+export const HUD_WHEEL_DAY_MINUTES = 24 * 60;
+export const HUD_WHEEL_START_HOUR = 14;
+
+/**
+ * `but_spr` is HUD animation field +0x1f8. Client.dll attaches the separate
+ * grayscale `but_alfa` atlas at 0x1204e1bb..0x1204e1d4. Renderer
+ * 0x12054c38..0x12054f64 draws both at the wheel origin; the 14 40x36 frames
+ * transition between non-combat frame 0 and combat frame 13 at the native
+ * animation initializer's 100 ms interval.
+ */
+export const HUD_COMBAT_BUTTON_ALPHA_RESOURCE_NAME = "engineres\\gpanel\\anim\\but_alfa";
+export const HUD_COMBAT_BUTTON_ANIMATION_ORIGIN = Object.freeze({ left: 490, top: 732 });
+export const HUD_COMBAT_BUTTON_FRAME_INTERVAL_MS = 100;
+
+/**
+ * `bar_ap` is HUD animation field +0x1fc. Renderer 0x1204c398..0x1204c458
+ * clamps the action-point frame to 60 and draws at (201,718). The shipped
+ * 620x976 CSX contains 61 620x16 frames. Its combat visibility factor moves
+ * toward zero or one by 0.04 per native draw.
+ */
+export const HUD_ACTION_POINTS_ANIMATION_ORIGIN = Object.freeze({ left: 201, top: 718 });
+export const HUD_ACTION_POINTS_MAXIMUM_FRAME = 60;
+export const HUD_ACTION_POINTS_OPACITY_STEP = 0.04;
+
+export type HudInterfaceIconAction = "inventory" | "journal" | "none";
+
+export interface HudInterfaceIconDefinition {
+    readonly index: number;
+    readonly resource: string;
+    readonly hintStringId?: number;
+    readonly action: HudInterfaceIconAction;
+    readonly heroStateId?: number;
+}
+
+/**
+ * Client.dll icon manager `0x1209bef0` initializes eleven CSX sprites from
+ * pointer table `0x1212dc10`. Initializer `0x1209bf59..0x1209bf7b` passes a
+ * 30-pixel frame height and a 70 ms interval to `0x12021750`; the retained
+ * 40x270 atlases therefore contain nine 40x30 frames (quick_save is 40x540,
+ * eighteen frames). Renderer `0x1209bddb..0x1209be07` draws the first active
+ * icon at `(4,598)` while the HUD is visible and advances upward by 34 pixels.
+ */
+export const HUD_INTERFACE_ICON_FRAME_WIDTH = 40;
+export const HUD_INTERFACE_ICON_FRAME_HEIGHT = 30;
+export const HUD_INTERFACE_ICON_FRAME_INTERVAL_MS = 70;
+export const HUD_INTERFACE_ICON_SLOT_STEP = 34;
+export const HUD_INTERFACE_ICON_LEFT = 4;
+export const HUD_INTERFACE_ICON_FIRST_TOP = 598;
+
+/**
+ * Hint IDs come from the native `(icon index, payload)` table at
+ * `0x120f8d60`: 0x83..0x87 and 0x9a..0x9e resolve directly through hints.sdb.
+ * Status synchronization at `0x1209be25..0x1209beb9` maps hero states
+ * 4→blind, 6→cold, 10→poison, and 24→overload. Entries 9 and 10 intentionally
+ * share the shipped cold sprite; hints.sdb identifies entry 10 as acceleration,
+ * matching native hero state 11 from the recovered state table.
+ */
+export const HUD_INTERFACE_ICONS = Object.freeze([
+    { index: 0, resource: "level_up", hintStringId: 0x83, action: "inventory" },
+    { index: 1, resource: "low_ammo", hintStringId: 0x84, action: "inventory" },
+    { index: 2, resource: "new_quest", hintStringId: 0x85, action: "journal" },
+    { index: 3, resource: "item_break", hintStringId: 0x86, action: "inventory" },
+    { index: 4, resource: "need_params", hintStringId: 0x87, action: "inventory" },
+    { index: 5, resource: "quick_save", action: "none" },
+    { index: 6, resource: "poison", hintStringId: 0x9a, action: "inventory", heroStateId: 10 },
+    { index: 7, resource: "blind", hintStringId: 0x9b, action: "inventory", heroStateId: 4 },
+    { index: 8, resource: "overload", hintStringId: 0x9c, action: "inventory", heroStateId: 24 },
+    { index: 9, resource: "cold", hintStringId: 0x9d, action: "inventory", heroStateId: 6 },
+    { index: 10, resource: "cold", hintStringId: 0x9e, action: "inventory", heroStateId: 11 },
+] satisfies readonly HudInterfaceIconDefinition[]);
 
 export interface NativeRect {
     readonly left: number;
@@ -406,6 +707,19 @@ export interface NativeRect {
     readonly width: number;
     readonly height: number;
 }
+
+/**
+ * Client.dll HUD exchange composition. Resource-table entry 7
+ * (`0x120f825c`, `engineres\\gpanel\\exchange`) is stored at HUD field
+ * `+0x1c0`. Renderer `0x1204dfd4..0x1204e018` blits it at viewport origin
+ * plus `(0xf6, 0xe1)`. The retained bitmap is exactly 528x276.
+ */
+export const LOOT_EXCHANGE_BACKGROUND_RECT: NativeRect = Object.freeze({
+    left: 246,
+    top: 225,
+    width: 528,
+    height: 276,
+});
 
 /**
  * Exact diary resource-pointer table 0x120f8a20..0x120f8a38, loaded by
@@ -599,10 +913,10 @@ export const INVENTORY_DYNAMIC_HINT_STRING_IDS = Object.freeze({
 });
 
 /**
- * The authored-control hint path starts a 0x12c ms timer at
+ * The shared authored-control tooltip path starts a 0x12c ms timer at
  * 0x12060c1a..0x12060c1f before constructing the tooltip.
  */
-export const INVENTORY_HINT_DELAY_MS = 0x12c;
+export const GUI_TOOLTIP_DELAY_MS = 0x12c;
 
 /**
  * The inventory-item path starts a 0x190 ms timer at
@@ -620,17 +934,24 @@ export const DIALOGUE_PANEL_RECT: NativeRect = Object.freeze({
 });
 
 /**
- * Text bounds corroborated by the original 1024-coordinate dialogue capture:
- * the copy starts 15px inside the panel and ends before authored scrollbar
- * objects 44..46 at x=744/745.
+ * The initialized Client dialogue singleton reports this exact view through
+ * fields `+0x149D0/+0x149D4/+0x149D8/+0x149CC`: `(213, 522, 530, 184)`.
+ * `Client.dll` `0x120A1B50` uses the same fields for clipping, hit-testing,
+ * wrapping, and text placement with the `main_interface` font.
  */
 export const DIALOGUE_TEXT_RECT: NativeRect = Object.freeze({
-    left: 212, top: 522, width: 528, height: 174,
+    left: 213, top: 522, width: 530, height: 184,
 });
 
 /** Shipped gpanel_new.scr dialogue scrollbar controls. */
 export const DIALOGUE_SCROLL_OBJECT_IDS = Object.freeze([44, 45, 46]);
 export const DIALOGUE_TRADE_OBJECT_ID = 15;
+
+/** Client.dll dialogue layout constants recovered from 0x120A01F4..0x120A1E1F. */
+export const DIALOGUE_LINE_HEIGHT = 0x14;
+export const DIALOGUE_CONTINUATION_INDENT = 0x1e;
+export const DIALOGUE_ARROW_SCROLL_STEP = 0x0a;
+export const DIALOGUE_WHEEL_SCROLL_STEP = 0x19;
 
 /**
  * Client.dll game-menu constructor 0x1208a1d0..0x1208a25a loads

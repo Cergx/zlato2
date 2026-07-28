@@ -40,10 +40,6 @@
     pointer-events: none;
 }
 
-.inventory-puppet {
-    position: absolute;
-    z-index: 4;
-}
 
 .inventory-equipment-slot,
 .inventory-item {
@@ -114,10 +110,7 @@
 }
 
 .inventory-quick-access {
-    position: absolute;
     z-index: 4;
-    display: grid;
-    box-sizing: border-box;
     pointer-events: none;
 }
 
@@ -136,13 +129,6 @@
     outline: 1px solid #e3be5c;
 }
 
-.inventory-panel .inventory-item-image {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    image-rendering: auto;
-    pointer-events: none;
-}
 
 .inventory-equipment-slot:hover,
 .inventory-equipment-slot:focus-visible,
@@ -172,12 +158,7 @@
 
 
 .inventory-bag {
-    position: absolute;
     z-index: 4;
-    display: grid;
-    gap: 2px;
-    box-sizing: border-box;
-    justify-content: space-between;
 }
 
 .inventory-item {
@@ -198,13 +179,4 @@
     background: rgb(50 8 5 / 92%);
 }
 
-.inventory-quantity {
-    position: absolute;
-    left: 2px;
-    bottom: 0;
-    padding: 0 2px;
-    border-radius: 2px;
-    color: #ffffff;
-    font: 500 10px ZlatoPalatino;
-}
 

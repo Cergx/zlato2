@@ -11,6 +11,7 @@ import styles from "./GuiSimpleButton.module.scss";
 export const GuiSimpleButton = ({
     object,
     value,
+    content,
     ariaLabel,
     onAction,
     inactive,
@@ -22,6 +23,7 @@ export const GuiSimpleButton = ({
     const contents = <>
         <GuiStateImages object={object} classes={styles} />
         {text !== undefined && <span className={styles.buttonText} style={guiTextStyle(object)}>{text}</span>}
+        {content}
     </>;
     const activate = (): void => {
         playClickSound(object);

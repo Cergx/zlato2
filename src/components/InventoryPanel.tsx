@@ -2,9 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import {
     INVENTORY_CHARACTER_NAME_DRAW,
     INVENTORY_NATIVE_TEXT_DRAWS,
-    INVENTORY_HINT_DELAY_MS,
+    GUI_TOOLTIP_DELAY_MS,
     INVENTORY_CHARACTERISTIC_UPGRADE_OBJECT_IDS,
-    INVENTORY_ITEM_HINT_DELAY_MS,
     INVENTORY_DYNAMIC_HINT_STRING_IDS,
     INVENTORY_SKILL_UPGRADE_BINDINGS,
     INVENTORY_ROLE_STATE_OBJECT_IDS,
@@ -12,6 +11,7 @@ import {
     NATIVE_HERO_STATE_BINDINGS,
     NATIVE_HERO_STATE_EFFECT_GROUPS,
     type InventoryTextDraw,
+    HERO_GENERATOR_NATIVE_LAYOUT,
 } from "../constants/clientDll.ts";
 import {
     HEADS_INTERFACE_FONT,
@@ -23,7 +23,7 @@ import { INVENTORY_EQUIPMENT_RECTS, type InventoryRect } from "../constants/temp
 
 import type { Game } from "../game/Game.ts";
 import type { GameRuntimeSnapshot } from "../game/GameStateRuntime.ts";
-import type { HeroInventoryItemView, HeroInventoryView, ShippedItem } from "../game/ItemCatalogRuntime.ts";
+import type { HeroInventoryItemView, HeroInventoryView } from "../game/ItemCatalogRuntime.ts";
 import type { EquipmentSlot } from "../game/systems/Items.ts";
 import { originalExperienceThreshold, originalLevelForExperience } from "../game/systems/Combat.ts";
 import { loadImage } from "../game/Assets.ts";
@@ -31,7 +31,8 @@ import { loadGuiDefinition, type GuiDefinition, type GuiObjectDefinition } from 
 import { SDBParser, type SDBData } from "../game/parsers/SDBParser.ts";
 import { ColorKeyImage } from "./ColorKeyImage.tsx";
 import { guiObjectStyle, OriginalGuiLayer, type GuiControlValue } from "./OriginalGuiLayer.tsx";
-import { GuiTooltip, type GuiTooltipAnchor } from "./gui/GuiTooltip.tsx";
+import { ItemContainer } from "./ItemContainer.tsx";
+import { drawChromaKeyImage, ItemIcon } from "./ItemIcon.tsx";
 
 import "./InventoryPanel.css";
 
@@ -61,6 +62,7 @@ const EQUIPMENT_SLOTS: readonly EquipmentSlot[] = [
 
 interface DraggedItem {
     readonly technicalName: string;
+    readonly stackKey?: string;
     readonly equippedSlot?: EquipmentSlot;
 }
 
@@ -69,17 +71,7 @@ const CHARACTERISTICS = [
     "strength", "constitution", "dexterity", "perception", "wisdom", "intelligence", "luck",
 ] as const;
 
-const SKILLS = [
-    "skill_wpn_sword", "skill_wpn_axe", "skill_wpn_crush",
-    "skill_wpn_staff", "skill_wpn_dist", "skill_wpn_spear",
-    "skill_wpn_throw", "skill_wpn_hand", "skill_critical_hit",
-    "skill_shadmag", "skill_natrmag", "skill_godsmag",
-    "skill_elemmag", "skill_lghtmag", "skill_darkmag",
-    "skill_magicuse", "skill_alchemy", "skill_identify",
-    "skill_tactic", "skill_scout", "skill_healing",
-    "skill_speech", "skill_trade", "skill_hack",
-    "skill_science", "skill_smith", "skill_athletic",
-] as const;
+const SKILLS = HERO_GENERATOR_NATIVE_LAYOUT.skills.map(({ parameter }) => parameter);
 
 // Client.dll stores these host-composition resources beside each other at file
 // offsets 0x10db54, 0x10db7c, and 0x10dbc0. inv_gui.scr defines controls only.
@@ -159,38 +151,6 @@ const nativeRoleStateIds = (snapshot: GameRuntimeSnapshot | null): readonly numb
     return stateIds.sort((left, right) => left - right);
 };
 
-const drawChromaKeyImage = (canvas: HTMLCanvasElement, image: HTMLImageElement): void => {
-    const context = canvas.getContext("2d", { willReadFrequently: true });
-    if (!context) return;
-    canvas.width = image.naturalWidth;
-    canvas.height = image.naturalHeight;
-    context.drawImage(image, 0, 0);
-    const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-    for (let index = 0; index < pixels.data.length; index += 4) {
-        if (pixels.data[index] >= 250 && pixels.data[index + 1] <= 5 && pixels.data[index + 2] >= 250) {
-            pixels.data[index + 3] = 0;
-        }
-    }
-    context.putImageData(pixels, 0, 0);
-};
-
-const ItemImage = ({ item }: { readonly item: ShippedItem }): React.JSX.Element => {
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-
-    useEffect(() => {
-        let cancelled = false;
-        if (item.iconUrl) {
-            void loadImage(item.iconUrl).then((image) => {
-                if (!cancelled && canvasRef.current) drawChromaKeyImage(canvasRef.current, image);
-            });
-        }
-        return () => { cancelled = true; };
-    }, [item.iconUrl]);
-
-    return item.iconUrl
-        ? <canvas className="inventory-item-image" ref={canvasRef} aria-hidden="true" />
-        : <span>{item.literaryName.slice(0, 1)}</span>;
-};
 
 
 const SMALL_SELECTION_SLOTS = new Set<EquipmentSlot>(["amulet", "bracelet", "ringLeft", "ringRight"]);
@@ -214,18 +174,6 @@ const ItemSelection = ({ small = false }: { readonly small?: boolean }) => {
     return <canvas className="inventory-selection" ref={canvasRef} aria-hidden="true" />;
 };
 
-interface InventoryItemTooltip {
-    readonly text: string;
-    readonly anchor: GuiTooltipAnchor;
-}
-
-const inventoryItemTooltipText = (item: ShippedItem, quantity?: number): string => [
-    item.literaryName,
-    item.definition.itemClass,
-    item.description,
-    quantity === undefined ? undefined : `Количество: ${quantity}`,
-    ...item.specialEffects.map((effect) => `Эффект ${effect.specialId}: ${effect.amount}`),
-].filter((line): line is string => Boolean(line)).join("\n");
 
 
 export default function InventoryPanel({ game, onClose, initialView = "inventory" }: InventoryPanelProps) {
@@ -236,8 +184,6 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
     );
     const [dragged, setDragged] = useState<DraggedItem | null>(null);
     const draggedRef = useRef<DraggedItem | null>(null);
-    const itemTooltipTimer = useRef<number | null>(null);
-    const [itemTooltip, setItemTooltip] = useState<InventoryItemTooltip | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [heroName, setHeroName] = useState("Герой");
     const initialParameters = useRef<Readonly<Record<string, number>> | null>(null);
@@ -266,9 +212,6 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
         }
     }, [game]);
 
-    useEffect(() => () => {
-        if (itemTooltipTimer.current !== null) window.clearTimeout(itemTooltipTimer.current);
-    }, []);
 
     useEffect(() => { void refresh(); }, [refresh]);
     useEffect(() => {
@@ -312,7 +255,8 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
     const parameterValue = (name: string): number => Object.entries(heroParameters)
         .find(([candidate]) => candidate.toLowerCase() === name)?.[1] ?? 0;
     const minimumValue = (name: string): number => initialParameters.current?.[name] ?? parameterValue(name);
-    const draggedItem = dragged && (inventory?.items.find((item) => item.technicalName === dragged.technicalName)
+    const draggedItem = dragged && (inventory?.items.find((item) => item.stackKey === dragged.stackKey
+        || (!dragged.stackKey && item.technicalName === dragged.technicalName))
         ?? Object.values(inventory?.equipped ?? {}).find((item) => item?.technicalName === dragged.technicalName));
 
     const report = (caught: unknown): void => setError(caught instanceof Error ? caught.message : String(caught));
@@ -334,8 +278,8 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
     const activateInventoryItem = async (item: HeroInventoryItemView) => {
         try {
             const changed = item.definition.itemClass === "food" || item.definition.itemClass === "potion"
-                ? await game.useHeroItem(item.technicalName)
-                : await game.equipHeroItem(item.technicalName);
+                ? await game.useHeroItem(item.technicalName, item.stackKey)
+                : await game.equipHeroItem(item.technicalName, undefined, item.stackKey);
             if (changed) await refresh();
         } catch (caught) {
             report(caught);
@@ -347,7 +291,7 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
         if (!item || item.equippedSlot === slot) return;
         try {
             if (item.equippedSlot && !await game.unequipHeroItem(item.equippedSlot)) return;
-            const changed = await game.equipHeroItem(item.technicalName, slot);
+            const changed = await game.equipHeroItem(item.technicalName, slot, item.stackKey);
             if (!changed && item.equippedSlot) await game.equipHeroItem(item.technicalName, item.equippedSlot);
             if (changed) await refresh();
         } catch (caught) {
@@ -357,34 +301,6 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
         }
     };
 
-    const clearItemTooltip = (): void => {
-        if (itemTooltipTimer.current !== null) window.clearTimeout(itemTooltipTimer.current);
-        itemTooltipTimer.current = null;
-        setItemTooltip(null);
-    };
-
-    const scheduleItemTooltip = (element: HTMLElement, item: ShippedItem, quantity?: number): void => {
-        clearItemTooltip();
-        const panel = element.closest<HTMLElement>(".inventory-panel");
-        if (!panel) return;
-        const panelRect = panel.getBoundingClientRect();
-        const itemRect = element.getBoundingClientRect();
-        const scaleX = panelRect.width / 1024 || 1;
-        const scaleY = panelRect.height / 768 || 1;
-        const pending: InventoryItemTooltip = {
-            text: inventoryItemTooltipText(item, quantity),
-            anchor: {
-                left: (itemRect.left - panelRect.left) / scaleX,
-                top: (itemRect.top - panelRect.top) / scaleY,
-                width: itemRect.width / scaleX,
-                height: itemRect.height / scaleY,
-            },
-        };
-        itemTooltipTimer.current = window.setTimeout(() => {
-            itemTooltipTimer.current = null;
-            setItemTooltip(pending);
-        }, INVENTORY_ITEM_HINT_DELAY_MS);
-    };
 
     const unequipDragged = async () => {
         const item = draggedRef.current;
@@ -401,7 +317,7 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
     const dropItem = async (item: DraggedItem) => {
         try {
             if (item.equippedSlot && !await game.unequipHeroItem(item.equippedSlot)) return;
-            const dropped = await game.dropHeroItem(item.technicalName);
+            const dropped = await game.dropHeroItem(item.technicalName, item.stackKey);
             if (!dropped && item.equippedSlot) await game.equipHeroItem(item.technicalName, item.equippedSlot);
             if (dropped) await refresh();
         } catch (caught) {
@@ -564,7 +480,7 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
         ...INVENTORY_NATIVE_TEXT_DRAWS[view],
     ];
 
-    return <div className="inventory-panel" role="dialog" aria-label="Инвентарь и характеристики">
+    return <div className="inventory-panel" role="dialog" aria-label="Инвентарь и характеристики" data-item-tooltip-root>
         <img className="inventory-panel-background" src={INVENTORY_NATIVE_RESOURCES.backgrounds[view]} alt="" draggable={false} />
         <div className="inventory-character-name" style={characterNameStyle}>{heroName}</div>
 
@@ -575,9 +491,29 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
             values={authoredValues}
             labels={authoredLabels}
             tooltips={authoredTooltips}
-            tooltipDelayMs={INVENTORY_HINT_DELAY_MS}
+            tooltipDelayMs={GUI_TOOLTIP_DELAY_MS}
             inactiveObjectIds={inactiveObjectIds}
             onAction={handleGuiAction}
+            objectContents={{
+                1: <ItemContainer columns={INVENTORY_PAGE_SIZE} rows={1} className="inventory-bag" ariaLabel="Предметы">
+                    {visibleItems.map((item) => <button type="button" key={item.stackKey}
+                        className="inventory-item"
+                        aria-label={`${item.literaryName}, ${item.quantity}`}
+                        draggable
+                        onDragStart={(event) => beginDrag(event, { technicalName: item.technicalName, stackKey: item.stackKey })}
+                        onDoubleClick={() => void activateInventoryItem(item)}>
+                        <ItemIcon item={item} quantity={item.quantity} />
+                        <ItemSelection />
+                    </button>)}
+                </ItemContainer>,
+                99: <ItemContainer columns={INVENTORY_QUICK_ACCESS_SLOTS} rows={1}
+                    className="inventory-quick-access" ariaLabel="Быстрый доступ">
+                    {Array.from({ length: INVENTORY_QUICK_ACCESS_SLOTS }, (_, slot) => (
+                        <div className="inventory-quick-access-slot" data-quick-access-slot={slot}
+                            aria-label={`Слот быстрого доступа ${slot + 1}`} key={slot} />
+                    ))}
+                </ItemContainer>,
+            }}
             onValueChange={(object, value) => {
                 if (object.id < 9 || object.id > 15 || typeof value !== "boolean") return;
                 setActiveFilterId(value ? object.id : null);
@@ -616,9 +552,6 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
             const objectId = 160 + index;
             return fieldValue(`secondary-${objectId}`, objectId, SECONDARY_VALUE_RIGHT[objectId], value);
         })}
-        <div className="inventory-puppet" style={guiObject(2) ? guiObjectStyle(guiObject(2)!) : undefined}
-            aria-label="Экипировать на персонажа" onDragOver={allowDrop}
-            onDrop={(event) => { event.preventDefault(); void equipDragged(); }} />
 
         {EQUIPMENT_SLOTS.map((slot) => {
             const rect = INVENTORY_EQUIPMENT_RECTS[slot];
@@ -626,12 +559,7 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
             return <button type="button" key={slot} className={equipmentClass(slot)} style={positionStyle(rect)}
                 aria-label={item ? `${SLOT_LABELS[slot]}: ${item.literaryName}` : SLOT_LABELS[slot]}
                 draggable={Boolean(item)}
-                onPointerEnter={(event) => { if (item) scheduleItemTooltip(event.currentTarget, item); }}
-                onPointerLeave={clearItemTooltip}
-                onFocus={(event) => { if (item) scheduleItemTooltip(event.currentTarget, item); }}
-                onBlur={clearItemTooltip}
                 onDragStart={(event) => {
-                    clearItemTooltip();
                     if (item) beginDrag(event, { technicalName: item.technicalName, equippedSlot: slot });
                 }}
                 onDragEnd={clearDragged}
@@ -639,48 +567,12 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
                 onDrop={(event) => { event.preventDefault(); void equipDragged(slot); }}
                 onDoubleClick={() => { if (item) void game.unequipHeroItem(slot).then(async (changed) => { if (changed) await refresh(); }).catch(report); }}>
                 {item && <>
-                    <ItemImage item={item} />
+                    <ItemIcon item={item} />
                     <ItemSelection small={SMALL_SELECTION_SLOTS.has(slot)} />
                 </>}
             </button>;
         })}
 
-        {guiObject(99) && <div className="inventory-quick-access" style={{
-            ...guiObjectStyle(guiObject(99)!),
-            gridTemplateColumns: `repeat(${INVENTORY_QUICK_ACCESS_SLOTS}, 1fr)`,
-        }} aria-label="Быстрый доступ">
-            {Array.from({ length: INVENTORY_QUICK_ACCESS_SLOTS }, (_, slot) => (
-                <div className="inventory-quick-access-slot" data-quick-access-slot={slot}
-                    aria-label={`Слот быстрого доступа ${slot + 1}`} key={slot} />
-            ))}
-        </div>}
-
-        <div className="inventory-bag" style={guiObject(1) ? {
-            ...guiObjectStyle(guiObject(1)!),
-            gridTemplateColumns: `repeat(${INVENTORY_PAGE_SIZE}, 1fr)`,
-        } : undefined} aria-label="Предметы" onDragOver={allowDrop}
-            onDrop={(event) => { event.preventDefault(); void unequipDragged(); }}>
-            {visibleItems.map((item) => <button type="button" key={item.technicalName}
-                className="inventory-item"
-                aria-label={`${item.literaryName}, ${item.quantity}`}
-                draggable
-                onPointerEnter={(event) => scheduleItemTooltip(event.currentTarget, item, item.quantity)}
-                onPointerLeave={clearItemTooltip}
-                onFocus={(event) => scheduleItemTooltip(event.currentTarget, item, item.quantity)}
-                onBlur={clearItemTooltip}
-                onDragStart={(event) => {
-                    clearItemTooltip();
-                    beginDrag(event, { technicalName: item.technicalName });
-                }}
-                onDoubleClick={() => void activateInventoryItem(item)}>
-                <ItemImage item={item} />
-                <ItemSelection />
-                {item.quantity > 1 && <span className="inventory-quantity">{item.quantity}</span>}
-            </button>)}
-        </div>
-
-        {itemTooltip && <GuiTooltip text={itemTooltip.text} anchor={itemTooltip.anchor}
-            canvasWidth={1024} canvasHeight={768} />}
 
         {error && <span className="inventory-error" role="alert">{error}</span>}
     </div>;

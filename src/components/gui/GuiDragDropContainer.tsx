@@ -14,6 +14,7 @@ export const GuiDragDropContainer = ({
     inactive,
     canvasWidth,
     canvasHeight,
+    content,
 }: GuiControlProps) => {
     const interactive = object.enabled && !inactive;
     return <div className={styles.dropContainer} style={guiObjectStyle(object, canvasWidth, canvasHeight)}
@@ -24,5 +25,6 @@ export const GuiDragDropContainer = ({
         onDrop={interactive && onDrop ? (event) => onDrop(object, event) : undefined}>
         {object.visible && <GuiStateImages object={object} classes={styles} />}
         {object.visible && object.text && <span className={styles.buttonText} style={guiTextStyle(object)}>{object.text}</span>}
+        {content}
     </div>;
 };

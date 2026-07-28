@@ -1,0 +1,44 @@
+.dialog {
+    position: absolute;
+    top: 283px;
+    left: 389px;
+    z-index: 9;
+    width: 246px;
+    height: 201px;
+}
+
+.dialog > img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+.dialog > :global([data-gui-script="stacks_gui"]) {
+    z-index: 3;
+}
+
+.count {
+    position: absolute;
+    top: 22px;
+    z-index: 4;
+    display: grid;
+    height: 63px;
+    place-items: center;
+    color: #211407;
+    font: 500 12px ZlatoPalatino, "Palatino Linotype", serif;
+    line-height: 1;
+    text-align: center;
+    pointer-events: none;
+}
+
+.remaining {
+    left: 0;
+    width: 90px;
+}
+
+.transferred {
+    left: 155px;
+    width: 91px;
+}

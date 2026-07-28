@@ -1,0 +1,96 @@
+.panel {
+    position: relative;
+    width: 1024px;
+    height: 768px;
+    overflow: hidden;
+    color: #21170e;
+    font-family: ZlatoPalatino, "Palatino Linotype", serif;
+    user-select: none;
+}
+
+.backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    display: block;
+    width: 1024px;
+    height: 768px;
+    pointer-events: none;
+}
+
+.nativeText {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+}
+
+.nativeLabel,
+.characteristicValue,
+.skillValue,
+.primaryPointsValue,
+.skillPointsValue {
+    position: absolute;
+    box-sizing: border-box;
+    overflow: hidden;
+    color: #21170e;
+    font-size: 15px;
+    line-height: 18px;
+    text-shadow: 0 1px rgb(239 209 145 / 45%);
+    white-space: nowrap;
+}
+
+.topTitle {
+    position: absolute;
+    overflow: hidden;
+    color: #21170e;
+    line-height: normal;
+    text-shadow: 0 1px rgb(239 209 145 / 45%);
+    white-space: nowrap;
+}
+
+.presetCaption {
+    position: absolute;
+    display: grid;
+    box-sizing: border-box;
+    place-items: center;
+    overflow: hidden;
+    color: #21170e;
+    text-align: center;
+    text-shadow: 0 1px rgb(239 209 145 / 45%);
+    white-space: nowrap;
+}
+
+.sectionHeading {
+    position: absolute;
+    overflow: hidden;
+    color: #21170e;
+    font-size: 15px;
+    line-height: 18px;
+    text-align: center;
+    text-shadow: 0 1px rgb(239 209 145 / 45%);
+    white-space: nowrap;
+}
+
+.characteristicValue,
+.skillValue,
+.primaryPointsValue,
+.skillPointsValue {
+    display: grid;
+    place-items: center;
+    text-align: center;
+}
+
+
+.error {
+    position: absolute;
+    left: 10px;
+    top: 42px;
+    z-index: 4;
+    width: 264px;
+    color: #7b190d;
+    font-size: 15px;
+    font-weight: 700;
+    text-align: center;
+    text-shadow: 0 1px rgb(255 224 164 / 60%);
+}

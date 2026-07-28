@@ -1,0 +1,36 @@
+.icon {
+    position: relative;
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+}
+
+.image {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    image-rendering: auto;
+    pointer-events: none;
+}
+
+.fallback {
+    display: grid;
+    width: 100%;
+    height: 100%;
+    place-items: center;
+    pointer-events: none;
+}
+
+.quantity {
+    position: absolute;
+    left: 2px;
+    bottom: 0;
+    padding: 0 2px;
+    border-radius: 2px;
+    color: #fff;
+    font: 500 10px ZlatoPalatino, "Palatino Linotype", serif;
+    text-shadow: 0 1px 2px #000;
+    pointer-events: none;
+}

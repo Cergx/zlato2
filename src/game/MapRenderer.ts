@@ -1,15 +1,12 @@
 import { MapScroller } from "./MapScroller";
 import type { LevelAnimation, LevelData, LevelDoor, LevelStatic, LevelTriggerMask } from "./Level.ts";
 import { loadHeroSprites, type LevelPerson } from "./PersonSprite.ts";
-import type { MHDRTile } from "./parsers/LVLParser.ts";
 import type { Direction, TilePosition } from "./parsers/SEFParser.ts";
 import type { PADAnimation } from "./parsers/PADParser.ts";
 import { WorldGrid } from "./WorldGrid.ts";
 import {
     cellToWorld,
     worldToCell,
-    WORLD_CELL_HEIGHT,
-    WORLD_CELL_WIDTH,
     WORLD_CHUNK_HEIGHT,
     WORLD_CHUNK_WIDTH,
     type WorldPosition,
@@ -18,6 +15,12 @@ import { expandDoorBarrierCells, type ScenarioTriggerState } from "./ScenarioRun
 import { CursorType } from "../enums/CursorTypes.ts";
 import type { CombatAnimationKind } from "./GameStateRuntime.ts";
 import { MagicEffectAnimation } from "./MagicEffectAnimation.ts";
+import { originalCombatDistance } from "./systems/Combat.ts";
+import {
+    buildNativeAlternateMaskTiles,
+    findNativeOccluders,
+    type NativeOccluderSelection,
+} from "./MaskCompositorRuntime.ts";
 
 interface PersonRuntime {
     person: LevelPerson;
@@ -39,6 +42,7 @@ interface DoorRuntime {
     readonly name: string;
     readonly levelDoor: LevelDoor;
     cells: readonly TilePosition[];
+    maskCells: readonly TilePosition[];
     activationCells: readonly TilePosition[];
     opened: boolean;
     depth: number;
@@ -78,16 +82,13 @@ interface RenderBounds {
 
 interface ActiveMagicAnimation {
     readonly animation: MagicEffectAnimation;
-    readonly targetName: string;
+    readonly targetName?: string;
+    readonly position?: Readonly<WorldPosition>;
     readonly startedAt: number;
 }
 
-type HoverTargetKind = "person" | "door" | "trigger";
+type HoverTargetKind = "person" | "door" | "trigger" | "reference";
 
-interface BackgroundSpriteHighlight extends RenderBounds {
-    readonly centerX: number;
-    readonly centerY: number;
-}
 
 type RenderKind = "static" | "animation" | "person";
 
@@ -122,8 +123,9 @@ export class MapRenderer {
     private lastFrameTime = performance.now();
     private simulationAccumulatorMs = 0;
     private simulationTick = 0;
-    private readonly occluderCache = new Map<string, readonly number[]>();
-    private readonly onSimulationStep?: (tick: number, simulationTimeMs: number, playerPosition: Readonly<WorldPosition>) => void;
+    private readonly occluderCache = new Map<string, readonly NativeOccluderSelection[]>();
+    private alternateMaskTiles: ReadonlySet<string> = new Set();
+    private readonly onSimulationStep?: (tick: number, simulationTimeMs: number, playerPosition: Readonly<WorldPosition>, clockTimeMs: number) => void;
     private readonly onPersonClick?: (person: LevelPerson) => void;
     private readonly onPersonAttack?: (person: LevelPerson) => void;
     private readonly hiddenPersons = new Set<string>();
@@ -132,11 +134,10 @@ export class MapRenderer {
     private readonly doors = new Map<string, DoorRuntime>();
     private readonly doorsByStatic = new Map<LevelStatic, DoorRuntime>();
     private readonly triggers = new Map<string, TriggerRuntime>();
-    private interactiveStatics = new Set<LevelStatic>();
-    private interactiveAnimations = new Set<LevelAnimation>();
-    private interactiveBackgrounds: readonly BackgroundSpriteHighlight[] = [];
+    private triggerMasksByName = new Map<string, LevelTriggerMask>();
     private interactiveTriggerMasks: readonly LevelTriggerMask[] = [];
     private hoveredTargetKey = "";
+    private hoveredPerson: PersonRuntime | undefined;
     private currentCursor = CursorType.NORMAL;
     private flashInteractiveObjects = false;
     private readonly highlightCanvas = document.createElement("canvas");
@@ -152,7 +153,7 @@ export class MapRenderer {
     private alwaysRun = false;
     private showHints = true;
     private transparentOccluders = true;
-    private readonly interactionRangeCells = 3;
+    private readonly interactionRangeCells = 6;
     private readonly randomMovementRadius = 8;
 
     private readonly handleClick = (event: MouseEvent) => {
@@ -193,7 +194,7 @@ export class MapRenderer {
         const world = { x: local.x + this.offset.x, y: local.y + this.offset.y };
         const person = this.findPersonAt(world);
         if (person) {
-            this.setHoveredTarget("person", person.person.name);
+            this.setHoveredTarget("person", person.person.name, person);
             this.changeCursor(this.deadPersons.has(person.person.name.toLowerCase()) ? CursorType.TAKE : this.magicTargeting ? CursorType.CAST : event.shiftKey || this.combatMode ? CursorType.ATTACK : person.person.scriptDialog ? CursorType.TALK : CursorType.NPC_TURN);
             return;
         }
@@ -203,8 +204,9 @@ export class MapRenderer {
             this.changeCursor(CursorType.OPEN);
             return;
         }
-        const trigger = this.findTriggerAt(world);
-        this.setHoveredTarget(trigger ? "trigger" : undefined, trigger?.name);
+        const trigger = this.findTriggerAt(world, true);
+        const reference = trigger ? this.isReferenceTrigger(trigger) : false;
+        this.setHoveredTarget(reference ? "reference" : trigger ? "trigger" : undefined, trigger?.name);
         this.changeCursor(trigger ? this.cursorForTrigger(trigger) : CursorType.NORMAL);
     };
 
@@ -231,13 +233,15 @@ export class MapRenderer {
     constructor(
         canvas: HTMLCanvasElement,
         levelData: LevelData,
-        onSimulationStep?: (tick: number, simulationTimeMs: number, playerPosition: Readonly<WorldPosition>) => void,
+        onSimulationStep?: (tick: number, simulationTimeMs: number, playerPosition: Readonly<WorldPosition>, clockTimeMs: number) => void,
         onPersonClick?: (person: LevelPerson) => void,
         onPersonAttack?: (person: LevelPerson) => void,
         private readonly onDoorClick?: (name: string) => void,
         private readonly onTriggerClick?: (name: string) => void,
         private readonly onCursorChange?: (cursor: CursorType) => void,
         private readonly onHoverTarget?: (kind?: HoverTargetKind, name?: string) => void,
+        private readonly getHeroAttackDistance?: () => number,
+        private readonly onPersonPositionChange?: (technicalName: string, position: Readonly<WorldPosition>) => void,
     ) {
         this.canvas = canvas;
         this.ctx = canvas.getContext("2d");
@@ -277,6 +281,7 @@ export class MapRenderer {
         this.simulationTick = 0;
         this.pendingPersonInteraction = undefined;
         this.flashInteractiveObjects = false;
+        this.setHoveredTarget();
         this.magicEffects.length = 0;
     }
 
@@ -328,6 +333,29 @@ export class MapRenderer {
             persons: this.persons
                 .filter(({ person }) => !this.hiddenPersons.has(person.name))
                 .map(({ position }) => ({ ...position })),
+            transitions: [...this.triggers.values()]
+                .filter((trigger) => trigger.active && trigger.transition)
+                .flatMap((trigger) => {
+                    const mask = this.triggerMasksByName.get(trigger.name.toLowerCase());
+                    if (mask) {
+                        return [{
+                            x: mask.position.x + mask.image.width / 2,
+                            y: mask.position.y + mask.image.height / 2,
+                        }];
+                    }
+                    if (trigger.cells.length === 0) return [];
+                    const total = trigger.cells.reduce(
+                        (sum, cell) => {
+                            const position = cellToWorld(cell);
+                            return { x: sum.x + position.x, y: sum.y + position.y };
+                        },
+                        { x: 0, y: 0 },
+                    );
+                    return [{
+                        x: total.x / trigger.cells.length,
+                        y: total.y / trigger.cells.length,
+                    }];
+                }),
         };
     }
 
@@ -386,19 +414,34 @@ export class MapRenderer {
         }).catch((error) => console.warn(`Не удалось загрузить анимацию магии ${technicalName}`, error));
     }
 
+    public playMagicEffectAt(technicalName: string, position: Readonly<WorldPosition>): void {
+        void MagicEffectAnimation.load(technicalName).then((animation) => {
+            this.magicEffects.push({
+                animation,
+                position: { ...position },
+                startedAt: this.simulationTick * this.simulationStepMs,
+            });
+        }).catch((error) => console.warn(`Не удалось загрузить анимацию магии ${technicalName}`, error));
+    }
+
     public setDoorState(name: string, opened: boolean, cells?: readonly TilePosition[], activationCells?: readonly TilePosition[]): void {
         const door = this.doors.get(name);
         if (!door) return;
         door.opened = opened;
-        if (cells) door.cells = expandDoorBarrierCells(cells);
+        if (cells) {
+            door.maskCells = cells.map((cell) => ({ ...cell }));
+            door.cells = expandDoorBarrierCells(cells);
+        }
         if (activationCells) door.activationCells = activationCells.map((cell) => ({ ...cell }));
         door.depth = doorRenderDepth(door.cells, door.levelDoor.levelStatic.position.y + (door.levelDoor.levelStatic.image?.height ?? 0));
+        this.refreshAlternateMaskTiles();
     }
 
     public setTriggerState(trigger: ScenarioTriggerState): void {
         const existing = this.triggers.get(trigger.name);
         if (existing) Object.assign(existing, trigger, { cells: trigger.cells.map((cell) => ({ ...cell })) });
         else this.triggers.set(trigger.name, { ...trigger, cells: trigger.cells.map((cell) => ({ ...cell })) });
+        this.refreshInteractiveVisuals();
     }
 
     public setCombatMode(active: boolean): void {
@@ -437,7 +480,7 @@ export class MapRenderer {
         this.lastFrameTime = frameTime;
         this.simulationAccumulatorMs += elapsedMs;
         while (this.simulationAccumulatorMs >= this.simulationStepMs) {
-            this.advanceSimulation();
+            this.advanceSimulation(frameTime);
             this.simulationAccumulatorMs -= this.simulationStepMs;
         }
 
@@ -462,11 +505,7 @@ export class MapRenderer {
         const highlightTime = this.simulationTick * this.simulationStepMs;
         for (const item of this.renderQueue) this.drawRenderItem(item, highlightTime);
         this.drawMagicEffects(highlightTime);
-        if (this.flashInteractiveObjects) {
-            this.drawBackgroundSpriteHighlights(highlightTime);
-            this.drawTriggerMaskHighlights(highlightTime);
-            this.drawTriggerHighlights();
-        }
+        this.drawTriggerMaskHighlights(highlightTime);
     }
 
     private drawMagicEffects(now: number): void {
@@ -479,7 +518,7 @@ export class MapRenderer {
                 this.magicEffects.splice(index, 1);
                 continue;
             }
-            const position = this.personWorldPosition(effect.targetName);
+            const position = effect.position ?? (effect.targetName ? this.personWorldPosition(effect.targetName) : undefined);
             if (!position) continue;
             effect.animation.draw(context, position.x - this.offset.x, position.y - this.offset.y, elapsedMs);
         }
@@ -490,43 +529,13 @@ export class MapRenderer {
         return this.persons.find((candidate) => candidate.person.name.toLowerCase() === technicalName)?.position;
     }
 
-    private drawBackgroundSpriteHighlights(now: number): void {
-        const context = this.highlightContext;
-        if (!context) return;
-        for (const highlight of this.interactiveBackgrounds) {
-            const drawX = highlight.x - this.offset.x;
-            const drawY = highlight.y - this.offset.y;
-            if (drawX > this.canvas.width || drawY > this.canvas.height
-                || drawX + highlight.width < 0 || drawY + highlight.height < 0) continue;
-            if (this.highlightCanvas.width !== highlight.width) this.highlightCanvas.width = highlight.width;
-            if (this.highlightCanvas.height !== highlight.height) this.highlightCanvas.height = highlight.height;
-            context.clearRect(0, 0, highlight.width, highlight.height);
-            context.drawImage(
-                this.levelData.image,
-                highlight.x, highlight.y, highlight.width, highlight.height,
-                0, 0, highlight.width, highlight.height,
-            );
-            context.save();
-            context.globalCompositeOperation = "destination-in";
-            const radius = Math.max(highlight.width, highlight.height) * 0.62;
-            const gradient = context.createRadialGradient(
-                highlight.centerX, highlight.centerY, radius * 0.22,
-                highlight.centerX, highlight.centerY, radius,
-            );
-            gradient.addColorStop(0, "rgb(255 255 255 / 100%)");
-            gradient.addColorStop(0.68, "rgb(255 255 255 / 82%)");
-            gradient.addColorStop(1, "rgb(255 255 255 / 0%)");
-            context.fillStyle = gradient;
-            context.fillRect(0, 0, highlight.width, highlight.height);
-            context.restore();
-            this.tintAndDrawHighlight(drawX, drawY, highlight.width, highlight.height, now, 0.45);
-        }
-    }
 
     private drawTriggerMaskHighlights(now: number): void {
         const context = this.highlightContext;
         if (!context) return;
         for (const trigger of this.interactiveTriggerMasks) {
+            const hovered = this.hoveredTargetKey.toLowerCase() === `trigger:${trigger.name}`.toLowerCase();
+            if (!this.flashInteractiveObjects && !hovered) continue;
             const drawX = trigger.position.x - this.offset.x;
             const drawY = trigger.position.y - this.offset.y;
             if (drawX > this.canvas.width || drawY > this.canvas.height
@@ -540,39 +549,14 @@ export class MapRenderer {
                 0, 0, trigger.image.width, trigger.image.height,
             );
             context.save();
+            context.globalCompositeOperation = "destination-in";
             context.drawImage(trigger.image, 0, 0);
             context.restore();
-            this.tintAndDrawHighlight(drawX, drawY, trigger.image.width, trigger.image.height, now);
+            this.drawPreparedHighlight(drawX, drawY, now, this.flashInteractiveObjects && !hovered);
         }
     }
 
-    private drawTriggerHighlights(): void {
-        const context = this.ctx;
-        if (!context) return;
-        context.save();
-        context.fillStyle = "rgb(255 220 96 / 24%)";
-        context.strokeStyle = "rgb(255 230 125 / 88%)";
-        context.lineWidth = 2;
-        for (const trigger of this.triggers.values()) {
-            if (!trigger.active || !trigger.visible || !trigger.scriptName || trigger.inventoryName) continue;
-            for (const cell of trigger.cells) {
-                const point = cellToWorld(cell);
-                const x = point.x - this.offset.x;
-                const y = point.y - this.offset.y;
-                context.beginPath();
-                context.moveTo(x, y - WORLD_CELL_HEIGHT / 2);
-                context.lineTo(x + WORLD_CELL_WIDTH / 2, y);
-                context.lineTo(x, y + WORLD_CELL_HEIGHT / 2);
-                context.lineTo(x - WORLD_CELL_WIDTH / 2, y);
-                context.closePath();
-                context.fill();
-                context.stroke();
-            }
-        }
-        context.restore();
-    }
-
-    private advanceSimulation() {
+    private advanceSimulation(clockTimeMs: number) {
         this.simulationTick++;
         const simulationTime = this.simulationTick * this.simulationStepMs;
         this.updatePersons(simulationTime, this.simulationStepMs / 1000);
@@ -583,7 +567,7 @@ export class MapRenderer {
         for (const levelAnimation of this.levelData.levelAnimations) {
             levelAnimation.animation?.update(this.simulationStepMs * this.animationSpeed);
         }
-        this.onSimulationStep?.(this.simulationTick, simulationTime, this.getPlayerWorldPosition());
+        this.onSimulationStep?.(this.simulationTick, simulationTime, this.getPlayerWorldPosition(), clockTimeMs);
     }
 
     private createRenderQueue(levelData: LevelData): RenderItem[] {
@@ -602,12 +586,17 @@ export class MapRenderer {
     private createInteractionRuntimes(levelData: LevelData): void {
         this.doors.clear();
         this.doorsByStatic.clear();
+        this.triggerMasksByName = new Map(
+            levelData.triggerMasks.map((mask) => [mask.name.toLowerCase(), mask]),
+        );
         for (const levelDoor of levelData.levelDoors) {
-            const cells = expandDoorBarrierCells(levelData.sefData.cellGroups[levelDoor.cellsName] ?? []);
+            const maskCells = (levelData.sefData.cellGroups[levelDoor.cellsName] ?? []).map((cell) => ({ ...cell }));
+            const cells = expandDoorBarrierCells(maskCells);
             const runtime: DoorRuntime = {
                 name: levelDoor.sefName,
                 levelDoor,
                 cells,
+                maskCells,
                 activationCells: (levelData.lvlData.cellGroups[levelDoor.cellGroup] ?? []).map((cell) => ({ ...cell })),
                 opened: levelDoor.isOpened ?? false,
                 depth: doorRenderDepth(cells, levelDoor.levelStatic.position.y + (levelDoor.levelStatic.image?.height ?? 0)),
@@ -615,14 +604,19 @@ export class MapRenderer {
             this.doors.set(levelDoor.sefName, runtime);
             this.doorsByStatic.set(levelDoor.levelStatic, runtime);
         }
+        this.refreshAlternateMaskTiles();
         this.triggers.clear();
         for (const trigger of levelData.sefData.triggers) {
+            const exactMask = this.triggerMasksByName.get(trigger.name.toLowerCase());
+            const cells = trigger.cellsName
+                ? levelData.sefData.cellGroups[trigger.cellsName] ?? []
+                : exactMask ? levelData.triggerCells[exactMask.name] ?? [] : [];
             this.triggers.set(trigger.name, {
                 name: trigger.name,
                 active: trigger.isActive ?? true,
                 visible: trigger.isVisible ?? true,
                 transition: trigger.isTransition ?? false,
-                cells: (trigger.cellsName ? levelData.sefData.cellGroups[trigger.cellsName] ?? [] : []).map((cell) => ({ ...cell })),
+                cells: cells.map((cell) => ({ ...cell })),
                 literaryName: trigger.literaryName,
                 cursorName: trigger.cursorName,
                 scriptName: trigger.scriptName,
@@ -649,7 +643,7 @@ export class MapRenderer {
                 if (this.isStaticVisible(item.levelStatic)) this.drawStatic(item.levelStatic, now);
                 break;
             case "animation":
-                this.drawAnimation(item.levelAnimation, now);
+                this.drawAnimation(item.levelAnimation);
                 break;
             case "person":
                 if (!this.hiddenPersons.has(item.runtime.person.name)) this.drawPerson(item.runtime, now);
@@ -774,13 +768,17 @@ export class MapRenderer {
         const interaction = this.pendingPersonInteraction;
         if (!interaction) return false;
         if (interaction.kind === "person" && this.hiddenPersons.has(interaction.runtime.person.name)) return false;
-        if (interaction.kind === "trigger" && (!interaction.trigger.active || !interaction.trigger.visible)) return false;
+        if (interaction.kind === "trigger" && !this.isTriggerInteractive(interaction.trigger)) return false;
         const target = this.interactionPosition(interaction);
-        const distance = Math.hypot(
-            (target.x - this.player.position.x) / WORLD_CELL_WIDTH,
-            (target.y - this.player.position.y) / WORLD_CELL_HEIGHT,
-        );
-        if (distance > this.interactionRangeCells) return false;
+        const playerCell = worldToCell(this.player.position);
+        const targetCell = worldToCell(target);
+        const distance = interaction.kind === "person" && interaction.attack
+            ? originalCombatDistance(playerCell, targetCell)
+            : Math.hypot(targetCell.x - playerCell.x, targetCell.y - playerCell.y);
+        const maximumDistance = interaction.kind === "person" && interaction.attack
+            ? this.getHeroAttackDistance?.() ?? 6
+            : this.interactionRangeCells;
+        if (distance > maximumDistance) return false;
 
         this.pendingPersonInteraction = undefined;
         this.player.route = [];
@@ -826,6 +824,9 @@ export class MapRenderer {
         for (const runtime of this.persons) {
             runtime.moving = false;
             if (this.hiddenPersons.has(runtime.person.name)) continue;
+            if (this.pendingPersonInteraction?.kind === "person"
+                && !this.pendingPersonInteraction.attack
+                && this.pendingPersonInteraction.runtime === runtime) continue;
             if (this.combatMode || runtime.combatAnimation) continue;
             if (runtime.person.routeType === "STAY") continue;
             if (runtime.person.routeType === "STAY_ROTATE") {
@@ -862,6 +863,7 @@ export class MapRenderer {
             runtime.position.x = target.x;
             runtime.position.y = target.y;
             runtime.moving = true;
+            if (runtime !== this.player) this.onPersonPositionChange?.(runtime.person.name, runtime.position);
             return;
         }
         const ratio = travel / distance;
@@ -869,6 +871,7 @@ export class MapRenderer {
         runtime.position.y += dy * ratio;
         runtime.direction = this.directionFromVector(dx, dy);
         runtime.moving = true;
+        if (runtime !== this.player) this.onPersonPositionChange?.(runtime.person.name, runtime.position);
     }
 
     private planNpcRoute(runtime: PersonRuntime, now: number): boolean {
@@ -954,10 +957,29 @@ export class MapRenderer {
         return undefined;
     }
 
-    private findTriggerAt(position: Readonly<WorldPosition>): TriggerRuntime | undefined {
+    private isTriggerInteractive(trigger: TriggerRuntime): boolean {
+        // Server trigger flags are independent: transitions commonly omit
+        // is_visible, while Client.dll 0x12039ecc still selects active
+        // transition flags 0x100 | 0x400 for minimap/interaction feedback.
+        return trigger.active && (trigger.visible || trigger.transition);
+    }
+
+    private isReferenceTrigger(trigger: TriggerRuntime): boolean {
+        const mask = this.triggerMasksByName.get(trigger.name.toLowerCase());
+        return trigger.active
+            && mask?.param1 === 5
+            && trigger.literaryName !== undefined
+            && !trigger.transition
+            && !trigger.inventoryName
+            && !trigger.scriptName
+            && (!trigger.cursorName || trigger.cursorName.toUpperCase() === "CURSOR_NORMAL");
+    }
+
+
+    private findTriggerAt(position: Readonly<WorldPosition>, includeReferences = false): TriggerRuntime | undefined {
         for (const trigger of this.triggers.values()) {
-            if (!trigger.active || !trigger.visible) continue;
-            const mask = this.levelData.triggerMasks.find((candidate) => candidate.name.toLowerCase() === trigger.name.toLowerCase());
+            if (!this.isTriggerInteractive(trigger) && !(includeReferences && this.isReferenceTrigger(trigger))) continue;
+            const mask = this.triggerMasksByName.get(trigger.name.toLowerCase());
             if (mask) {
                 const x = Math.floor(position.x - mask.position.x);
                 const y = Math.floor(position.y - mask.position.y);
@@ -1004,9 +1026,12 @@ export class MapRenderer {
             || cursor === CursorType.LUP || cursor === CursorType.RUP || cursor === CursorType.LDOWN || cursor === CursorType.RDOWN;
     }
 
-    private setHoveredTarget(kind?: HoverTargetKind, name?: string): void {
+    private setHoveredTarget(kind?: HoverTargetKind, name?: string, person?: PersonRuntime): void {
         const key = kind && name ? `${kind}:${name}` : "";
-        if (key === this.hoveredTargetKey) return;
+        const nextPerson = kind === "person" ? person : undefined;
+        const personChanged = nextPerson !== this.hoveredPerson;
+        this.hoveredPerson = nextPerson;
+        if (key === this.hoveredTargetKey && !personChanged) return;
         this.hoveredTargetKey = key;
         if (this.showHints) this.onHoverTarget?.(kind, name);
         else this.onHoverTarget?.();
@@ -1019,7 +1044,7 @@ export class MapRenderer {
             case "CURSOR_ANOTHER_LOCATION": return CursorType.ANOTHER_LOCATION;
             case "CURSOR_OPEN": return CursorType.OPEN;
             case "CURSOR_TALK": return CursorType.TALK;
-            default: return trigger.inventoryName ? CursorType.TAKE : CursorType.NORMAL;
+            default: return trigger.transition ? CursorType.ANOTHER_LOCATION : trigger.inventoryName ? CursorType.TAKE : CursorType.NORMAL;
         }
     }
 
@@ -1099,26 +1124,12 @@ export class MapRenderer {
 
     private drawPersonHighlight(frame: PersonRenderFrame, drawX: number, drawY: number, now: number): void {
         const context = this.highlightContext;
-        const target = this.ctx;
-        if (!context || !target) return;
+        if (!context) return;
         if (this.highlightCanvas.width !== frame.width) this.highlightCanvas.width = frame.width;
         if (this.highlightCanvas.height !== frame.height) this.highlightCanvas.height = frame.height;
         context.clearRect(0, 0, frame.width, frame.height);
         this.drawPersonFrame(frame, context, 0, 0);
-        context.save();
-        context.globalCompositeOperation = "source-in";
-        context.fillStyle = "rgb(255 220 96)";
-        context.fillRect(0, 0, frame.width, frame.height);
-        context.restore();
-
-        const pulse = 0.35 + (Math.sin(now / 120) + 1) * 0.12;
-        target.save();
-        target.globalAlpha = pulse;
-        target.shadowColor = "rgb(255 220 96)";
-        target.shadowBlur = 6;
-        target.globalCompositeOperation = "screen";
-        target.drawImage(this.highlightCanvas, drawX, drawY);
-        target.restore();
+        this.drawPreparedHighlight(drawX, drawY, now, false);
     }
 
     private drawPerson(runtime: PersonRuntime, now: number) {
@@ -1132,7 +1143,9 @@ export class MapRenderer {
         if (drawX + frame.width < 0 || drawY + frame.height < 0) return;
 
         this.drawPersonFrame(frame, ctx, drawX, drawY);
-        if (this.flashInteractiveObjects && runtime !== this.player) this.drawPersonHighlight(frame, drawX, drawY, now);
+        if (runtime !== this.player && this.hoveredPerson === runtime) {
+            this.drawPersonHighlight(frame, drawX, drawY, now);
+        }
         this.drawOccluders({
             x: frame.worldX,
             y: frame.worldY,
@@ -1142,7 +1155,7 @@ export class MapRenderer {
     }
 
 
-    private drawAnimation(levelAnimation: LevelAnimation, now: number) {
+    private drawAnimation(levelAnimation: LevelAnimation) {
         const animation = levelAnimation.animation;
         if (!this.ctx || !animation) return;
 
@@ -1152,16 +1165,6 @@ export class MapRenderer {
         if (x + animation.frameWidth < 0 || y + animation.frameHeight < 0) return;
 
         animation.draw(this.ctx, x, y);
-        if (this.flashInteractiveObjects && this.interactiveAnimations.has(levelAnimation)) {
-            const context = this.highlightContext;
-            if (context) {
-                if (this.highlightCanvas.width !== animation.frameWidth) this.highlightCanvas.width = animation.frameWidth;
-                if (this.highlightCanvas.height !== animation.frameHeight) this.highlightCanvas.height = animation.frameHeight;
-                context.clearRect(0, 0, animation.frameWidth, animation.frameHeight);
-                animation.draw(context, 0, 0);
-                this.tintAndDrawHighlight(x, y, animation.frameWidth, animation.frameHeight, now);
-            }
-        }
         this.drawOccluders({
             x: levelAnimation.position.x,
             y: levelAnimation.position.y,
@@ -1171,114 +1174,27 @@ export class MapRenderer {
     }
 
     private refreshInteractiveVisuals(): void {
-        const statics = new Set<LevelStatic>();
-        const animations = new Set<LevelAnimation>();
-        const backgrounds: BackgroundSpriteHighlight[] = [];
         const triggerMasks: LevelTriggerMask[] = [];
-        const distanceToBounds = (point: Readonly<WorldPosition>, x: number, y: number, width: number, height: number): number => {
-            const dx = Math.max(x - point.x, 0, point.x - (x + width));
-            const dy = Math.max(y - point.y, 0, point.y - (y + height));
-            return Math.hypot(dx, dy);
-        };
-
         for (const trigger of this.levelData.sefData.triggers) {
-            if (!trigger.inventoryName) continue;
+            if (!trigger.inventoryName && !trigger.isTransition) continue;
             const runtime = this.triggers.get(trigger.name);
-            if (runtime && (!runtime.active || !runtime.visible)) continue;
-            const exactMask = this.levelData.triggerMasks.find(
-                (candidate) => candidate.name.toLowerCase() === trigger.name.toLowerCase(),
-            );
-            if (exactMask) {
-                triggerMasks.push(exactMask);
-                continue;
-            }
-            const points: WorldPosition[] = [];
-            if (trigger.cellsName) {
-                for (const cell of this.levelData.sefData.cellGroups[trigger.cellsName] ?? []) points.push(cellToWorld(cell));
-            }
-            if (points.length === 0) continue;
-
-            let closestStatic: LevelStatic | undefined;
-            let closestAnimation: LevelAnimation | undefined;
-            let closestDistance = Number.POSITIVE_INFINITY;
-            for (const levelStatic of this.levelData.levelStatics) {
-                if (!levelStatic.image || this.doorsByStatic.has(levelStatic)) continue;
-                const distance = Math.min(...points.map((point) => distanceToBounds(
-                    point, levelStatic.position.x, levelStatic.position.y, levelStatic.image!.width, levelStatic.image!.height,
-                )));
-                if (distance < closestDistance) {
-                    closestDistance = distance;
-                    closestStatic = levelStatic;
-                    closestAnimation = undefined;
-                }
-            }
-            for (const levelAnimation of this.levelData.levelAnimations) {
-                const animation = levelAnimation.animation;
-                if (!animation || animation.frameWidth <= 0 || animation.frameHeight <= 0) continue;
-                const distance = Math.min(...points.map((point) => distanceToBounds(
-                    point, levelAnimation.position.x, levelAnimation.position.y, animation.frameWidth, animation.frameHeight,
-                )));
-                if (distance < closestDistance) {
-                    closestDistance = distance;
-                    closestStatic = undefined;
-                    closestAnimation = levelAnimation;
-                }
-            }
-            if (closestDistance <= WORLD_CELL_HEIGHT * 2) {
-                if (closestStatic) statics.add(closestStatic);
-                if (closestAnimation) animations.add(closestAnimation);
-                continue;
-            }
-
-            const description = this.levelData.lvlData.triggerDescription.find(
-                (candidate) => candidate.name.toLowerCase() === trigger.name.toLowerCase(),
-            );
-            if (!description) continue;
-            const anchor = points[0];
-            const width = Math.min(180, Math.max(48, Math.abs(anchor.x - description.position.x) + 32));
-            const height = Math.min(180, Math.max(48, Math.abs(anchor.y - description.position.y)));
-            backgrounds.push({
-                x: description.position.x,
-                y: description.position.y,
-                width,
-                height,
-                centerX: width / 2,
-                centerY: height * 0.55,
-            });
+            if (runtime && !this.isTriggerInteractive(runtime)) continue;
+            const exactMask = this.triggerMasksByName.get(trigger.name.toLowerCase());
+            if (exactMask) triggerMasks.push(exactMask);
         }
-        this.interactiveStatics = statics;
-        this.interactiveAnimations = animations;
-        this.interactiveBackgrounds = backgrounds;
         this.interactiveTriggerMasks = triggerMasks;
     }
 
-    private tintAndDrawHighlight(drawX: number, drawY: number, width: number, height: number, now: number, strength = 1): void {
-        const context = this.highlightContext;
+    private drawPreparedHighlight(drawX: number, drawY: number, now: number, steady: boolean): void {
         const target = this.ctx;
-        if (!context || !target) return;
-        context.save();
-        context.globalCompositeOperation = "source-in";
-        context.fillStyle = "rgb(255 220 96)";
-        context.fillRect(0, 0, width, height);
-        context.restore();
+        if (!target) return;
         target.save();
-        target.globalAlpha = (0.35 + (Math.sin(now / 120) + 1) * 0.12) * strength;
-        target.shadowColor = "rgb(255 220 96)";
-        target.shadowBlur = 6;
+        target.globalAlpha = steady ? 0.48 : 0.2 + (Math.sin(now / 120) + 1) * 0.2;
         target.globalCompositeOperation = "screen";
         target.drawImage(this.highlightCanvas, drawX, drawY);
         target.restore();
     }
 
-    private drawStaticHighlight(image: HTMLCanvasElement, drawX: number, drawY: number, now: number): void {
-        const context = this.highlightContext;
-        if (!context) return;
-        if (this.highlightCanvas.width !== image.width) this.highlightCanvas.width = image.width;
-        if (this.highlightCanvas.height !== image.height) this.highlightCanvas.height = image.height;
-        context.clearRect(0, 0, image.width, image.height);
-        context.drawImage(image, 0, 0);
-        this.tintAndDrawHighlight(drawX, drawY, image.width, image.height, now);
-    }
 
     private isStaticVisible(levelStatic: LevelStatic): boolean {
         for (const door of this.doors.values()) {
@@ -1296,7 +1212,14 @@ export class MapRenderer {
         if (x > this.canvas.width || y > this.canvas.height) return;
         if (x + image.width < 0 || y + image.height < 0) return;
         this.ctx.drawImage(image, x, y);
-        if (this.flashInteractiveObjects && this.interactiveStatics.has(levelStatic)) this.drawStaticHighlight(image, x, y, now);
+        const door = this.doorsByStatic.get(levelStatic);
+        if (door && this.hoveredTargetKey.toLowerCase() === `door:${door.name}`.toLowerCase()) {
+            if (this.highlightCanvas.width !== image.width) this.highlightCanvas.width = image.width;
+            if (this.highlightCanvas.height !== image.height) this.highlightCanvas.height = image.height;
+            this.highlightContext?.clearRect(0, 0, image.width, image.height);
+            this.highlightContext?.drawImage(image, 0, 0);
+            this.drawPreparedHighlight(x, y, now, false);
+        }
         this.drawOccluders({
             x: levelStatic.position.x,
             y: levelStatic.position.y,
@@ -1308,7 +1231,6 @@ export class MapRenderer {
     private drawOccluders(bounds: RenderBounds, anchorX: number, anchorY: number) {
         const ctx = this.ctx;
         if (!ctx) return;
-
         const occluders = this.findOccluders(bounds, anchorX, anchorY);
         if (occluders.length === 0) return;
 
@@ -1317,71 +1239,43 @@ export class MapRenderer {
         ctx.beginPath();
         ctx.rect(bounds.x - this.offset.x, bounds.y - this.offset.y, bounds.width, bounds.height);
         ctx.clip();
-        for (const maskIndex of occluders) {
+        for (const { maskIndex, alternate } of occluders) {
             const mask = this.levelData.levelMasks[maskIndex];
-            if (!mask?.foreground) continue;
-            ctx.drawImage(mask.foreground, mask.x - this.offset.x, mask.y - this.offset.y);
+            const foreground = alternate ? mask?.alternateForeground : mask?.foreground;
+            if (!foreground || !mask) continue;
+            ctx.drawImage(foreground, mask.x - this.offset.x, mask.y - this.offset.y);
         }
         ctx.restore();
     }
 
-    private findOccluders(bounds: RenderBounds, anchorX: number, anchorY: number): readonly number[] {
+    private findOccluders(bounds: RenderBounds, anchorX: number, anchorY: number): readonly NativeOccluderSelection[] {
         const header = this.levelData.lvlData.maskHDR;
-        if (header.chunks.length === 0 || header.width <= 0 || header.height <= 0) return [];
-
         const left = Math.max(0, Math.floor(bounds.x / WORLD_CHUNK_WIDTH));
         const right = Math.min(header.width - 1, Math.floor((bounds.x + Math.max(1, bounds.width) - 1) / WORLD_CHUNK_WIDTH));
         const anchorCellX = Math.floor(anchorX / WORLD_CHUNK_WIDTH);
         const anchorCellY = Math.floor(anchorY / WORLD_CHUNK_HEIGHT);
-        if (left > right || anchorCellX < 0 || anchorCellY < 0 || anchorCellX >= header.width || anchorCellY >= header.height) return [];
-
         const key = `${left}:${right}:${anchorCellX}:${anchorCellY}`;
         const cached = this.occluderCache.get(key);
         if (cached) return cached;
-
-        const indexes = new Set<number>();
-        for (let x = left; x <= right; x++) {
-            for (let slot = 0; slot < 4; slot++) {
-                const tile = this.getMaskTile(x, anchorCellY, slot);
-                if (!tile || (tile.terrain & 1) === 0 || tile.maskIndex < 0) continue;
-                if (!this.maskExtendsPastAnchor(x, anchorCellY, slot, tile.maskIndex, anchorCellX)) continue;
-                if (this.levelData.levelMasks[tile.maskIndex]?.foreground) indexes.add(tile.maskIndex);
-            }
-        }
-
-        const result = [...indexes];
+        const result = findNativeOccluders(
+            header,
+            this.levelData.levelMasks,
+            bounds,
+            anchorX,
+            anchorY,
+            this.alternateMaskTiles,
+        );
         this.occluderCache.set(key, result);
         return result;
     }
 
-    private maskExtendsPastAnchor(startX: number, startY: number, slot: number, maskIndex: number, anchorCellX: number): boolean {
-        const header = this.levelData.lvlData.maskHDR;
-        let horizontalBoundary = false;
-        for (let x = startX; x < header.width; x++) {
-            const tile = this.getMaskTile(x, startY, slot);
-            if (!this.isMatchingMask(tile, maskIndex)) break;
-            if ((tile.terrain & 2) !== 0 && anchorCellX <= x) {
-                horizontalBoundary = true;
-                break;
-            }
-        }
-        if (!horizontalBoundary) return false;
-
-        for (let y = startY; y < header.height; y++) {
-            const tile = this.getMaskTile(startX, y, slot);
-            if (!this.isMatchingMask(tile, maskIndex)) break;
-            if ((tile.terrain & 2) !== 0) return true;
-        }
-        return false;
-    }
-
-    private getMaskTile(x: number, y: number, slot: number): MHDRTile | undefined {
-        const header = this.levelData.lvlData.maskHDR;
-        return header.chunks[x * header.height + y]?.[slot];
-    }
-
-    private isMatchingMask(tile: MHDRTile | undefined, maskIndex: number): tile is MHDRTile {
-        return tile !== undefined && (tile.terrain & 1) !== 0 && tile.maskIndex === maskIndex;
+    private refreshAlternateMaskTiles(): void {
+        this.alternateMaskTiles = buildNativeAlternateMaskTiles(
+            this.levelData.lvlData.maskHDR,
+            this.levelData.levelMasks,
+            [...this.doors.values()].map(({ opened, maskCells }) => ({ opened, cells: maskCells })),
+        );
+        this.occluderCache.clear();
     }
 
 

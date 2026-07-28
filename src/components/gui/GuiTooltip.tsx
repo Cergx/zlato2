@@ -14,6 +14,7 @@ interface GuiTooltipProps {
     readonly anchor: GuiTooltipAnchor;
     readonly canvasWidth: number;
     readonly canvasHeight: number;
+    readonly fixedWidth?: number;
 }
 
 type FramePart = "main" | "top" | "bottom" | "left" | "right" | "lt" | "rt" | "lb" | "rb";
@@ -74,7 +75,7 @@ const drawFrame = (canvas: HTMLCanvasElement, images: FrameImages, width: number
     context.drawImage(images.rb, width - border, height - border);
 };
 
-export const GuiTooltip = ({ text, anchor, canvasWidth, canvasHeight }: GuiTooltipProps) => {
+export const GuiTooltip = ({ text, anchor, canvasWidth, canvasHeight, fixedWidth }: GuiTooltipProps) => {
     const elementRef = useRef<HTMLDivElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [frameImages, setFrameImages] = useState<FrameImages | null>(null);
@@ -103,11 +104,12 @@ export const GuiTooltip = ({ text, anchor, canvasWidth, canvasHeight }: GuiToolt
         });
         const frameCanvas = canvasRef.current;
         if (frameCanvas && frameImages) drawFrame(frameCanvas, frameImages, tooltipWidth, tooltipHeight);
-    }, [anchor, canvasHeight, canvasWidth, frameImages, text]);
+    }, [anchor, canvasHeight, canvasWidth, fixedWidth, frameImages, text]);
 
     return <div ref={elementRef} className={styles.tooltip} role="tooltip" data-gui-tooltip="true"
-        style={{ left: `${position.left}px`, top: `${position.top}px`, pointerEvents: "none" }}>
+        style={{ left: `${position.left}px`, top: `${position.top}px`, pointerEvents: "none",
+            ...(fixedWidth === undefined ? {} : { width: fixedWidth, minWidth: fixedWidth, maxWidth: fixedWidth }) }}>
         <canvas ref={canvasRef} className={styles.canvas} aria-hidden="true" />
-        <span className={styles.text}>{text}</span>
+        <span className={styles.text} style={fixedWidth === undefined ? undefined : { maxWidth: fixedWidth - 40 }}>{text}</span>
     </div>;
 };

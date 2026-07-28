@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import {
     REST_MENU_BACKGROUND_RECT,
     REST_MENU_CALENDAR_RECT,
@@ -40,7 +40,19 @@ const clockText = (elapsedMinutes: number): string => {
 
 export const RelaxPanel = ({ game, onClose }: RelaxPanelProps) => {
     const [periodIndex, setPeriodIndex] = useState(0);
-    const currentClock = useMemo(() => clockText(game.getRuntimeSnapshot()?.elapsedMinutes ?? 0), [game]);
+    const [currentClock, setCurrentClock] = useState(() => clockText(game.getRuntimeSnapshot()?.elapsedMinutes ?? 0));
+    const [resting, setResting] = useState(() => game.getRestState().active);
+    useEffect(() => {
+        const updateClock = (elapsedMinutes: number): void => setCurrentClock(clockText(elapsedMinutes));
+        updateClock(game.getRuntimeSnapshot()?.elapsedMinutes ?? 0);
+        return game.subscribeClock(updateClock);
+    }, [game]);
+    useEffect(() => game.subscribeRest((state) => {
+        setResting((wasResting) => {
+            if (wasResting && !state.active) onClose();
+            return state.active;
+        });
+    }), [game, onClose]);
     const periodMinutes = REST_MENU_PERIOD_MINUTES[periodIndex];
     return (
         <section className={styles.overlay} aria-label="Ожидание">
@@ -57,13 +69,10 @@ export const RelaxPanel = ({ game, onClose }: RelaxPanelProps) => {
             <OriginalGuiLayer
                 script="relax"
                 onAction={(object) => {
-                    if (object.id === 1) setPeriodIndex((value) => Math.max(0, value - 1));
-                    if (object.id === 2) setPeriodIndex((value) => Math.min(REST_MENU_PERIOD_MINUTES.length - 1, value + 1));
-                    if (object.id === 3) {
-                        game.rest(periodMinutes);
-                        onClose();
-                    }
-                    if (object.id === 4) onClose();
+                    if (object.id === 1 && !resting) setPeriodIndex((value) => Math.max(0, value - 1));
+                    if (object.id === 2 && !resting) setPeriodIndex((value) => Math.min(REST_MENU_PERIOD_MINUTES.length - 1, value + 1));
+                    if (object.id === 3 && !resting) game.rest(periodMinutes);
+                    if (object.id === 4 && !game.cancelRest()) onClose();
                 }}
             />
         </section>

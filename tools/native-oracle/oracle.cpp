@@ -2,6 +2,8 @@
 // Build in a Win32 developer prompt, never an x64 prompt:
 //   call "%ProgramFiles(x86)%\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars32.bat"
 //   cl /nologo /EHsc /W4 /O2 oracle.cpp bcrypt.lib gdi32.lib /link /MACHINE:X86 /SUBSYSTEM:CONSOLE
+// Or build with LLVM-MinGW:
+//   i686-w64-mingw32-clang++ oracle.cpp -std=c++17 -O2 -Wall -Wextra -municode -static -o native-oracle.exe -lbcrypt -lgdi32
 // The source hard-fails outside x86 because the recovered ABI is i386 __cdecl/__thiscall.
 // It loads the exact shipped DLLs, verifies SHA-256, captures API-table writes,
 // and exposes a fail-closed HostAPI table. It intentionally does not launch
@@ -56,13 +58,16 @@ const ModuleSpec kClient = {
 #if defined(_MSC_VER)
 #define ORACLE_THISCALL __thiscall
 #define ORACLE_CDECL __cdecl
+#define ORACLE_STDCALL __stdcall
 #else
 #define ORACLE_THISCALL __attribute__((thiscall))
 #define ORACLE_CDECL __attribute__((cdecl))
+#define ORACLE_STDCALL __attribute__((stdcall))
 #endif
 
 using GetApi = void (__cdecl*)(void*, void*);
 using Initializer = void (__cdecl*)(void);
+using NativeAgeEvaluate = double (ORACLE_THISCALL*)(void*, void*);
 
 HMODULE g_server = nullptr;
 struct OracleResource {
@@ -78,6 +83,19 @@ std::vector<std::string> g_userInterfaceSdb;
 std::vector<uint8_t> g_userInterfaceSdbPresent;
 bool g_userInterfaceSdbAttempted = false;
 bool g_userInterfaceSdbValid = false;
+bool g_captureAgeNodeAllocations = false;
+std::vector<uintptr_t> g_ageNodeAllocations;
+NativeAgeEvaluate g_nativeAgeEvaluate = nullptr;
+NativeAgeEvaluate g_nativeAgeArgumentEvaluate = nullptr;
+bool g_nativeTraceIsScr = false;
+bool g_nativeAgeTraceEnabled = false;
+unsigned g_nativeAgeTraceTurn = 0;
+unsigned g_nativeAgeTraceDepth = 0;
+unsigned g_nativeAgeEvaluationSequence = 0;
+unsigned g_nativeAgeFlowStep = 0;
+bool g_nativeSawScrCall = false;
+double g_nativeLastScrCallResult = 0;
+std::vector<double> g_nativeScrCallResults;
 
 std::string narrowPath(const wchar_t* value) {
     std::string result;
@@ -372,6 +390,14 @@ void printModulePointer(uintptr_t pointer) {
 bool g_quietHostStubs = false;
 bool g_probeConfigObject = false;
 bool g_invokeNativeDialog = false;
+bool g_invokeNativeScr = false;
+bool g_invokeNativeScrCore = false;
+bool g_invokeNativeScrCoreReal = false;
+bool g_invokeNativeScrTrigger = false;
+bool g_invokeNativeScrEffect = false;
+bool g_invokeNativeLevel = false;
+unsigned g_nativeScrCommandCount = 0;
+unsigned g_nativeScrHostCallCount = 0;
 
 void logHostCall(unsigned slot) {
     if (g_quietHostStubs) return;
@@ -409,6 +435,9 @@ HBITMAP g_probeSurfaceBitmap = nullptr;
 HGDIOBJ g_probeSurfacePreviousBitmap = nullptr;
 uintptr_t g_clientGlobalVtable[64]{};
 uintptr_t g_clientGlobalObject[0x200]{};
+static uintptr_t ORACLE_CDECL serverGlobalServiceMethod() {
+    return reinterpret_cast<uintptr_t>(g_hostResultObject);
+}
 static uintptr_t ORACLE_THISCALL clientGlobalNoArg(void*) {
     fprintf(stderr, "oracle_client_global_noarg return=0x%Ix\n", reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
     return 0;
@@ -449,14 +478,17 @@ static uintptr_t ORACLE_THISCALL hostObjectMethodOneArg(void*, uintptr_t output)
     if (output) *reinterpret_cast<uintptr_t*>(output) = static_cast<uintptr_t>(GetTickCount());
     return 0;
 }
-// The first forwarded word is provisionally treated as a size-or-tag value; native ownership is unconfirmed.
+// Server wrapper 0x140057cc forwards its first argument as the allocation size.
 static uintptr_t ORACLE_THISCALL hostObjectAllocateMethod(void*, uintptr_t requestedSizeOrTag, uintptr_t, uintptr_t) {
     logHostCall(1);
-    constexpr size_t kMinimumAllocationSize = 0x10000;
+    constexpr size_t kFallbackAllocationSize = 0x10000;
     const size_t requested = requestedSizeOrTag;
-    const size_t size = requested >= kMinimumAllocationSize && requested <= 0x1000000
-        ? requested : kMinimumAllocationSize;
+    const size_t size = requested > 0 && requested <= 0x1000000
+        ? requested : kFallbackAllocationSize;
     void* memory = calloc(1, size);
+    if (g_captureAgeNodeAllocations && requestedSizeOrTag == 0x50) {
+        g_ageNodeAllocations.push_back(reinterpret_cast<uintptr_t>(memory));
+    }
     if (!g_quietHostStubs) fprintf(stderr, "oracle_allocate requested=0x%Ix result=0x%Ix return=0x%Ix\n", requestedSizeOrTag, reinterpret_cast<uintptr_t>(memory), reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
     if (g_client != nullptr && g_resources.size() >= 0xF && requestedSizeOrTag > 0x70000 && g_probeObject[0] != 0) {
         const uintptr_t state = *reinterpret_cast<const uintptr_t*>(reinterpret_cast<uintptr_t>(g_client) + 0x10fd04);
@@ -785,6 +817,109 @@ uintptr_t g_clientShortObjectVtable[64]{};
 uintptr_t g_clientShortObject[64]{};
 uintptr_t g_clientResourceObjectVtable[64]{};
 uintptr_t g_clientResourceObject[64]{};
+uintptr_t g_serverLevelServiceVtable[64]{};
+uintptr_t g_serverLevelService[1]{};
+uintptr_t g_serverWorldServiceVtable[64]{};
+uintptr_t g_serverWorldService[1]{};
+uintptr_t g_serverLookupServiceVtable[64]{};
+uintptr_t g_serverLookupService[1]{};
+uintptr_t g_serverPersonLookupServiceVtable[64]{};
+uintptr_t g_serverPersonLookupService[1]{};
+uintptr_t g_serverEntityServiceVtable[64]{};
+uintptr_t g_serverEntityService[1]{};
+uintptr_t g_serverDescriptorServiceVtable[64]{};
+uintptr_t g_serverDescriptorService[1]{};
+uintptr_t g_serverItemServiceVtable[64]{};
+uintptr_t g_serverItemService[1]{};
+
+static uintptr_t ORACLE_THISCALL serverLevelModeMethod(void*) {
+    return 0;
+}
+static uintptr_t ORACLE_THISCALL serverLevelDimensionsMethod(void*, uintptr_t output) {
+    if (!output) return 0;
+    auto values = reinterpret_cast<uint32_t*>(output);
+    values[0] = 230;
+    values[1] = 224;
+    printf("{\"event\":\"native_level_dimensions\",\"width\":230,\"height\":224}\n");
+    return 0;
+}
+static uintptr_t ORACLE_THISCALL serverLevelSelectMethod(void*, uintptr_t levelName) {
+    printf("{\"event\":\"native_level_select\",\"level\":\"%s\"}\n",
+        levelName ? reinterpret_cast<const char*>(levelName) : "");
+    return 0;
+}
+static uintptr_t ORACLE_THISCALL serverLevelFindTriggerMethod(void*, uintptr_t) {
+    return 0;
+}
+static uintptr_t ORACLE_THISCALL serverLevelResolveTriggerMethod(void*, uintptr_t) {
+    static uint8_t descriptor[0x200]{};
+    return reinterpret_cast<uintptr_t>(descriptor);
+}
+static uintptr_t ORACLE_THISCALL serverLevelTriggerBaseMethod(void*) {
+    static uint8_t triggerBase[0x1000]{};
+    return reinterpret_cast<uintptr_t>(triggerBase);
+}
+static uintptr_t ORACLE_THISCALL serverLevelRootMethod(void*) {
+    static const char levelRoot[] = "levels\\single\\L1_1";
+    return reinterpret_cast<uintptr_t>(levelRoot);
+}
+static uintptr_t ORACLE_THISCALL serverLevelCellRowsMethod(void*) {
+    static uintptr_t rows[4096]{};
+    static uint8_t cells[4096 * 8]{};
+    if (rows[0] == 0) {
+        for (uintptr_t& row : rows) row = reinterpret_cast<uintptr_t>(cells);
+    }
+    return reinterpret_cast<uintptr_t>(rows);
+}
+static uintptr_t ORACLE_THISCALL serverWorldLookupMethod(void*, uintptr_t first, uintptr_t second) {
+    printf("{\"event\":\"native_world_service\",\"method\":\"lookup\","
+        "\"first\":\"0x%Ix\",\"second\":\"0x%Ix\"}\n", first, second);
+    return UINTPTR_MAX;
+}
+static uintptr_t ORACLE_THISCALL serverWorldRefreshMethod(void*) {
+    printf("{\"event\":\"native_world_service\",\"method\":\"refresh\"}\n");
+    return 0;
+}
+static uintptr_t ORACLE_THISCALL serverWorldDestroyMethod(void*, uintptr_t value) {
+    printf("{\"event\":\"native_world_service\",\"method\":\"destroy\","
+        "\"value\":\"0x%Ix\"}\n", value);
+    return 0;
+}
+static uintptr_t ORACLE_THISCALL serverLookupMissMethod(void*, uintptr_t, uintptr_t) {
+    return 0;
+}
+static uintptr_t ORACLE_THISCALL serverLookupFirstMethod(void*, uintptr_t, uintptr_t output) {
+    if (output) *reinterpret_cast<uint32_t*>(output) = 0;
+    return 1;
+}
+static uintptr_t ORACLE_THISCALL serverRegisterEntityMethod(void*, uintptr_t, uintptr_t) {
+    auto entity = static_cast<uint8_t*>(calloc(1, 0x600));
+    auto animationRecords = static_cast<uint32_t*>(calloc(32, sizeof(uint32_t)));
+    auto occupiedCells = static_cast<int32_t*>(calloc(2, sizeof(int32_t)));
+    if (!entity || !animationRecords || !occupiedCells) fail("native_level_entity_allocation_failed");
+    *reinterpret_cast<uint32_t*>(entity + 0x18c) = 32;
+    for (size_t index = 0; index < 32; ++index) {
+        animationRecords[index] = 0x11;
+        *reinterpret_cast<uintptr_t*>(entity + 0x190 + index * sizeof(uintptr_t)) =
+            reinterpret_cast<uintptr_t>(&animationRecords[index]);
+    }
+    *reinterpret_cast<uint32_t*>(entity + 0x210) = 1;
+    *reinterpret_cast<uintptr_t*>(entity + 0x214) = reinterpret_cast<uintptr_t>(occupiedCells);
+    return reinterpret_cast<uintptr_t>(entity);
+}
+static uintptr_t ORACLE_THISCALL serverResolveDescriptorMethod(void*, uintptr_t) {
+    static uint8_t descriptor[0x200]{};
+    return reinterpret_cast<uintptr_t>(descriptor);
+}
+static uintptr_t ORACLE_THISCALL serverFindItemMethod(void*, uintptr_t, uintptr_t) {
+    return 1;
+}
+static uintptr_t ORACLE_THISCALL serverResolveItemMethod(void*, uintptr_t) {
+    static uint8_t item[0x80]{};
+    *reinterpret_cast<uint32_t*>(item + 0x30) = 1000;
+    return reinterpret_cast<uintptr_t>(item);
+}
+
 
 constexpr size_t kHostObjectVtableSlots = sizeof(g_hostObjectVtable) / sizeof(g_hostObjectVtable[0]);
 static_assert(sizeof(kObjectMethod3) / sizeof(kObjectMethod3[0]) == kHostObjectVtableSlots,
@@ -805,8 +940,53 @@ void initializeHostObjectFacade() {
     g_hostShortObject[0] = reinterpret_cast<uintptr_t>(g_hostShortObjectVtable);
     if (g_probeConfigObject) g_hostObjectVtable[2] = reinterpret_cast<uintptr_t>(&hostObjectFreeSuccessMethod);
     g_hostObject[0] = reinterpret_cast<uintptr_t>(g_hostObjectVtable);
+    for (size_t index = 0; index < kHostObjectVtableSlots; ++index) {
+        g_serverLevelServiceVtable[index] = g_hostObjectVtable[index];
+        g_serverWorldServiceVtable[index] = g_hostObjectVtable[index];
+        g_serverLookupServiceVtable[index] = g_hostObjectVtable[index];
+        g_serverPersonLookupServiceVtable[index] = g_hostObjectVtable[index];
+        g_serverEntityServiceVtable[index] = g_hostObjectVtable[index];
+        g_serverDescriptorServiceVtable[index] = g_hostObjectVtable[index];
+        g_serverItemServiceVtable[index] = g_hostObjectVtable[index];
+    }
+    g_serverLevelServiceVtable[0] = reinterpret_cast<uintptr_t>(&serverLevelModeMethod);
+    g_serverLevelServiceVtable[0x0c / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(&serverLevelFindTriggerMethod);
+    g_serverLevelServiceVtable[0x1c / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(&serverLevelResolveTriggerMethod);
+    g_serverLevelServiceVtable[0x34 / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(&serverLevelTriggerBaseMethod);
+    g_serverLevelServiceVtable[0x58 / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(&serverLevelRootMethod);
+    g_serverLevelServiceVtable[0x5c / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(&serverLevelCellRowsMethod);
+    g_serverLevelServiceVtable[0x48 / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(&serverLevelDimensionsMethod);
+    g_serverLevelServiceVtable[0x7c / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(&serverLevelSelectMethod);
+    g_serverLevelService[0] = reinterpret_cast<uintptr_t>(g_serverLevelServiceVtable);
+    g_serverWorldServiceVtable[0] = reinterpret_cast<uintptr_t>(&serverWorldLookupMethod);
+    g_serverWorldServiceVtable[1] = reinterpret_cast<uintptr_t>(&serverWorldLookupMethod);
+    g_serverWorldServiceVtable[2] = reinterpret_cast<uintptr_t>(&serverWorldRefreshMethod);
+    g_serverWorldServiceVtable[3] = reinterpret_cast<uintptr_t>(&serverWorldDestroyMethod);
+    g_serverWorldService[0] = reinterpret_cast<uintptr_t>(g_serverWorldServiceVtable);
+    g_serverLookupServiceVtable[0x2c / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(&serverLookupMissMethod);
+    g_serverLookupService[0] = reinterpret_cast<uintptr_t>(g_serverLookupServiceVtable);
+    g_serverPersonLookupServiceVtable[0x2c / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(&serverLookupFirstMethod);
+    g_serverPersonLookupService[0] = reinterpret_cast<uintptr_t>(g_serverPersonLookupServiceVtable);
+    g_serverDescriptorServiceVtable[0x18 / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(&serverResolveDescriptorMethod);
+    g_serverDescriptorService[0] = reinterpret_cast<uintptr_t>(g_serverDescriptorServiceVtable);
+    g_serverEntityServiceVtable[0x10 / sizeof(uintptr_t)] =
+        reinterpret_cast<uintptr_t>(&serverRegisterEntityMethod);
+    g_serverEntityService[0] = reinterpret_cast<uintptr_t>(g_serverEntityServiceVtable);
+    g_serverItemServiceVtable[0] = reinterpret_cast<uintptr_t>(&serverFindItemMethod);
+    g_serverItemServiceVtable[3] = reinterpret_cast<uintptr_t>(&serverResolveItemMethod);
+    g_serverItemService[0] = reinterpret_cast<uintptr_t>(g_serverItemServiceVtable);
     g_hostResultObject[0] = reinterpret_cast<uintptr_t>(g_hostObjectVtable);
-    g_hostResultObject[0x8c / sizeof(uintptr_t)] = 1;
+    g_hostResultObject[0x8c / sizeof(uintptr_t)] = g_invokeNativeLevel ? 0 : 1;
     for (size_t index = 0; index < kHostObjectVtableSlots; ++index) g_clientShortObjectVtable[index] = g_hostShortObjectVtable[index];
     g_clientShortObject[0] = reinterpret_cast<uintptr_t>(g_clientShortObjectVtable);
     if (g_probeConfigObject) g_clientShortObjectVtable[1] = reinterpret_cast<uintptr_t>(&hostShortCheckMethod);
@@ -996,15 +1176,851 @@ void dumpApi(const wchar_t* label, const uintptr_t* table, HMODULE module) {
         printf("\"}\n");
     }
 }
-using NativeScriptFunction = double (__cdecl*)(void);
-void traceNativeScriptFunction(HMODULE module, const char* name, uintptr_t rva) {
-    const uintptr_t address = reinterpret_cast<uintptr_t>(module) + rva;
-    const double result = reinterpret_cast<NativeScriptFunction>(address)();
-    printf("{\"event\":\"native_script_function\",\"name\":\"%s\",\"address\":\"0x%Ix\",\"result\":%.17g}\n", name, address, result);
+using NativeAllocate = void* (ORACLE_CDECL*)(size_t, size_t, uintptr_t, uintptr_t);
+using NativeAgeContextConstructor = void* (ORACLE_THISCALL*)(void*);
+using NativeAgeLoader = int (ORACLE_THISCALL*)(void*, const unsigned char*, uint32_t, void*, uintptr_t, uintptr_t);
+using NativeContextEvaluate = void (ORACLE_THISCALL*)(void*, void*);
+using NativeContextDestroy = void (ORACLE_THISCALL*)(void*);
+using NativeFree = void (ORACLE_CDECL*)(void*);
+using NativeAddVariable = int32_t (ORACLE_THISCALL*)(void*, const char*, int32_t, double);
+using NativeSetNumericVariable = void (ORACLE_THISCALL*)(void*, const char*, double);
+using NativeDialogueRebuild = void (ORACLE_THISCALL*)(void*);
+using NativeDialogueClose = void (ORACLE_THISCALL*)(void*);
+using NativeClientDialogueApply = void (ORACLE_THISCALL*)(void*, const void*);
+using NativeClientDialoguePoll = uint32_t (ORACLE_THISCALL*)(void*);
+
+int32_t nativeAgeRecordIndex(uintptr_t node) {
+    if (!node) return -1;
+    for (size_t index = 0; index < g_ageNodeAllocations.size(); ++index) {
+        if (g_ageNodeAllocations[index] == node) return static_cast<int32_t>(index);
+    }
+    fail("native_age_node_pointer_not_mapped");
+    return -1;
 }
-void invokeNativeDialogFunction(HMODULE module) {
-    traceNativeScriptFunction(module, "D_Say", 0x3fc10);
-    traceNativeScriptFunction(module, "D_Answer", 0x3fc60);
+
+double ORACLE_THISCALL tracedNativeAgeEvaluate(void* program, void* nodePointer) {
+    if (!g_nativeAgeEvaluate) fail("native_age_evaluator_not_installed");
+    if (!g_nativeAgeTraceEnabled) return g_nativeAgeEvaluate(program, nodePointer);
+
+    const unsigned depth = g_nativeAgeTraceDepth;
+    g_nativeAgeTraceDepth += 1;
+    const uintptr_t node = reinterpret_cast<uintptr_t>(nodePointer);
+    const int32_t record = nativeAgeRecordIndex(node);
+    const double result = g_nativeAgeEvaluate(program, nodePointer);
+    g_nativeAgeTraceDepth -= 1;
+    const unsigned sequence = ++g_nativeAgeEvaluationSequence;
+    const uint32_t kind = *reinterpret_cast<const uint32_t*>(node + 0x3c);
+    if (g_nativeTraceIsScr && kind == 48) {
+        g_nativeSawScrCall = true;
+        g_nativeLastScrCallResult = result;
+        g_nativeScrCallResults.push_back(result);
+    }
+    if (g_nativeTraceIsScr) {
+        printf("{\"event\":\"native_scr_evaluation\",\"turn\":%u,\"sequence\":%u,"
+            "\"depth\":%u,\"record\":%ld,\"kind\":%lu,\"result\":%.17g}\n",
+            g_nativeAgeTraceTurn, sequence, depth, static_cast<long>(record),
+            static_cast<unsigned long>(kind), result);
+    } else {
+        printf("{\"event\":\"native_age_evaluation\",\"turn\":%u,\"sequence\":%u,"
+            "\"depth\":%u,\"record\":%ld,\"result\":%.17g}\n",
+            g_nativeAgeTraceTurn, sequence, depth, static_cast<long>(record), result);
+    }
+
+    if (depth == 0) {
+        const bool requestedExit = *reinterpret_cast<const uint32_t*>(
+            reinterpret_cast<uintptr_t>(g_server) + 0x88dd8) != 0;
+        const bool zeroBranch = result == 0.0;
+        const uintptr_t successor = *reinterpret_cast<const uintptr_t*>(
+            node + (zeroBranch ? 0x08 : 0x0c));
+        const int32_t successorRecord = nativeAgeRecordIndex(successor);
+        const unsigned step = ++g_nativeAgeFlowStep;
+        printf("{\"event\":\"%s\",\"turn\":%u,\"step\":%u,\"record\":%ld,"
+            "\"result\":%.17g,\"branch\":\"%s\",\"successor\":%ld,\"exit\":%s}\n",
+            g_nativeTraceIsScr ? "native_scr_node" : "native_age_node",
+            g_nativeAgeTraceTurn, step, static_cast<long>(record), result,
+            zeroBranch ? "zero" : "nonzero", static_cast<long>(successorRecord),
+            requestedExit ? "true" : "false");
+    }
+    return result;
+}
+double ORACLE_THISCALL tracedNativeAgeArgumentEvaluate(void* program, void* nodePointer) {
+    if (!g_nativeAgeArgumentEvaluate) fail("native_age_argument_evaluator_not_installed");
+    if (!g_nativeAgeTraceEnabled) return g_nativeAgeArgumentEvaluate(program, nodePointer);
+
+    const unsigned depth = g_nativeAgeTraceDepth;
+    g_nativeAgeTraceDepth += 1;
+    const uintptr_t node = reinterpret_cast<uintptr_t>(nodePointer);
+    const int32_t record = nativeAgeRecordIndex(node);
+    const double result = g_nativeAgeArgumentEvaluate(program, nodePointer);
+    g_nativeAgeTraceDepth -= 1;
+    const unsigned sequence = ++g_nativeAgeEvaluationSequence;
+    const uint32_t kind = *reinterpret_cast<const uint32_t*>(node + 0x3c);
+    if (g_nativeTraceIsScr && kind == 48) {
+        g_nativeSawScrCall = true;
+        g_nativeLastScrCallResult = result;
+        g_nativeScrCallResults.push_back(result);
+    }
+    if (g_nativeTraceIsScr) {
+        printf("{\"event\":\"native_scr_evaluation\",\"turn\":%u,\"sequence\":%u,"
+            "\"depth\":%u,\"record\":%ld,\"kind\":%lu,\"result\":%.17g}\n",
+            g_nativeAgeTraceTurn, sequence, depth, static_cast<long>(record),
+            static_cast<unsigned long>(kind), result);
+    } else {
+        printf("{\"event\":\"native_age_evaluation\",\"turn\":%u,\"sequence\":%u,"
+            "\"depth\":%u,\"record\":%ld,\"result\":%.17g}\n",
+            g_nativeAgeTraceTurn, sequence, depth, static_cast<long>(record), result);
+    }
+    return result;
+}
+
+
+void installNativeAgeEvaluatorTrace(HMODULE module) {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(module);
+    const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+    const auto patchCalls = [&](uintptr_t target, uintptr_t replacement) {
+        unsigned patched = 0;
+        const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+        for (unsigned sectionIndex = 0; sectionIndex < nt->FileHeader.NumberOfSections; ++sectionIndex, ++section) {
+            if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) continue;
+            const uintptr_t start = base + section->VirtualAddress;
+            const size_t size = section->Misc.VirtualSize;
+            for (size_t offset = 0; offset + 5 <= size; ++offset) {
+                const uintptr_t callsite = start + offset;
+                if (*reinterpret_cast<const uint8_t*>(callsite) != 0xe8) continue;
+                int32_t displacement = 0;
+                memcpy(&displacement, reinterpret_cast<const void*>(callsite + 1), sizeof(displacement));
+                if (callsite + 5 + displacement != target) continue;
+                const int64_t relative = static_cast<int64_t>(replacement) - static_cast<int64_t>(callsite + 5);
+                if (relative < -0x80000000LL || relative > 0x7fffffffLL) {
+                    fail("native_age_trace_call_out_of_range");
+                }
+                DWORD oldProtect = 0;
+                if (!VirtualProtect(reinterpret_cast<void*>(callsite), 5, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+                    fail("native_age_trace_protect_failed");
+                }
+                const int32_t replacementDisplacement = static_cast<int32_t>(relative);
+                memcpy(reinterpret_cast<void*>(callsite + 1), &replacementDisplacement, sizeof(replacementDisplacement));
+                FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<const void*>(callsite), 5);
+                DWORD ignoredProtect = 0;
+                VirtualProtect(reinterpret_cast<void*>(callsite), 5, oldProtect, &ignoredProtect);
+                patched += 1;
+                offset += 4;
+            }
+        }
+        return patched;
+    };
+
+    g_nativeAgeEvaluate = reinterpret_cast<NativeAgeEvaluate>(base + 0x3a010);
+    g_nativeAgeArgumentEvaluate = reinterpret_cast<NativeAgeEvaluate>(base + 0x3a914);
+    const unsigned evaluatorCallsites = patchCalls(
+        reinterpret_cast<uintptr_t>(g_nativeAgeEvaluate),
+        reinterpret_cast<uintptr_t>(&tracedNativeAgeEvaluate));
+    const unsigned argumentCallsites = patchCalls(
+        reinterpret_cast<uintptr_t>(g_nativeAgeArgumentEvaluate),
+        reinterpret_cast<uintptr_t>(&tracedNativeAgeArgumentEvaluate));
+    printf("{\"event\":\"native_age_evaluator_hooks\",\"evaluatorCallsites\":%u,"
+        "\"argumentCallsites\":%u}\n", evaluatorCallsites, argumentCallsites);
+    if (evaluatorCallsites != 44 || argumentCallsites != 46) {
+        fail("native_age_trace_callsite_count_mismatch");
+    }
+}
+
+void beginNativeAgeTrace(unsigned turn) {
+    g_nativeAgeTraceTurn = turn;
+    g_nativeAgeTraceDepth = 0;
+    g_nativeAgeEvaluationSequence = 0;
+    g_nativeAgeFlowStep = 0;
+    g_nativeAgeTraceEnabled = true;
+}
+
+void endNativeAgeTrace() {
+    g_nativeAgeTraceEnabled = false;
+    printf("{\"event\":\"%s\",\"turn\":%u,\"evaluations\":%u,\"flowNodes\":%u}\n",
+        g_nativeTraceIsScr ? "native_scr_trace_summary" : "native_age_trace_summary",
+        g_nativeAgeTraceTurn, g_nativeAgeEvaluationSequence, g_nativeAgeFlowStep);
+}
+
+
+
+void appendDialogueByte(std::vector<uint8_t>* bytes, uint32_t value) {
+    bytes->push_back(static_cast<uint8_t>(value));
+}
+
+void appendDialogueUint16(std::vector<uint8_t>* bytes, uint32_t value) {
+    appendDialogueByte(bytes, value);
+    appendDialogueByte(bytes, value >> 8);
+}
+
+void appendDialogueUint32(std::vector<uint8_t>* bytes, uint32_t value) {
+    appendDialogueByte(bytes, value);
+    appendDialogueByte(bytes, value >> 8);
+    appendDialogueByte(bytes, value >> 16);
+    appendDialogueByte(bytes, value >> 24);
+}
+
+void emitDialoguePacketBytes(const char* direction, const char* turn, const std::vector<uint8_t>& bytes) {
+    printf("{\"event\":\"native_dialogue_packet\",\"direction\":\"%s\",\"turn\":\"%s\","
+        "\"opcode\":%u,\"byteLength\":%lu,\"bytes\":\"",
+        direction, turn, bytes.empty() ? 0 : bytes[0], static_cast<unsigned long>(bytes.size()));
+    for (uint8_t byte : bytes) printf("%02x", byte);
+    printf("\"}\n");
+}
+
+std::vector<uint8_t> encodeNativeDialogueSnapshotPacket(uintptr_t dialog) {
+    const uint32_t updateCounter = *reinterpret_cast<const uint32_t*>(dialog + 0x04);
+    const uint32_t phraseId = *reinterpret_cast<const uint32_t*>(dialog + 0x08);
+    const uint32_t replyCount = *reinterpret_cast<const uint32_t*>(dialog + 0x0c);
+    const uint32_t context = *reinterpret_cast<const uint32_t*>(dialog + 0x10);
+    const uint32_t owner = *reinterpret_cast<const uint32_t*>(dialog + 0x14);
+    if (replyCount > 40) fail("native_dialogue_reply_count_out_of_range");
+    const uint8_t substitutionLength = *reinterpret_cast<const uint8_t*>(dialog + 0xb8);
+    const char* voice = reinterpret_cast<const char*>(dialog + 0x1bc);
+    size_t voiceLength = 0;
+    while (voiceLength < 0x104 && voice[voiceLength]) ++voiceLength;
+    if (voiceLength > 0xff) fail("native_dialogue_voice_length_out_of_range");
+
+    std::vector<uint8_t> bytes;
+    bytes.reserve(15 + replyCount * 2 + substitutionLength + voiceLength);
+    appendDialogueByte(&bytes, 12);
+    appendDialogueUint32(&bytes, updateCounter);
+    appendDialogueUint16(&bytes, phraseId);
+    appendDialogueByte(&bytes, replyCount);
+    for (uint32_t index = 0; index < replyCount; ++index) {
+        appendDialogueUint16(&bytes, *reinterpret_cast<const uint32_t*>(dialog + 0x18 + index * 4));
+    }
+    appendDialogueUint32(&bytes, context);
+    appendDialogueByte(&bytes, owner);
+    appendDialogueByte(&bytes, substitutionLength);
+    bytes.insert(bytes.end(),
+        reinterpret_cast<const uint8_t*>(dialog + 0xb9),
+        reinterpret_cast<const uint8_t*>(dialog + 0xb9 + substitutionLength));
+    appendDialogueByte(&bytes, static_cast<uint32_t>(voiceLength));
+    bytes.insert(bytes.end(),
+        reinterpret_cast<const uint8_t*>(voice),
+        reinterpret_cast<const uint8_t*>(voice + voiceLength));
+    return bytes;
+}
+
+uint8_t readDialogueByte(const std::vector<uint8_t>& bytes, size_t* offset) {
+    if (*offset >= bytes.size()) fail("native_dialogue_packet_truncated");
+    return bytes[(*offset)++];
+}
+
+uint16_t readDialogueUint16(const std::vector<uint8_t>& bytes, size_t* offset) {
+    const uint16_t low = readDialogueByte(bytes, offset);
+    return static_cast<uint16_t>(low | static_cast<uint16_t>(readDialogueByte(bytes, offset) << 8));
+}
+
+uint32_t readDialogueUint32(const std::vector<uint8_t>& bytes, size_t* offset) {
+    uint32_t value = readDialogueByte(bytes, offset);
+    value |= static_cast<uint32_t>(readDialogueByte(bytes, offset)) << 8;
+    value |= static_cast<uint32_t>(readDialogueByte(bytes, offset)) << 16;
+    value |= static_cast<uint32_t>(readDialogueByte(bytes, offset)) << 24;
+    return value;
+}
+
+std::vector<uint8_t> decodeNativeDialogueSnapshotPacket(const std::vector<uint8_t>& bytes) {
+    size_t offset = 0;
+    if (readDialogueByte(bytes, &offset) != 12) fail("native_dialogue_snapshot_opcode_mismatch");
+    std::vector<uint8_t> payload(0x2bc);
+    *reinterpret_cast<uint32_t*>(payload.data() + 0x00) = readDialogueUint32(bytes, &offset);
+    *reinterpret_cast<uint32_t*>(payload.data() + 0x04) = readDialogueUint16(bytes, &offset);
+    const uint32_t replyCount = readDialogueByte(bytes, &offset);
+    if (replyCount > 40) fail("native_dialogue_reply_count_out_of_range");
+    *reinterpret_cast<uint32_t*>(payload.data() + 0x08) = replyCount;
+    for (uint32_t index = 0; index < replyCount; ++index) {
+        *reinterpret_cast<uint32_t*>(payload.data() + 0x14 + index * 4) = readDialogueUint16(bytes, &offset);
+    }
+    *reinterpret_cast<uint32_t*>(payload.data() + 0x0c) = readDialogueUint32(bytes, &offset);
+    *reinterpret_cast<uint32_t*>(payload.data() + 0x10) = readDialogueByte(bytes, &offset);
+    const uint8_t substitutionLength = readDialogueByte(bytes, &offset);
+    payload[0xb4] = substitutionLength;
+    for (uint32_t index = 0; index < substitutionLength; ++index) {
+        payload[0xb5 + index] = readDialogueByte(bytes, &offset);
+    }
+    const uint8_t voiceLength = readDialogueByte(bytes, &offset);
+    for (uint32_t index = 0; index < voiceLength; ++index) {
+        payload[0x1b8 + index] = readDialogueByte(bytes, &offset);
+    }
+    if (offset != bytes.size()) fail("native_dialogue_packet_trailing_bytes");
+    return payload;
+}
+
+uint32_t applyNativeDialoguePacket(uintptr_t clientFacade, const std::vector<uint8_t>& bytes, uint32_t selectedReply) {
+    if (!clientFacade || !g_client) return selectedReply;
+    const std::vector<uint8_t> payload = decodeNativeDialogueSnapshotPacket(bytes);
+    const uint32_t decodedPhrase = *reinterpret_cast<const uint32_t*>(payload.data() + 0x04);
+    const uint32_t decodedReplyCount = *reinterpret_cast<const uint32_t*>(payload.data() + 0x08);
+    std::vector<uint8_t> clientProbePayload = payload;
+    *reinterpret_cast<uint32_t*>(clientProbePayload.data() + 0x04) = 0;
+    *reinterpret_cast<uint32_t*>(clientProbePayload.data() + 0x08) = 0;
+    const uintptr_t vtable = *reinterpret_cast<const uintptr_t*>(clientFacade);
+    auto apply = reinterpret_cast<NativeClientDialogueApply>(
+        *reinterpret_cast<const uintptr_t*>(vtable + 0xb4));
+    auto poll = reinterpret_cast<NativeClientDialoguePoll>(
+        *reinterpret_cast<const uintptr_t*>(vtable + 0xb8));
+    // The minimal host has no live Client SDB ownership graph. Exercise the recovered apply
+    // facade with the real update counter but an empty view; validate the complete decoded
+    // phrase/reply payload in this harness before entering Client.dll.
+    apply(reinterpret_cast<void*>(clientFacade), clientProbePayload.data());
+    // Client.dll 0x120C706C forwards to 0x120A0F9C through the singleton at RVA 0x110ED4.
+    // 0x120A2334 consumes +0x4B4 once; 0x120A0FA5/+0x4BC rejects unchanged snapshots.
+    const uintptr_t clientDialogue = *reinterpret_cast<const uintptr_t*>(
+        reinterpret_cast<uintptr_t>(g_client) + 0x110ed4);
+    if (!clientDialogue) fail("native_client_dialogue_singleton_unavailable");
+    printf("{\"event\":\"native_client_dialogue_layout\","
+        "\"x\":%ld,\"y\":%ld,\"width\":%ld,\"height\":%ld,\"font\":\"%s\"}\n",
+        static_cast<long>(*reinterpret_cast<const int32_t*>(clientDialogue + 0x149d0)),
+        static_cast<long>(*reinterpret_cast<const int32_t*>(clientDialogue + 0x149d4)),
+        static_cast<long>(*reinterpret_cast<const int32_t*>(clientDialogue + 0x149d8)),
+        static_cast<long>(*reinterpret_cast<const int32_t*>(clientDialogue + 0x149cc)),
+        reinterpret_cast<const char*>(clientDialogue + 0x3b0));
+    const uint32_t appliedCounter = *reinterpret_cast<const uint32_t*>(clientDialogue + 0x4bc);
+    if (appliedCounter != *reinterpret_cast<const uint32_t*>(payload.data())) {
+        fail("native_client_dialogue_update_counter_mismatch");
+    }
+    *reinterpret_cast<uint32_t*>(clientDialogue + 0x4b4) = selectedReply;
+    const uint32_t polledReply = poll(reinterpret_cast<void*>(clientFacade));
+    const uint32_t repeatedPoll = poll(reinterpret_cast<void*>(clientFacade));
+    printf("{\"event\":\"native_client_dialogue_bridge\",\"applyMode\":\"empty_snapshot_probe\","
+        "\"updateCounter\":%lu,\"decodedPhrase\":%lu,\"decodedReplyCount\":%lu,"
+        "\"selectedReply\":%lu,\"polledReply\":%lu,\"repeatedPoll\":%lu}\n",
+        static_cast<unsigned long>(appliedCounter), static_cast<unsigned long>(decodedPhrase),
+        static_cast<unsigned long>(decodedReplyCount), static_cast<unsigned long>(selectedReply),
+        static_cast<unsigned long>(polledReply), static_cast<unsigned long>(repeatedPoll));
+    if (polledReply != selectedReply || repeatedPoll != 0) fail("native_client_dialogue_poll_mismatch");
+    return polledReply;
+}
+
+std::vector<uint8_t> encodeNativeDialogueReplyPacket(uint32_t replyId) {
+    std::vector<uint8_t> bytes;
+    bytes.reserve(5);
+    appendDialogueByte(&bytes, 6);
+    appendDialogueUint32(&bytes, replyId);
+    return bytes;
+}
+
+void emitNativeDialogueSnapshot(const char* turn, int32_t submittedAnswer, uintptr_t dialog) {
+    const uint32_t updateCounter = *reinterpret_cast<const uint32_t*>(dialog + 0x04);
+    const int32_t phraseId = *reinterpret_cast<const int32_t*>(dialog + 0x08);
+    const uint32_t replyCount = *reinterpret_cast<const uint32_t*>(dialog + 0x0c);
+    const int32_t context = *reinterpret_cast<const int32_t*>(dialog + 0x10);
+    const int32_t owner = *reinterpret_cast<const int32_t*>(dialog + 0x14);
+    if (replyCount > 40) fail("native_dialogue_reply_count_out_of_range");
+    printf("{\"event\":\"native_dialogue_snapshot\",\"turn\":\"%s\",\"submittedAnswer\":%ld,"
+        "\"updateCounter\":%lu,\"phraseId\":%ld,\"replyCount\":%lu,\"context\":%ld,\"owner\":%ld,\"replies\":[",
+        turn, static_cast<long>(submittedAnswer), static_cast<unsigned long>(updateCounter),
+        static_cast<long>(phraseId), static_cast<unsigned long>(replyCount),
+        static_cast<long>(context), static_cast<long>(owner));
+    for (uint32_t index = 0; index < replyCount; ++index) {
+        if (index) putchar(',');
+        printf("%ld", static_cast<long>(*reinterpret_cast<const int32_t*>(dialog + 0x18 + index * sizeof(int32_t))));
+    }
+    printf("]}\n");
+}
+
+void printNativeScrJsonString(const char* value) {
+    putchar('"');
+    if (value) {
+        for (const unsigned char* cursor = reinterpret_cast<const unsigned char*>(value); *cursor; ++cursor) {
+            const unsigned char character = *cursor;
+            if (character == '"' || character == '\\') {
+                putchar('\\');
+                putchar(character);
+            } else if (character >= 0x20 && character < 0x7f) {
+                putchar(character);
+            } else {
+                printf("\\u%04x", static_cast<unsigned>(character));
+            }
+        }
+    }
+    putchar('"');
+}
+
+const char* nativeScrStringArgument(unsigned index) {
+    if (!g_server || index >= 16) fail("native_scr_argument_index_out_of_range");
+    const uintptr_t base = reinterpret_cast<uintptr_t>(g_server);
+    return *reinterpret_cast<const char* const*>(base + 0x89740 + index * 8);
+}
+
+void emitNativeScrHostCall(const char* name, unsigned argumentCount, double result) {
+    g_nativeScrHostCallCount += 1;
+    printf("{\"event\":\"native_scr_host_call\",\"name\":\"%s\",\"arguments\":[", name);
+    for (unsigned index = 0; index < argumentCount; ++index) {
+        if (index) putchar(',');
+        printNativeScrJsonString(nativeScrStringArgument(index));
+    }
+    printf("],\"result\":%.17g}\n", result);
+}
+
+double ORACLE_CDECL nativeScrGetTribesRelationProbe() {
+    constexpr double result = 1.0;
+    emitNativeScrHostCall("rs_gettribesrelation", 2, result);
+    return result;
+}
+
+double ORACLE_CDECL nativeScrSetTribesRelationProbe() {
+    constexpr double result = 0.0;
+    emitNativeScrHostCall("rs_settribesrelation", 3, result);
+    return result;
+}
+double ORACLE_CDECL nativeScrCastEffectProbe() {
+    constexpr double result = 0.0;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(g_server);
+    g_nativeScrHostCallCount += 1;
+    printf("{\"event\":\"native_scr_host_call\",\"name\":\"le_casteffect\",\"arguments\":[");
+    printNativeScrJsonString(nativeScrStringArgument(0));
+    putchar(',');
+    printNativeScrJsonString(nativeScrStringArgument(1));
+    printf(",%ld,%ld],\"result\":%.17g}\n",
+        static_cast<long>(*reinterpret_cast<const int32_t*>(base + 0x89750)),
+        static_cast<long>(*reinterpret_cast<const int32_t*>(base + 0x89758)),
+        result);
+    return result;
+}
+
+
+void patchNativeFunction(HMODULE module, uintptr_t rva, uintptr_t replacement) {
+    const uintptr_t target = reinterpret_cast<uintptr_t>(module) + rva;
+    const int32_t displacement = static_cast<int32_t>(replacement - (target + 5));
+    uint8_t patch[5] = { 0xe9, 0, 0, 0, 0 };
+    memcpy(patch + 1, &displacement, sizeof(displacement));
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(target), sizeof(patch), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        fail("native_scr_host_patch_protect_failed");
+    }
+    memcpy(reinterpret_cast<void*>(target), patch, sizeof(patch));
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<const void*>(target), sizeof(patch));
+    DWORD ignoredProtect = 0;
+    VirtualProtect(reinterpret_cast<void*>(target), sizeof(patch), oldProtect, &ignoredProtect);
+}
+
+void installNativeScrCoreHostProbes(HMODULE module) {
+    patchNativeFunction(module, 0x400e4, reinterpret_cast<uintptr_t>(&nativeScrGetTribesRelationProbe));
+    patchNativeFunction(module, 0x40078, reinterpret_cast<uintptr_t>(&nativeScrSetTribesRelationProbe));
+    g_nativeScrHostCallCount = 0;
+}
+
+uintptr_t ORACLE_THISCALL nativeScrCommandProbe(void*, const char* command, uintptr_t immediate) {
+    g_nativeScrCommandCount += 1;
+    printf("{\"event\":\"native_scr_command\",\"command\":");
+    printNativeScrJsonString(command);
+    printf(",\"immediate\":%lu}\n", static_cast<unsigned long>(immediate));
+    return 1;
+}
+
+void installNativeScrCommandProbe(HMODULE module) {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(module);
+    const uintptr_t object = *reinterpret_cast<const uintptr_t*>(base + 0x88e2c);
+    if (!object) fail("native_scr_command_object_unavailable");
+    const uintptr_t vtable = *reinterpret_cast<const uintptr_t*>(object);
+    uintptr_t* slot = reinterpret_cast<uintptr_t*>(vtable + 0x10);
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &oldProtect)) {
+        fail("native_scr_command_probe_protect_failed");
+    }
+    *slot = reinterpret_cast<uintptr_t>(&nativeScrCommandProbe);
+    DWORD ignoredProtect = 0;
+    VirtualProtect(slot, sizeof(*slot), oldProtect, &ignoredProtect);
+    g_nativeScrCommandCount = 0;
+}
+
+std::string extractNativeScrHandlerBody(const std::string& source, const char* handler) {
+    const size_t header = source.find(handler);
+    if (header == std::string::npos) fail("native_scr_handler_missing");
+    const size_t opening = source.find('{', header + strlen(handler));
+    if (opening == std::string::npos) fail("native_scr_handler_opening_brace_missing");
+    size_t depth = 1;
+    char quote = 0;
+    for (size_t cursor = opening + 1; cursor < source.size(); ++cursor) {
+        const char character = source[cursor];
+        if (quote) {
+            if (character == '\\') cursor += 1;
+            else if (character == quote) quote = 0;
+        } else if (character == '"' || character == '\'') {
+            quote = character;
+        } else if (character == '{') {
+            depth += 1;
+        } else if (character == '}' && --depth == 0) {
+            return source.substr(opening + 1, cursor - opening - 1);
+        }
+    }
+    fail("native_scr_handler_closing_brace_missing");
+    return {};
+}
+
+void invokeNativeScrFunction(HMODULE module, bool core, bool probeCoreHandlers) {
+    std::vector<unsigned char> bytes;
+    const std::string relativeAsset = core
+        ? "levels/single/l1_1/scripts/core.scr"
+        : "levels/single/l1_1/scripts/init.scr";
+    const std::string asset = g_assetRoot + "\\" + relativeAsset;
+    if (!readResourceFile(asset, &bytes) || bytes.empty() || bytes.size() > UINT32_MAX) {
+        fail("cannot_read_native_scr_asset");
+    }
+
+    const uintptr_t base = reinterpret_cast<uintptr_t>(module);
+    void* variableContext = *reinterpret_cast<void* const*>(base + 0x7f9a0);
+    if (!variableContext) fail("native_scr_variable_context_unavailable");
+
+    auto allocate = reinterpret_cast<NativeAllocate>(base + 0x057cc);
+    auto freeMemory = reinterpret_cast<NativeFree>(base + 0x0579c);
+    auto constructContext = reinterpret_cast<NativeAgeContextConstructor>(base + 0x38c54);
+    auto loadContext = reinterpret_cast<NativeAgeLoader>(base + 0x38958);
+    auto evaluateContext = reinterpret_cast<NativeContextEvaluate>(base + 0x38904);
+    auto destroyContext = reinterpret_cast<NativeContextDestroy>(base + 0x38920);
+    const uintptr_t variableVtable = *reinterpret_cast<const uintptr_t*>(variableContext);
+    auto addVariable = reinterpret_cast<NativeAddVariable>(
+        *reinterpret_cast<const uintptr_t*>(variableVtable + 0x18));
+    const char* variables[] = { "L1_Svetlograd_n7_Helper", "result" };
+    for (const char* name : variables) {
+        if (addVariable(variableContext, name, 0, 0.0) != 0) fail("native_scr_variable_registration_failed");
+    }
+
+    void* context = allocate(0x0c, 1, 0, 0);
+    if (!context) fail("native_scr_context_allocation_failed");
+    constructContext(context);
+    g_ageNodeAllocations.clear();
+    g_captureAgeNodeAllocations = true;
+    const int loaded = loadContext(
+        context, bytes.data(), static_cast<uint32_t>(bytes.size()), variableContext, 0, 0);
+    g_captureAgeNodeAllocations = false;
+    if (!loaded) fail("native_scr_load_failed");
+    if (g_ageNodeAllocations.empty()) fail("native_scr_node_allocations_missing");
+    printf("{\"event\":\"native_scr_program\",\"asset\":\"%s\",\"bytes\":%lu,\"nodes\":%lu}\n",
+        relativeAsset.c_str(), static_cast<unsigned long>(bytes.size()),
+        static_cast<unsigned long>(g_ageNodeAllocations.size()));
+    for (size_t index = 0; index < g_ageNodeAllocations.size(); ++index) {
+        const uintptr_t node = g_ageNodeAllocations[index];
+        printf("{\"event\":\"native_scr_node_layout\",\"record\":%lu,\"kind\":%lu}\n",
+            static_cast<unsigned long>(index),
+            static_cast<unsigned long>(*reinterpret_cast<const uint32_t*>(node + 0x3c)));
+    }
+
+    if (core) {
+        const uintptr_t factions = *reinterpret_cast<const uintptr_t*>(base + 0x89fc0);
+        const uint32_t factionCount = factions
+            ? *reinterpret_cast<const uint32_t*>(factions + 0x20)
+            : 0;
+        printf("{\"event\":\"native_scr_world_state\",\"factions\":%lu}\n",
+            static_cast<unsigned long>(factionCount));
+    }
+    if (probeCoreHandlers) installNativeScrCoreHostProbes(module);
+    installNativeAgeEvaluatorTrace(module);
+    g_nativeTraceIsScr = true;
+    beginNativeAgeTrace(1);
+    evaluateContext(context, variableContext);
+    endNativeAgeTrace();
+    g_nativeTraceIsScr = false;
+    if (probeCoreHandlers && g_nativeScrHostCallCount != 16) fail("native_scr_host_call_count_mismatch");
+    if (probeCoreHandlers) {
+        printf("{\"event\":\"native_scr_host_summary\",\"calls\":%u}\n", g_nativeScrHostCallCount);
+    }
+    printf("{\"event\":\"native_scr_result\",\"asset\":\"%s\",\"executed\":true}\n",
+        relativeAsset.c_str());
+
+    destroyContext(context);
+    const uint32_t loadedAfterDestroy = *reinterpret_cast<const uint32_t*>(context);
+    printf("{\"event\":\"native_scr_closed\",\"loaded\":%lu}\n",
+        static_cast<unsigned long>(loadedAfterDestroy));
+    freeMemory(context);
+}
+void invokeNativeScrTrigger(HMODULE module) {
+    std::vector<unsigned char> bytes;
+    const std::string relativeAsset = "levels/single/l1_1/scripts/tg_exit_l1_2.scr";
+    const std::string asset = g_assetRoot + "\\" + relativeAsset;
+    if (!readResourceFile(asset, &bytes) || bytes.empty()) fail("cannot_read_native_scr_trigger_asset");
+    const std::string source(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    const std::string body = extractNativeScrHandlerBody(source, "OnHover");
+
+    const uintptr_t base = reinterpret_cast<uintptr_t>(module);
+    uintptr_t* worldSlot = reinterpret_cast<uintptr_t*>(base + 0x88dc4);
+    const uintptr_t originalWorld = *worldSlot;
+    void* syntheticWorld = nullptr;
+    if (!originalWorld) {
+        syntheticWorld = calloc(1, 0x6060);
+        if (!syntheticWorld) fail("native_scr_trigger_world_allocation_failed");
+        *worldSlot = reinterpret_cast<uintptr_t>(syntheticWorld);
+    }
+    const uintptr_t world = *worldSlot;
+
+    installNativeScrCommandProbe(module);
+    installNativeAgeEvaluatorTrace(module);
+    g_ageNodeAllocations.clear();
+    g_captureAgeNodeAllocations = true;
+    g_nativeTraceIsScr = true;
+    beginNativeAgeTrace(1);
+    auto executeBody = reinterpret_cast<void (ORACLE_STDCALL*)(const char*)>(base + 0x232b0);
+    executeBody(body.c_str());
+    endNativeAgeTrace();
+    g_nativeTraceIsScr = false;
+    g_captureAgeNodeAllocations = false;
+
+    printf("{\"event\":\"native_scr_program\",\"asset\":\"%s\",\"handler\":\"OnHover\","
+        "\"bytes\":%lu,\"bodyBytes\":%lu,\"nodes\":%lu}\n",
+        relativeAsset.c_str(), static_cast<unsigned long>(bytes.size()),
+        static_cast<unsigned long>(body.size()),
+        static_cast<unsigned long>(g_ageNodeAllocations.size()));
+    const uint32_t entranceLength = *reinterpret_cast<const uint32_t*>(world + 0x5f54);
+    printf("{\"event\":\"native_scr_trigger_state\",\"entrance\":");
+    printNativeScrJsonString(reinterpret_cast<const char*>(world + 0x5f58));
+    printf(",\"entranceLength\":%lu,\"commands\":%u}\n",
+        static_cast<unsigned long>(entranceLength), g_nativeScrCommandCount);
+    if (entranceLength != 11) fail("native_scr_trigger_entrance_length_mismatch");
+    if (g_nativeScrCommandCount != 1) fail("native_scr_trigger_command_count_mismatch");
+    printf("{\"event\":\"native_scr_closed\",\"loaded\":0}\n");
+
+    if (syntheticWorld) {
+        *worldSlot = originalWorld;
+        free(syntheticWorld);
+    }
+}
+void invokeNativeScrEffect(HMODULE module) {
+    std::vector<unsigned char> bytes;
+    const std::string relativeAsset = "levels/single/l10_2_1/scripts/init.scr";
+    const std::string asset = g_assetRoot + "\\" + relativeAsset;
+    if (!readResourceFile(asset, &bytes) || bytes.empty()) fail("cannot_read_native_scr_effect_asset");
+    const std::string source(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+
+    patchNativeFunction(module, 0x3fe2c, reinterpret_cast<uintptr_t>(&nativeScrCastEffectProbe));
+    g_nativeScrHostCallCount = 0;
+    installNativeAgeEvaluatorTrace(module);
+    g_ageNodeAllocations.clear();
+    g_captureAgeNodeAllocations = true;
+    g_nativeTraceIsScr = true;
+    beginNativeAgeTrace(1);
+    const uintptr_t base = reinterpret_cast<uintptr_t>(module);
+    auto executeBody = reinterpret_cast<void (ORACLE_STDCALL*)(const char*)>(base + 0x232b0);
+    executeBody(source.c_str());
+    endNativeAgeTrace();
+    g_nativeTraceIsScr = false;
+    g_captureAgeNodeAllocations = false;
+
+    printf("{\"event\":\"native_scr_program\",\"asset\":\"%s\",\"handler\":null,"
+        "\"bytes\":%lu,\"bodyBytes\":%lu,\"nodes\":%lu}\n",
+        relativeAsset.c_str(), static_cast<unsigned long>(bytes.size()),
+        static_cast<unsigned long>(bytes.size()),
+        static_cast<unsigned long>(g_ageNodeAllocations.size()));
+    printf("{\"event\":\"native_scr_host_summary\",\"calls\":%u}\n", g_nativeScrHostCallCount);
+    if (g_nativeScrHostCallCount != 4) fail("native_scr_effect_call_count_mismatch");
+    printf("{\"event\":\"native_scr_closed\",\"loaded\":0}\n");
+}
+void invokeNativeLevel(uintptr_t serverFacade) {
+    if (!serverFacade) fail("native_level_server_facade_unavailable");
+    auto vtable = *reinterpret_cast<uintptr_t* const*>(serverFacade);
+    if (!vtable || !vtable[0x28 / sizeof(uintptr_t)]) fail("native_level_loader_unavailable");
+    printf("{\"event\":\"native_level_loader\",\"slotOffset\":40,\"value\":\"");
+    printModulePointer(vtable[0x28 / sizeof(uintptr_t)]);
+    printf("\"}\n");
+    const char* levelName = "L1_1";
+    printf("{\"event\":\"native_level_load\",\"level\":\"%s\",\"phase\":\"before\"}\n", levelName);
+    auto loadLevel = reinterpret_cast<void (ORACLE_THISCALL*)(void*, const char*, int)>(
+        vtable[0x28 / sizeof(uintptr_t)]);
+    loadLevel(reinterpret_cast<void*>(serverFacade), levelName, 0);
+    const uintptr_t world = *reinterpret_cast<const uintptr_t*>(
+        reinterpret_cast<uintptr_t>(g_server) + 0x88dc4);
+    printf("{\"event\":\"native_level_load\",\"level\":\"%s\",\"phase\":\"after\",\"world\":\"0x%Ix\"}\n",
+        levelName, world);
+    const char query[] =
+        "oracle_person_exists_before = RS_IsPersonExistsI(\"L1_1\", \"L1_1.P387_Poison_Plotnik\");"
+        "oracle_delete_result = RS_DelPerson(\"L1_1.P387_Poison_Plotnik\");"
+        "oracle_person_exists_after = RS_IsPersonExistsI(\"L1_1\", \"L1_1.P387_Poison_Plotnik\");";
+    const uintptr_t base = reinterpret_cast<uintptr_t>(g_server);
+    void* variableContext = *reinterpret_cast<void* const*>(base + 0x7f9a0);
+    if (!variableContext) fail("native_level_variable_context_unavailable");
+    const uintptr_t variableVtable = *reinterpret_cast<const uintptr_t*>(variableContext);
+    auto addVariable = reinterpret_cast<NativeAddVariable>(
+        *reinterpret_cast<const uintptr_t*>(variableVtable + 0x18));
+    const char* queryVariables[] = {
+        "oracle_person_exists_before",
+        "oracle_delete_result",
+        "oracle_person_exists_after",
+        "oracle_person_exists_reload",
+    };
+    for (const char* name : queryVariables) {
+        if (addVariable(variableContext, name, 0, 0.0) != 0) {
+            fail("native_level_query_variable_registration_failed");
+        }
+    }
+    auto allocate = reinterpret_cast<NativeAllocate>(base + 0x057cc);
+    auto freeMemory = reinterpret_cast<NativeFree>(base + 0x0579c);
+    auto constructContext = reinterpret_cast<NativeAgeContextConstructor>(base + 0x38c54);
+    auto loadContext = reinterpret_cast<NativeAgeLoader>(base + 0x38958);
+    auto evaluateContext = reinterpret_cast<NativeContextEvaluate>(base + 0x38904);
+    auto destroyContext = reinterpret_cast<NativeContextDestroy>(base + 0x38920);
+    void* context = allocate(0x0c, 1, 0, 0);
+    if (!context) fail("native_level_query_context_allocation_failed");
+    constructContext(context);
+    g_ageNodeAllocations.clear();
+    g_captureAgeNodeAllocations = true;
+    const int loaded = loadContext(context, reinterpret_cast<const unsigned char*>(query),
+        static_cast<uint32_t>(strlen(query)), variableContext, 0, 0);
+    g_captureAgeNodeAllocations = false;
+    if (!loaded) fail("native_level_query_load_failed");
+    for (size_t index = 0; index < g_ageNodeAllocations.size(); ++index) {
+        const uintptr_t node = g_ageNodeAllocations[index];
+        printf("{\"event\":\"native_level_scr_node\",\"phase\":\"transition\","
+            "\"record\":%lu,\"kind\":%lu}\n",
+            static_cast<unsigned long>(index),
+            static_cast<unsigned long>(*reinterpret_cast<const uint32_t*>(node + 0x3c)));
+    }
+    installNativeAgeEvaluatorTrace(g_server);
+    g_nativeTraceIsScr = true;
+    g_nativeSawScrCall = false;
+    g_nativeScrCallResults.clear();
+    beginNativeAgeTrace(1);
+    evaluateContext(context, variableContext);
+    endNativeAgeTrace();
+    g_nativeTraceIsScr = false;
+    destroyContext(context);
+    freeMemory(context);
+    if (!g_nativeSawScrCall || g_nativeScrCallResults.size() != 3) {
+        fail("native_level_person_transition_call_count_mismatch");
+    }
+    const double beforeDelete = g_nativeScrCallResults[0];
+    const double deleteResult = g_nativeScrCallResults[1];
+    const double afterDelete = g_nativeScrCallResults[2];
+    printf("{\"event\":\"native_level_person_transition\",\"level\":\"L1_1\","
+        "\"person\":\"L1_1.P387_Poison_Plotnik\",\"beforeDelete\":%.17g,"
+        "\"deleteResult\":%.17g,\"afterDelete\":%.17g,\"nodes\":%lu}\n",
+        beforeDelete, deleteResult, afterDelete,
+        static_cast<unsigned long>(g_ageNodeAllocations.size()));
+    if (beforeDelete != 1.0 || deleteResult != 0.0 || afterDelete != 0.0) {
+        fail("native_level_person_transition_mismatch");
+    }
+    printf("{\"event\":\"native_level_reload\",\"level\":\"%s\",\"phase\":\"before\"}\n", levelName);
+    loadLevel(reinterpret_cast<void*>(serverFacade), levelName, 0);
+    const uintptr_t reloadedWorld = *reinterpret_cast<const uintptr_t*>(
+        reinterpret_cast<uintptr_t>(g_server) + 0x88dc4);
+    printf("{\"event\":\"native_level_reload\",\"level\":\"%s\","
+        "\"phase\":\"after\",\"world\":\"0x%Ix\"}\n", levelName, reloadedWorld);
+    const char reloadQuery[] =
+        "oracle_person_exists_reload = "
+        "RS_IsPersonExistsI(\"L1_1\", \"L1_1.P387_Poison_Plotnik\");";
+    void* reloadContext = allocate(0x0c, 1, 0, 0);
+    if (!reloadContext) fail("native_level_reload_context_allocation_failed");
+    constructContext(reloadContext);
+    g_ageNodeAllocations.clear();
+    g_captureAgeNodeAllocations = true;
+    const int reloadLoaded = loadContext(reloadContext,
+        reinterpret_cast<const unsigned char*>(reloadQuery),
+        static_cast<uint32_t>(strlen(reloadQuery)), variableContext, 0, 0);
+    g_captureAgeNodeAllocations = false;
+    if (!reloadLoaded) fail("native_level_reload_query_load_failed");
+    for (size_t index = 0; index < g_ageNodeAllocations.size(); ++index) {
+        const uintptr_t node = g_ageNodeAllocations[index];
+        printf("{\"event\":\"native_level_scr_node\",\"phase\":\"reload\","
+            "\"record\":%lu,\"kind\":%lu}\n",
+            static_cast<unsigned long>(index),
+            static_cast<unsigned long>(*reinterpret_cast<const uint32_t*>(node + 0x3c)));
+    }
+    g_nativeTraceIsScr = true;
+    g_nativeSawScrCall = false;
+    g_nativeScrCallResults.clear();
+    beginNativeAgeTrace(2);
+    evaluateContext(reloadContext, variableContext);
+    endNativeAgeTrace();
+    g_nativeTraceIsScr = false;
+    destroyContext(reloadContext);
+    freeMemory(reloadContext);
+    if (!g_nativeSawScrCall || g_nativeScrCallResults.size() != 1
+        || g_nativeScrCallResults[0] != 1.0) {
+        fail("native_level_person_reload_mismatch");
+    }
+    printf("{\"event\":\"native_level_person_reload\",\"level\":\"L1_1\","
+        "\"person\":\"L1_1.P387_Poison_Plotnik\",\"result\":%.17g,\"nodes\":%lu}\n",
+        g_nativeScrCallResults[0], static_cast<unsigned long>(g_ageNodeAllocations.size()));
+}
+
+
+
+
+void invokeNativeDialogFunction(HMODULE module, uintptr_t clientFacade) {
+    std::vector<unsigned char> bytes;
+    const std::string asset = g_assetRoot + "\\scripts\\dialogs\\demon.d1.age.cs";
+    if (!readResourceFile(asset, &bytes) || bytes.empty() || bytes.size() > UINT32_MAX) {
+        fail("cannot_read_native_dialogue_asset");
+    }
+
+    const uintptr_t base = reinterpret_cast<uintptr_t>(module);
+    const uintptr_t dialog = *reinterpret_cast<const uintptr_t*>(base + 0x88de8);
+    void* variableContext = *reinterpret_cast<void* const*>(base + 0x7f9a0);
+    if (!dialog || !variableContext) fail("native_dialogue_singletons_unavailable");
+
+    auto allocate = reinterpret_cast<NativeAllocate>(base + 0x057cc);
+    auto constructContext = reinterpret_cast<NativeAgeContextConstructor>(base + 0x38c54);
+    auto loadAge = reinterpret_cast<NativeAgeLoader>(base + 0x38958);
+    const uintptr_t variableVtable = *reinterpret_cast<const uintptr_t*>(variableContext);
+    auto addVariable = reinterpret_cast<NativeAddVariable>(
+        *reinterpret_cast<const uintptr_t*>(variableVtable + 0x18));
+    auto setNumericVariable = reinterpret_cast<NativeSetNumericVariable>(
+        *reinterpret_cast<const uintptr_t*>(variableVtable + 0x1c));
+    auto rebuildDialog = reinterpret_cast<NativeDialogueRebuild>(base + 0x43220);
+    auto closeDialog = reinterpret_cast<NativeDialogueClose>(base + 0x44000);
+
+    void* ageContext = allocate(0x0c, 1, 0, 0);
+    if (!ageContext) fail("native_dialogue_context_allocation_failed");
+    constructContext(ageContext);
+    *reinterpret_cast<void**>(dialog + 0x2d0) = ageContext;
+    g_ageNodeAllocations.clear();
+    g_captureAgeNodeAllocations = true;
+    const int loaded = loadAge(ageContext, bytes.data(), static_cast<uint32_t>(bytes.size()), variableContext, 0, 0);
+    g_captureAgeNodeAllocations = false;
+    if (!loaded) fail("native_dialogue_age_load_failed");
+    const size_t rawNodeAllocationCount = g_ageNodeAllocations.size();
+    if (rawNodeAllocationCount != 241) fail("native_dialogue_node_allocation_count_mismatch");
+    g_ageNodeAllocations.erase(g_ageNodeAllocations.begin());
+    printf("{\"event\":\"native_age_node_allocations\",\"rawCount\":%lu,\"recordCount\":%lu}\n",
+        static_cast<unsigned long>(rawNodeAllocationCount),
+        static_cast<unsigned long>(g_ageNodeAllocations.size()));
+    installNativeAgeEvaluatorTrace(module);
+
+    *reinterpret_cast<int32_t*>(dialog + 0x2d4) = -1;
+    *reinterpret_cast<int32_t*>(dialog + 0x2d8) = -1;
+    *reinterpret_cast<uint32_t*>(dialog + 0x2cc) = 1;
+    *reinterpret_cast<uint32_t*>(dialog + 0x2c0) = 0;
+    *reinterpret_cast<uint32_t*>(dialog + 0x5528) = 0;
+    memset(reinterpret_cast<void*>(dialog + 0x04), 0, 0xaf * sizeof(uint32_t));
+
+    const char* numericVariables[] = {
+        reinterpret_cast<const char*>(base + 0x91c64),
+        reinterpret_cast<const char*>(base + 0x91c80),
+        "demon_univ",
+        "result",
+    };
+    for (const char* name : numericVariables) {
+        if (addVariable(variableContext, name, 0, 0.0) != 0) fail("native_dialogue_variable_registration_failed");
+    }
+
+    printf("{\"event\":\"native_age_program\",\"asset\":\"scripts/dialogs/demon.d1.age.cs\",\"bytes\":%lu}\n",
+        static_cast<unsigned long>(bytes.size()));
+    setNumericVariable(variableContext, reinterpret_cast<const char*>(base + 0x91c80), 0.0);
+    beginNativeAgeTrace(1);
+    rebuildDialog(reinterpret_cast<void*>(dialog));
+    endNativeAgeTrace();
+    emitNativeDialogueSnapshot("opening", 0, dialog);
+    const std::vector<uint8_t> openingPacket = encodeNativeDialogueSnapshotPacket(dialog);
+    emitDialoguePacketBytes("server_to_client", "opening", openingPacket);
+    const uint32_t replyCount = *reinterpret_cast<const uint32_t*>(dialog + 0x0c);
+    if (replyCount == 0) fail("native_dialogue_opening_has_no_replies");
+    const uint32_t firstReply = *reinterpret_cast<const uint32_t*>(dialog + 0x18);
+    const uint32_t bridgedReply = applyNativeDialoguePacket(clientFacade, openingPacket, firstReply);
+    const std::vector<uint8_t> replyPacket = encodeNativeDialogueReplyPacket(bridgedReply);
+    emitDialoguePacketBytes("client_to_server", "first_reply", replyPacket);
+    *reinterpret_cast<uint32_t*>(dialog + 0x5528) = 0;
+    setNumericVariable(variableContext, reinterpret_cast<const char*>(base + 0x91c80), static_cast<double>(bridgedReply));
+    beginNativeAgeTrace(2);
+    rebuildDialog(reinterpret_cast<void*>(dialog));
+    endNativeAgeTrace();
+    emitNativeDialogueSnapshot("first_reply", static_cast<int32_t>(bridgedReply), dialog);
+    const std::vector<uint8_t> firstReplySnapshotPacket = encodeNativeDialogueSnapshotPacket(dialog);
+    emitDialoguePacketBytes("server_to_client", "first_reply", firstReplySnapshotPacket);
+    applyNativeDialoguePacket(clientFacade, firstReplySnapshotPacket, 0);
+    closeDialog(reinterpret_cast<void*>(dialog));
+    printf("{\"event\":\"native_dialogue_closed\",\"active\":%lu,\"hasContext\":%s}\n",
+        static_cast<unsigned long>(*reinterpret_cast<const uint32_t*>(dialog + 0x2cc)),
+        *reinterpret_cast<void* const*>(dialog + 0x2d0) ? "true" : "false");
 }
 
 void loadApi(const ModuleSpec& spec, HMODULE* module, const char* exportName, uintptr_t* host, uintptr_t* table, bool initialize) {
@@ -1031,7 +2047,6 @@ void loadApi(const ModuleSpec& spec, HMODULE* module, const char* exportName, ui
         fprintf(stderr, "oracle_initializer module=%ls after_call target=0x%Ix table=0x%Ix esp=0x%Ix\n",
             spec.label, initializer, reinterpret_cast<uintptr_t>(table), currentStackPointer());
         dumpApi(spec.label, table, *module);
-        if (g_invokeNativeDialog && strcmp(exportName, "GetServerAPI") == 0) invokeNativeDialogFunction(*module);
     }
 }
 
@@ -1040,6 +2055,7 @@ void loadApi(const ModuleSpec& spec, HMODULE* module, const char* exportName, ui
 int wmain(int argc, wchar_t** argv) {
     bool serverOnly = false;
     setvbuf(stderr, nullptr, _IONBF, 0);
+    setvbuf(stdout, nullptr, _IONBF, 0);
     SetUnhandledExceptionFilter(oracleExceptionFilter);
     bool initialize = false;
     bool useObjectFacades = false;
@@ -1067,6 +2083,18 @@ int wmain(int argc, wchar_t** argv) {
             g_quietHostStubs = true;
         } else if (wcscmp(argv[index], L"--invoke-native-dialog") == 0) {
             g_invokeNativeDialog = true;
+        } else if (wcscmp(argv[index], L"--invoke-native-scr") == 0) {
+            g_invokeNativeScr = true;
+        } else if (wcscmp(argv[index], L"--invoke-native-scr-core") == 0) {
+            g_invokeNativeScrCore = true;
+        } else if (wcscmp(argv[index], L"--invoke-native-scr-core-real") == 0) {
+            g_invokeNativeScrCoreReal = true;
+        } else if (wcscmp(argv[index], L"--invoke-native-scr-trigger") == 0) {
+            g_invokeNativeScrTrigger = true;
+        } else if (wcscmp(argv[index], L"--invoke-native-scr-effect") == 0) {
+            g_invokeNativeScrEffect = true;
+        } else if (wcscmp(argv[index], L"--invoke-native-level") == 0) {
+            g_invokeNativeLevel = true;
         } else if (wcscmp(argv[index], L"--asset-root") == 0 && index + 1 < argc) {
             g_assetRoot = narrowPath(argv[++index]);
         } else if (wcscmp(argv[index], L"--game-root") == 0 && index + 1 < argc) {
@@ -1100,19 +2128,29 @@ int wmain(int argc, wchar_t** argv) {
     clientHost[0] = 1;
     if (useObjectFacades) {
         initializeHostObjectFacade();
-        serverHost[0x04 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostShortObject);
+        serverHost[0x04 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_clientShortObject);
         clientHost[0x04 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_clientShortObject);
         serverHost[0x10 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostObject);
         clientHost[0x10 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostObject);
         serverHost[0x1c / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostObject);
         clientHost[0x1c / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostObject);
+        serverHost[0x24 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_serverLookupService);
+        serverHost[0x78 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_serverPersonLookupService);
+        serverHost[0x98 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_serverEntityService);
+        serverHost[0x9c / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_serverDescriptorService);
+        serverHost[0xa0 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_serverItemService);
         serverHost[0x8c / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostObject);
         clientHost[0x8c / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostObject);
         serverHost[0x94 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostObject);
         clientHost[0x94 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostObject);
-        serverHost[0xa4 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostObject);
+        serverHost[0xa4 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_serverLevelService);
         clientHost[0xa4 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostObject);
+        serverHost[0xa8 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_serverWorldService);
         clientHost[0x9c / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostRegistryObject);
+        if (g_invokeNativeLevel) {
+            serverHost[0xcc / sizeof(uintptr_t)] =
+                reinterpret_cast<uintptr_t>(&serverGlobalServiceMethod);
+        }
         if (g_probeConfigObject) clientHost[0x90 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_clientGlobalObject);
         if (g_probeConfigObject) {
             serverHost[0x14 / sizeof(uintptr_t)] = reinterpret_cast<uintptr_t>(g_hostInternalObject);
@@ -1130,6 +2168,27 @@ int wmain(int argc, wchar_t** argv) {
         printf("{\"event\":\"api_skip\",\"module\":\"Client.dll\"}\n");
     } else {
         loadApi(client, &g_client, "GetClientAPI", clientHost, clientTable, initialize);
+    }
+    if (g_invokeNativeScr || g_invokeNativeScrCore || g_invokeNativeScrCoreReal) {
+        if (!initialize) fail("native_scr_requires_initialized_modules");
+        const bool core = g_invokeNativeScrCore || g_invokeNativeScrCoreReal;
+        invokeNativeScrFunction(g_server, core, g_invokeNativeScrCore);
+    }
+    if (g_invokeNativeScrTrigger) {
+        if (!initialize) fail("native_scr_trigger_requires_initialized_modules");
+        invokeNativeScrTrigger(g_server);
+    }
+    if (g_invokeNativeScrEffect) {
+        if (!initialize) fail("native_scr_effect_requires_initialized_modules");
+        invokeNativeScrEffect(g_server);
+    }
+    if (g_invokeNativeLevel) {
+        if (!initialize) fail("native_level_requires_initialized_modules");
+        invokeNativeLevel(serverTable[0x10 / sizeof(uintptr_t)]);
+    }
+    if (g_invokeNativeDialog) {
+        if (!initialize) fail("native_dialogue_requires_initialized_modules");
+        invokeNativeDialogFunction(g_server, serverOnly ? 0 : clientTable[0x18 / sizeof(uintptr_t)]);
     }
     printf("{\"event\":\"oracle_complete\",\"initialized\":%s}\n", initialize ? "true" : "false");
     return 0;

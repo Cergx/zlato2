@@ -3,15 +3,28 @@ import type { LVLData } from "./parsers/LVLParser.ts";
 import type { SDBData } from "./parsers/SDBParser.ts";
 import type { Direction, SEFData, TilePosition } from "./parsers/SEFParser.ts";
 import type { WorldPosition } from "./WorldCoordinates.ts";
+import type { EquipmentSlot } from "./systems/Items.ts";
 
-export const SAVE_FORMAT_VERSION = 5;
+export const SAVE_FORMAT_VERSION = 7;
 export const QUICK_SAVE_SLOT = "quick";
 export const DEFAULT_SAVE_KEY_PREFIX = "golden-land-2:save:";
 
 export type ScriptVariableValue = boolean | number | string;
 export type ScriptVariables = Record<string, ScriptVariableValue>;
-export type ItemInventory = Record<string, number>;
+export interface ItemInstanceSaveState {
+    id: string;
+    definitionId: string;
+    durability: number;
+    charges?: number;
+}
+
+export interface InventoryStackSaveState extends ItemInstanceSaveState {
+    quantity: number;
+}
+
+export type ItemInventory = InventoryStackSaveState[];
 export type Inventories = Record<string, ItemInventory>;
+export type EquippedItems = Partial<Record<EquipmentSlot, InventoryStackSaveState>>;
 export type DoorStates = Record<string, boolean>;
 
 export interface TriggerState {
@@ -22,6 +35,7 @@ export interface TriggerState {
 export type TriggerStates = Record<string, TriggerState>;
 export type QuestFlags = Record<string, boolean>;
 export type PersonStates = Record<string, boolean>;
+export type PersonStatesByLevel = Record<string, PersonStates>;
 export type StageFlags = Record<string, boolean>;
 export type LocationAccess = Record<string, number>;
 export type PersonParameters = Record<string, Record<string, number>>;
@@ -65,11 +79,13 @@ export interface GameSaveData {
     location: SaveLocation;
     player: PlayerSaveState;
     inventories: Inventories;
+    equipped: EquippedItems;
     scriptVariables: ScriptVariables;
     doors: DoorStates;
     triggers: TriggerStates;
     questFlags: QuestFlags;
     persons: PersonStates;
+    personStatesByLevel: PersonStatesByLevel;
     stageFlags: StageFlags;
     locationAccess: LocationAccess;
     bestiaryKills: BestiaryKills;
@@ -166,11 +182,13 @@ export const createSaveData = (location: SaveLocation): GameSaveData => ({
         attributes: {},
     },
     inventories: {},
+    equipped: {},
     scriptVariables: {},
     doors: {},
     triggers: {},
     questFlags: {},
     persons: {},
+    personStatesByLevel: {},
     stageFlags: {},
     locationAccess: {},
     bestiaryKills: {},
@@ -190,6 +208,8 @@ export const validateSaveData = (value: unknown): GameSaveData => {
     if (version === 2) return migrateVersion2(record);
     if (version === 3) return migrateVersion3(record);
     if (version === 4) return migrateVersion4(record);
+    if (version === 5) return migrateVersion5(record);
+    if (version === 6) return migrateVersion6(record);
     if (version !== SAVE_FORMAT_VERSION) {
         if (typeof version === "number" && Number.isInteger(version) && version > SAVE_FORMAT_VERSION) {
             throw new SaveVersionError(`Save format version ${version} is newer than supported version ${SAVE_FORMAT_VERSION}`);
@@ -198,8 +218,8 @@ export const validateSaveData = (value: unknown): GameSaveData => {
     }
 
     assertOnlyKeys(record, [
-        "version", "location", "player", "inventories", "scriptVariables", "doors", "triggers", "questFlags", "clock",
-        "persons", "stageFlags", "locationAccess", "bestiaryKills", "personParameters", "experience", "magicEffects", "regenerationElapsed",
+        "version", "location", "player", "inventories", "equipped", "scriptVariables", "doors", "triggers", "questFlags", "clock",
+        "persons", "personStatesByLevel", "stageFlags", "locationAccess", "bestiaryKills", "personParameters", "experience", "magicEffects", "regenerationElapsed",
     ], "save");
 
     return {
@@ -207,12 +227,17 @@ export const validateSaveData = (value: unknown): GameSaveData => {
         location: readLocation(requireField(record, "location", "save"), "save.location"),
         player: readPlayer(requireField(record, "player", "save"), "save.player", false),
         inventories: readInventories(requireField(record, "inventories", "save"), "save.inventories"),
+        equipped: readEquippedItems(requireField(record, "equipped", "save"), "save.equipped"),
         scriptVariables: readScriptVariables(requireField(record, "scriptVariables", "save"), "save.scriptVariables"),
         doors: readDoorStates(requireField(record, "doors", "save"), "save.doors"),
         triggers: readTriggerStates(requireField(record, "triggers", "save"), "save.triggers"),
         questFlags: readBooleanRecord(requireField(record, "questFlags", "save"), "save.questFlags"),
         clock: readClock(requireField(record, "clock", "save"), "save.clock"),
         persons: readBooleanRecord(requireField(record, "persons", "save"), "save.persons"),
+        personStatesByLevel: readNestedBooleanRecord(
+            requireField(record, "personStatesByLevel", "save"),
+            "save.personStatesByLevel",
+        ),
         stageFlags: readBooleanRecord(requireField(record, "stageFlags", "save"), "save.stageFlags"),
         locationAccess: readNumberRecord(requireField(record, "locationAccess", "save"), "save.locationAccess"),
         bestiaryKills: readBestiaryKills(requireField(record, "bestiaryKills", "save"), "save.bestiaryKills"),
@@ -269,10 +294,15 @@ export const validateSaveAgainstAssets = (value: unknown, assets: SaveAssetConte
 
     if (itemNames !== undefined) {
         for (const [owner, inventory] of Object.entries(save.inventories)) {
-            for (const itemId of Object.keys(inventory)) {
-                if (!Object.prototype.hasOwnProperty.call(itemNames, itemId)) {
-                    throw new SaveFormatError(`Saved inventory ${JSON.stringify(owner)} references unknown item ID ${itemId}`);
+            for (const item of inventory) {
+                if (!Object.prototype.hasOwnProperty.call(itemNames, item.definitionId)) {
+                    throw new SaveFormatError(`Saved inventory ${JSON.stringify(owner)} references unknown item ID ${item.definitionId}`);
                 }
+            }
+        }
+        for (const [slot, item] of Object.entries(save.equipped)) {
+            if (item && !Object.prototype.hasOwnProperty.call(itemNames, item.definitionId)) {
+                throw new SaveFormatError(`Saved equipment slot ${JSON.stringify(slot)} references unknown item ID ${item.definitionId}`);
             }
         }
     }
@@ -377,6 +407,13 @@ export class PersistenceRuntime {
 const SLOT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/;
 const UNSAFE_RECORD_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const DIRECTIONS: readonly Direction[] = ["LEFT", "RIGHT", "UP", "DOWN", "UP_LEFT", "UP_RIGHT", "DOWN_LEFT", "DOWN_RIGHT"];
+const EQUIPMENT_SLOTS: readonly EquipmentSlot[] = [
+    "mainHand", "offHand", "ammo", "head", "body", "arms", "bracelet", "amulet", "ringLeft", "ringRight",
+];
+const LEGACY_EQUIPPED_INVENTORY_OWNER = "__hero_equipped__";
+
+type LegacyInventories = Record<string, Record<string, number>>;
+
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -396,13 +433,16 @@ function migrateVersion1(record: UnknownRecord): GameSaveData {
         version: SAVE_FORMAT_VERSION,
         location,
         player: record.player === undefined ? defaultPlayer() : readPlayer(record.player, "version 1 save.player", true),
-        inventories: record.inventories === undefined ? {} : readInventories(record.inventories, "version 1 save.inventories"),
+        ...migrateLegacyInventories(
+            record.inventories === undefined ? {} : readLegacyInventories(record.inventories, "version 1 save.inventories"),
+        ),
         scriptVariables: record.scriptVariables === undefined ? {} : readScriptVariables(record.scriptVariables, "version 1 save.scriptVariables"),
         doors: record.doors === undefined ? {} : readDoorStates(record.doors, "version 1 save.doors"),
         triggers: record.triggers === undefined ? {} : readTriggerStates(record.triggers, "version 1 save.triggers"),
         questFlags: record.questFlags === undefined ? {} : readBooleanRecord(record.questFlags, "version 1 save.questFlags"),
         clock: record.clock === undefined ? { day: 0, minuteOfDay: 0 } : readClock(record.clock, "version 1 save.clock"),
         persons: {},
+        personStatesByLevel: {},
         stageFlags: {},
         locationAccess: {},
         bestiaryKills: {},
@@ -421,13 +461,14 @@ function migrateVersion2(record: UnknownRecord): GameSaveData {
         version: SAVE_FORMAT_VERSION,
         location: readLocation(requireField(record, "location", "version 2 save"), "version 2 save.location"),
         player: readPlayer(requireField(record, "player", "version 2 save"), "version 2 save.player", false),
-        inventories: readInventories(requireField(record, "inventories", "version 2 save"), "version 2 save.inventories"),
+        ...migrateLegacyInventories(readLegacyInventories(requireField(record, "inventories", "version 2 save"), "version 2 save.inventories")),
         scriptVariables: readScriptVariables(requireField(record, "scriptVariables", "version 2 save"), "version 2 save.scriptVariables"),
         doors: readDoorStates(requireField(record, "doors", "version 2 save"), "version 2 save.doors"),
         triggers: readTriggerStates(requireField(record, "triggers", "version 2 save"), "version 2 save.triggers"),
         questFlags: readBooleanRecord(requireField(record, "questFlags", "version 2 save"), "version 2 save.questFlags"),
         clock: readClock(requireField(record, "clock", "version 2 save"), "version 2 save.clock"),
         persons: {},
+        personStatesByLevel: {},
         stageFlags: {},
         locationAccess: {},
         bestiaryKills: {},
@@ -447,13 +488,14 @@ function migrateVersion3(record: UnknownRecord): GameSaveData {
         version: SAVE_FORMAT_VERSION,
         location: readLocation(requireField(record, "location", "version 3 save"), "version 3 save.location"),
         player: readPlayer(requireField(record, "player", "version 3 save"), "version 3 save.player", false),
-        inventories: readInventories(requireField(record, "inventories", "version 3 save"), "version 3 save.inventories"),
+        ...migrateLegacyInventories(readLegacyInventories(requireField(record, "inventories", "version 3 save"), "version 3 save.inventories")),
         scriptVariables: readScriptVariables(requireField(record, "scriptVariables", "version 3 save"), "version 3 save.scriptVariables"),
         doors: readDoorStates(requireField(record, "doors", "version 3 save"), "version 3 save.doors"),
         triggers: readTriggerStates(requireField(record, "triggers", "version 3 save"), "version 3 save.triggers"),
         questFlags: readBooleanRecord(requireField(record, "questFlags", "version 3 save"), "version 3 save.questFlags"),
         clock: readClock(requireField(record, "clock", "version 3 save"), "version 3 save.clock"),
         persons: readBooleanRecord(requireField(record, "persons", "version 3 save"), "version 3 save.persons"),
+        personStatesByLevel: {},
         stageFlags: readBooleanRecord(requireField(record, "stageFlags", "version 3 save"), "version 3 save.stageFlags"),
         locationAccess: readNumberRecord(requireField(record, "locationAccess", "version 3 save"), "version 3 save.locationAccess"),
         bestiaryKills: {},
@@ -473,13 +515,14 @@ function migrateVersion4(record: UnknownRecord): GameSaveData {
         version: SAVE_FORMAT_VERSION,
         location: readLocation(requireField(record, "location", "version 4 save"), "version 4 save.location"),
         player: readPlayer(requireField(record, "player", "version 4 save"), "version 4 save.player", false),
-        inventories: readInventories(requireField(record, "inventories", "version 4 save"), "version 4 save.inventories"),
+        ...migrateLegacyInventories(readLegacyInventories(requireField(record, "inventories", "version 4 save"), "version 4 save.inventories")),
         scriptVariables: readScriptVariables(requireField(record, "scriptVariables", "version 4 save"), "version 4 save.scriptVariables"),
         doors: readDoorStates(requireField(record, "doors", "version 4 save"), "version 4 save.doors"),
         triggers: readTriggerStates(requireField(record, "triggers", "version 4 save"), "version 4 save.triggers"),
         questFlags: readBooleanRecord(requireField(record, "questFlags", "version 4 save"), "version 4 save.questFlags"),
         clock: readClock(requireField(record, "clock", "version 4 save"), "version 4 save.clock"),
         persons: readBooleanRecord(requireField(record, "persons", "version 4 save"), "version 4 save.persons"),
+        personStatesByLevel: {},
         stageFlags: readBooleanRecord(requireField(record, "stageFlags", "version 4 save"), "version 4 save.stageFlags"),
         locationAccess: readNumberRecord(requireField(record, "locationAccess", "version 4 save"), "version 4 save.locationAccess"),
         bestiaryKills: {},
@@ -489,6 +532,61 @@ function migrateVersion4(record: UnknownRecord): GameSaveData {
         regenerationElapsed: readRegenerationElapsed(requireField(record, "regenerationElapsed", "version 4 save"), "version 4 save.regenerationElapsed"),
     };
 }
+
+function migrateVersion5(record: UnknownRecord): GameSaveData {
+    assertOnlyKeys(record, [
+        "version", "location", "player", "inventories", "scriptVariables", "doors", "triggers", "questFlags", "clock",
+        "persons", "stageFlags", "locationAccess", "bestiaryKills", "personParameters", "experience", "magicEffects", "regenerationElapsed",
+    ], "version 5 save");
+    return {
+        version: SAVE_FORMAT_VERSION,
+        location: readLocation(requireField(record, "location", "version 5 save"), "version 5 save.location"),
+        player: readPlayer(requireField(record, "player", "version 5 save"), "version 5 save.player", false),
+        ...migrateLegacyInventories(readLegacyInventories(requireField(record, "inventories", "version 5 save"), "version 5 save.inventories")),
+        scriptVariables: readScriptVariables(requireField(record, "scriptVariables", "version 5 save"), "version 5 save.scriptVariables"),
+        doors: readDoorStates(requireField(record, "doors", "version 5 save"), "version 5 save.doors"),
+        triggers: readTriggerStates(requireField(record, "triggers", "version 5 save"), "version 5 save.triggers"),
+        questFlags: readBooleanRecord(requireField(record, "questFlags", "version 5 save"), "version 5 save.questFlags"),
+        clock: readClock(requireField(record, "clock", "version 5 save"), "version 5 save.clock"),
+        persons: readBooleanRecord(requireField(record, "persons", "version 5 save"), "version 5 save.persons"),
+        personStatesByLevel: {},
+        stageFlags: readBooleanRecord(requireField(record, "stageFlags", "version 5 save"), "version 5 save.stageFlags"),
+        locationAccess: readNumberRecord(requireField(record, "locationAccess", "version 5 save"), "version 5 save.locationAccess"),
+        bestiaryKills: readBestiaryKills(requireField(record, "bestiaryKills", "version 5 save"), "version 5 save.bestiaryKills"),
+        personParameters: readNestedNumberRecord(requireField(record, "personParameters", "version 5 save"), "version 5 save.personParameters"),
+        experience: readNonNegativeNumber(requireField(record, "experience", "version 5 save"), "version 5 save.experience"),
+        magicEffects: readMagicEffects(requireField(record, "magicEffects", "version 5 save"), "version 5 save.magicEffects"),
+        regenerationElapsed: readRegenerationElapsed(requireField(record, "regenerationElapsed", "version 5 save"), "version 5 save.regenerationElapsed"),
+    };
+}
+function migrateVersion6(record: UnknownRecord): GameSaveData {
+    assertOnlyKeys(record, [
+        "version", "location", "player", "inventories", "equipped", "scriptVariables", "doors", "triggers", "questFlags", "clock",
+        "persons", "stageFlags", "locationAccess", "bestiaryKills", "personParameters", "experience", "magicEffects", "regenerationElapsed",
+    ], "version 6 save");
+    return {
+        version: SAVE_FORMAT_VERSION,
+        location: readLocation(requireField(record, "location", "version 6 save"), "version 6 save.location"),
+        player: readPlayer(requireField(record, "player", "version 6 save"), "version 6 save.player", false),
+        inventories: readInventories(requireField(record, "inventories", "version 6 save"), "version 6 save.inventories"),
+        equipped: readEquippedItems(requireField(record, "equipped", "version 6 save"), "version 6 save.equipped"),
+        scriptVariables: readScriptVariables(requireField(record, "scriptVariables", "version 6 save"), "version 6 save.scriptVariables"),
+        doors: readDoorStates(requireField(record, "doors", "version 6 save"), "version 6 save.doors"),
+        triggers: readTriggerStates(requireField(record, "triggers", "version 6 save"), "version 6 save.triggers"),
+        questFlags: readBooleanRecord(requireField(record, "questFlags", "version 6 save"), "version 6 save.questFlags"),
+        clock: readClock(requireField(record, "clock", "version 6 save"), "version 6 save.clock"),
+        persons: readBooleanRecord(requireField(record, "persons", "version 6 save"), "version 6 save.persons"),
+        personStatesByLevel: {},
+        stageFlags: readBooleanRecord(requireField(record, "stageFlags", "version 6 save"), "version 6 save.stageFlags"),
+        locationAccess: readNumberRecord(requireField(record, "locationAccess", "version 6 save"), "version 6 save.locationAccess"),
+        bestiaryKills: readBestiaryKills(requireField(record, "bestiaryKills", "version 6 save"), "version 6 save.bestiaryKills"),
+        personParameters: readNestedNumberRecord(requireField(record, "personParameters", "version 6 save"), "version 6 save.personParameters"),
+        experience: readNonNegativeNumber(requireField(record, "experience", "version 6 save"), "version 6 save.experience"),
+        magicEffects: readMagicEffects(requireField(record, "magicEffects", "version 6 save"), "version 6 save.magicEffects"),
+        regenerationElapsed: readRegenerationElapsed(requireField(record, "regenerationElapsed", "version 6 save"), "version 6 save.regenerationElapsed"),
+    };
+}
+
 
 function readLegacyLocation(value: unknown, path: string): SaveLocation {
     const record = requireRecord(value, path);
@@ -557,8 +655,56 @@ function readInventories(value: unknown, path: string): Inventories {
     const result: Inventories = {};
     for (const [owner, inventory] of Object.entries(record)) {
         assertRecordKey(owner, path);
+        if (!Array.isArray(inventory)) throw new SaveFormatError(`${path}.${owner} must be an array`);
+        result[owner] = inventory.map((stack, index) => {
+            const stackPath = `${path}.${owner}[${index}]`;
+            const item = readItemInstanceState(stack, stackPath);
+            const stackRecord = requireRecord(stack, stackPath);
+            assertOnlyKeys(stackRecord, ["id", "definitionId", "durability", "charges", "quantity"], stackPath);
+            const quantity = readSafeInteger(requireField(stackRecord, "quantity", stackPath), `${stackPath}.quantity`);
+            if (quantity <= 0) throw new SaveFormatError(`${stackPath}.quantity must be a positive integer`);
+            return { ...item, quantity };
+        });
+    }
+    return result;
+}
+
+function readEquippedItems(value: unknown, path: string): EquippedItems {
+    const record = requireRecord(value, path);
+    const result: EquippedItems = {};
+    for (const [rawSlot, stack] of Object.entries(record)) {
+        if (!EQUIPMENT_SLOTS.includes(rawSlot as EquipmentSlot)) {
+            throw new SaveFormatError(`${path} contains unknown equipment slot ${rawSlot}`);
+        }
+        const stackPath = `${path}.${rawSlot}`;
+        const stackRecord = requireRecord(stack, stackPath);
+        assertOnlyKeys(stackRecord, ["id", "definitionId", "durability", "charges", "quantity"], stackPath);
+        const quantity = readSafeInteger(requireField(stackRecord, "quantity", stackPath), `${stackPath}.quantity`);
+        if (quantity <= 0) throw new SaveFormatError(`${stackPath}.quantity must be a positive integer`);
+        result[rawSlot as EquipmentSlot] = { ...readItemInstanceState(stack, stackPath), quantity };
+    }
+    return result;
+}
+
+function readItemInstanceState(value: unknown, path: string): ItemInstanceSaveState {
+    const record = requireRecord(value, path);
+    const id = readName(requireField(record, "id", path), `${path}.id`);
+    const definitionId = readName(requireField(record, "definitionId", path), `${path}.definitionId`);
+    const durability = readSafeInteger(requireField(record, "durability", path), `${path}.durability`);
+    if (durability < 0 || durability > 100) throw new SaveFormatError(`${path}.durability must be between 0 and 100`);
+    const chargesValue = record.charges;
+    const charges = chargesValue === undefined ? undefined : readSafeInteger(chargesValue, `${path}.charges`);
+    if (charges !== undefined && charges < 0) throw new SaveFormatError(`${path}.charges must be non-negative`);
+    return charges === undefined ? { id, definitionId, durability } : { id, definitionId, durability, charges };
+}
+
+function readLegacyInventories(value: unknown, path: string): LegacyInventories {
+    const record = requireRecord(value, path);
+    const result: LegacyInventories = {};
+    for (const [owner, inventory] of Object.entries(record)) {
+        assertRecordKey(owner, path);
         const items = requireRecord(inventory, `${path}.${owner}`);
-        const copied: ItemInventory = {};
+        const copied: Record<string, number> = {};
         for (const [itemId, count] of Object.entries(items)) {
             if (itemId.length > 256) throw new SaveFormatError(`${path}.${owner} has an item ID longer than 256 characters`);
             assertRecordKey(itemId, `${path}.${owner}`);
@@ -569,6 +715,28 @@ function readInventories(value: unknown, path: string): Inventories {
         result[owner] = copied;
     }
     return result;
+}
+
+function migrateLegacyInventories(legacy: LegacyInventories): Pick<GameSaveData, "inventories" | "equipped"> {
+    const inventories: Inventories = {};
+    for (const [owner, items] of Object.entries(legacy)) {
+        if (owner === LEGACY_EQUIPPED_INVENTORY_OWNER) continue;
+        inventories[owner] = Object.entries(items).map(([definitionId, quantity], index) => ({
+            id: `${owner}:${definitionId}:${index}`,
+            definitionId,
+            durability: 100,
+            quantity,
+        }));
+    }
+    const equipped: EquippedItems = {};
+    for (const encoded of Object.keys(legacy[LEGACY_EQUIPPED_INVENTORY_OWNER] ?? {})) {
+        const separator = encoded.indexOf(":");
+        const slot = encoded.slice(0, separator) as EquipmentSlot;
+        const definitionId = encoded.slice(separator + 1);
+        if (separator <= 0 || !EQUIPMENT_SLOTS.includes(slot) || !definitionId) continue;
+        equipped[slot] = { id: `equipped:${slot}:${definitionId}`, definitionId, durability: 100, quantity: 1 };
+    }
+    return { inventories, equipped };
 }
 
 function readScriptVariables(value: unknown, path: string): ScriptVariables {
@@ -649,6 +817,16 @@ function readBestiaryKills(value: unknown, path: string): BestiaryKills {
         const count = readSafeInteger(countValue, `${path}.${name}`);
         if (count < 0 || count > 0xffff) throw new SaveFormatError(`${path}.${name} must be between 0 and 65535`);
         result[name] = count;
+    }
+    return result;
+}
+
+function readNestedBooleanRecord(value: unknown, path: string): Record<string, Record<string, boolean>> {
+    const record = requireRecord(value, path);
+    const result: Record<string, Record<string, boolean>> = {};
+    for (const [name, nested] of Object.entries(record)) {
+        assertRecordKey(name, path);
+        result[name] = readBooleanRecord(nested, `${path}.${name}`);
     }
     return result;
 }

@@ -4,43 +4,49 @@
     z-index: 100;
     overflow: hidden;
     background: #000;
-    color: #ead7a3;
-    font-family: ZlatoPalatino, "Palatino Linotype", serif;
+    color: #fff;
+    font-family: ZlatoConsole, "Lucida Console", monospace;
+    font-size: 10px;
 }
 
-.loading > img {
-    width: 100%;
-    height: 100%;
-    object-fit: fill;
+.background {
+    width: 1024px;
+    height: 768px;
 }
 
 .progress {
     position: absolute;
-    left: 34.765625%;
-    bottom: 5.5989583%;
-    width: 30.46875%;
-    height: 2.6041667%;
-    background: url('/assets/engineres/interface/loading/glow.bmp') center / 100% 100% no-repeat;
+    top: 690px;
+    left: 47px;
+    height: 24px;
+    overflow: hidden;
+    transition: width 120ms linear;
 }
 
-.progress span {
+.progress img {
     display: block;
-    width: 100%;
-    height: 100%;
-    background: url('/assets/engineres/interface/loading/progress.bmp') left center / 100% 100% no-repeat;
-    animation: loadingProgress 900ms ease-out both;
+    width: 934px;
+    height: 24px;
+    max-width: none;
+}
+
+.glow {
+    position: absolute;
+    top: 683px;
+    width: 60px;
+    height: 39px;
+    mix-blend-mode: screen;
+    pointer-events: none;
+    transition: left 120ms linear;
 }
 
 .loading strong {
     position: absolute;
-    right: 0;
-    bottom: 1.5%;
-    left: 0;
-    text-align: center;
-    text-shadow: 0 2px 3px #000;
-}
-
-@keyframes loadingProgress {
-    from { clip-path: inset(0 100% 0 0); }
-    to { clip-path: inset(0); }
+    top: 695px;
+    left: 54px;
+    z-index: 1;
+    font: inherit;
+    font-weight: 400;
+    line-height: normal;
+    white-space: nowrap;
 }

@@ -1,9 +1,13 @@
 import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import {
     DIALOGUE_PANEL_RECT,
+    DIALOGUE_ARROW_SCROLL_STEP,
+    DIALOGUE_CONTINUATION_INDENT,
+    DIALOGUE_LINE_HEIGHT,
     DIALOGUE_SCROLL_OBJECT_IDS,
     DIALOGUE_TRADE_OBJECT_ID,
     DIALOGUE_TEXT_RECT,
+    DIALOGUE_WHEEL_SCROLL_STEP,
     type NativeRect,
 } from "../../constants/clientDll.ts";
 import { MAIN_INTERFACE_FONT } from "../../constants/fontsScr.ts";
@@ -34,7 +38,6 @@ const nativeRectStyle = ({ left, top, width, height }: NativeRect): CSSPropertie
     height: `${height}px`,
 });
 
-const DIALOGUE_LINE_SCROLL = 20;
 const DIALOGUE_CONTROL_OBJECT_IDS = Object.freeze([
     DIALOGUE_TRADE_OBJECT_ID,
     ...DIALOGUE_SCROLL_OBJECT_IDS,
@@ -91,8 +94,10 @@ export const DialoguePanel = ({
     }, [disabled, onChoose, state]);
 
     useEffect(() => {
-        contentRef.current?.scrollTo({ top: 0 });
-        setScrollValue(0);
+        const content = contentRef.current;
+        if (!content) return;
+        content.scrollTop = content.scrollHeight;
+        updateScrollValue();
     }, [state.revision]);
 
     if (state.status !== "active" || state.speaker === null || state.text === null) return null;
@@ -108,14 +113,25 @@ export const DialoguePanel = ({
                     fontFamily: `ZlatoPalatino, "${MAIN_INTERFACE_FONT.typeFace}", serif`,
                     fontSize: `${MAIN_INTERFACE_FONT.size}px`,
                     fontWeight: MAIN_INTERFACE_FONT.weight,
-                }}
-                onScroll={updateScrollValue}>
-                <p className={styles.phrase} id={phraseId} aria-live="polite">
-                    <span className={styles.speaker}>{state.speaker}: </span>{state.text}
-                </p>
+                    lineHeight: `${DIALOGUE_LINE_HEIGHT}px`,
+                    "--dialogue-continuation-indent": `${DIALOGUE_CONTINUATION_INDENT}px`,
+                } as CSSProperties}
+                onScroll={updateScrollValue}
+                onWheel={(event) => {
+                    event.preventDefault();
+                    if (event.deltaY !== 0) scrollBy(Math.sign(event.deltaY) * DIALOGUE_WHEEL_SCROLL_STEP);
+                }}>
+                <div className={styles.transcript} id={phraseId} aria-live="polite">
+                    {state.transcript.map((entry, index) => (
+                        <p key={`${entry.owner}:${entry.phraseId}:${index}`}
+                            className={`${styles.line} ${entry.owner === "hero" ? styles.heroLine : styles.npcLine}`}>
+                            <span className={styles.speaker}>{entry.speaker}: </span>{entry.text}
+                        </p>
+                    ))}
+                </div>
                 <ol className={styles.options} aria-label="Варианты ответа">
-                    {state.options.map((option) => (
-                        <DialogueChoice key={option.id} option={option}
+                    {state.options.map((option, index) => (
+                        <DialogueChoice key={option.id} option={option} ordinal={index + 1}
                             disabled={disabled} onChoose={onChoose} />
                     ))}
                 </ol>
@@ -128,8 +144,8 @@ export const DialoguePanel = ({
                 inactiveObjectIds={disabled ? DIALOGUE_CONTROL_OBJECT_IDS : []}
                 onAction={(object) => {
                     if (object.id === DIALOGUE_TRADE_OBJECT_ID) onTrade?.();
-                    if (object.id === 44) scrollBy(-DIALOGUE_LINE_SCROLL);
-                    if (object.id === 45) scrollBy(DIALOGUE_LINE_SCROLL);
+                    if (object.id === 44) scrollBy(-DIALOGUE_ARROW_SCROLL_STEP);
+                    if (object.id === 45) scrollBy(DIALOGUE_ARROW_SCROLL_STEP);
                 }}
                 onValueChange={(object, value) => {
                     if (object.id === 46 && typeof value === "number") setScrollPercentage(value);
@@ -141,11 +157,12 @@ export const DialoguePanel = ({
 
 interface DialogueChoiceProps {
     option: DialogueOption;
+    ordinal: number;
     disabled: boolean;
     onChoose: (optionId: number) => void;
 }
 
-const DialogueChoice = ({ option, disabled, onChoose }: DialogueChoiceProps) => (
+const DialogueChoice = ({ option, ordinal, disabled, onChoose }: DialogueChoiceProps) => (
     <li className={styles.optionItem}>
         <button
             className={styles.option}
@@ -154,7 +171,7 @@ const DialogueChoice = ({ option, disabled, onChoose }: DialogueChoiceProps) => 
             aria-keyshortcuts={option.shortcut === undefined ? undefined : String(option.shortcut)}
             onClick={() => onChoose(option.id)}
         >
-            <span>{option.text}</span>
+            <span>{ordinal}. {option.text}</span>
         </button>
     </li>
 );

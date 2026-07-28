@@ -1,0 +1,342 @@
+.hud {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    pointer-events: none;
+    font-family: ZlatoPalatino, "Palatino Linotype", serif;
+
+    color: #ded0a5;
+    text-shadow: 0 1px 2px #000;
+}
+
+.hud[data-hidden="true"] .panel,
+.hud[data-hidden="true"] .authoredControls,
+.hud[data-hidden="true"] .magicSlot,
+.hud[data-hidden="true"] .interfaceIcon,
+.hud[data-hidden="true"] .skillPanel,
+.hud[data-hidden="true"] .status,
+.hud[data-hidden="true"] .statusHistory {
+    display: none;
+}
+
+.skillPanel {
+    position: absolute;
+    top: 510px;
+    left: 0;
+    z-index: 3;
+    width: 157px;
+    height: 130px;
+    pointer-events: auto;
+}
+
+.skillPanelBackground {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 157px;
+    height: 123px;
+    pointer-events: none;
+}
+
+.skillList {
+    position: absolute;
+    top: 10px;
+    left: 16px;
+    width: 128px;
+    height: 120px;
+    overflow-y: auto;
+    color: #000;
+    font-size: 12px;
+    font-weight: 500;
+    text-shadow: none;
+    scrollbar-width: none;
+}
+
+.skillList::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+}
+
+.skillEntry {
+    display: flex;
+    width: 100%;
+    min-height: 14px;
+    justify-content: space-between;
+    gap: 4px;
+    border: 0;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    white-space: nowrap;
+    background: transparent;
+    cursor: inherit;
+}
+
+.skillEntry:hover {
+    color: #0000c0;
+}
+
+.panel {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.panel > canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.status {
+    position: absolute;
+    z-index: 7;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    padding: 0 13px;
+    color: #171914;
+    text-align: left;
+    text-overflow: ellipsis;
+    text-shadow: none;
+    white-space: nowrap;
+    background: url('/assets/engineres/gpanel/status_bar_new.bmp') center / 100% 100% no-repeat;
+    border: 0;
+    cursor: pointer;
+    pointer-events: auto;
+}
+
+.statusHistory {
+    position: absolute;
+    z-index: 6;
+    overflow: hidden;
+    pointer-events: auto;
+}
+
+.statusHistoryBackground {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+    pointer-events: none;
+}
+
+.statusHistoryViewport {
+    position: absolute;
+    z-index: 1;
+    overflow: hidden;
+    color: #171914;
+    line-height: 15px;
+    text-align: left;
+    text-shadow: none;
+    cursor: pointer;
+    scrollbar-width: none;
+}
+
+.statusHistoryViewport::-webkit-scrollbar {
+    display: none;
+}
+
+.statusHistoryMessages {
+    display: flex;
+    min-height: 100%;
+    flex-direction: column;
+    justify-content: flex-end;
+    overflow-wrap: break-word;
+    white-space: pre-wrap;
+}
+
+.statusHistoryControl {
+    position: absolute;
+    z-index: 3;
+    width: 22px;
+    height: 20px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+}
+
+.statusHistoryControl img {
+    display: block;
+    width: 22px;
+    height: 20px;
+    opacity: 0;
+    image-rendering: pixelated;
+    pointer-events: none;
+}
+
+.statusHistoryControl:active img {
+    opacity: 1;
+}
+
+.statusHistoryControl:disabled {
+    cursor: default;
+}
+
+.statusHistorySlider {
+    position: absolute;
+    z-index: 3;
+    width: 20px;
+    height: 128px;
+    cursor: ns-resize;
+    touch-action: none;
+}
+
+.statusHistorySliderThumb {
+    position: absolute;
+    left: 1px;
+    width: 17px;
+    height: 16px;
+    image-rendering: pixelated;
+    pointer-events: none;
+}
+
+.lifeValue,
+.energyValue {
+    position: absolute;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    color: #d7d7cf;
+    text-align: center;
+    text-shadow: 1px 1px #080806;
+}
+
+
+.weaponSlot {
+    position: absolute;
+    z-index: 4;
+    display: block;
+    object-fit: fill;
+    image-rendering: pixelated;
+    pointer-events: none;
+}
+
+.damageSlot {
+    position: absolute;
+    z-index: 4;
+    overflow: hidden;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: inherit;
+    pointer-events: auto;
+}
+
+.damageSlot img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    image-rendering: pixelated;
+}
+
+.damageSlot:disabled {
+    cursor: default;
+}
+
+.slotPlaceholder {
+    position: absolute;
+    z-index: 1;
+    pointer-events: none;
+}
+
+
+.interfaceIcon {
+    position: absolute;
+    z-index: 5;
+    overflow: hidden;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: inherit;
+    image-rendering: pixelated;
+    pointer-events: auto;
+}
+
+.interfaceIcon canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+}
+
+.interfaceIcon[aria-disabled='true'] {
+    pointer-events: none;
+}
+
+.authoredControls {
+    z-index: 4;
+    pointer-events: none;
+}
+
+.authoredControls > * {
+    pointer-events: auto;
+}
+
+.magicSlot {
+    position: absolute;
+    z-index: 5;
+    min-width: 0;
+    overflow: hidden;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: inherit;
+    pointer-events: auto;
+}
+
+.magicSlot img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    image-rendering: pixelated;
+}
+
+.magicSlot[aria-pressed='true'],
+.magicSlot:focus-visible {
+    outline: 1px solid rgb(238 220 157 / 90%);
+    outline-offset: -1px;
+}
+
+.magicSlot:disabled {
+    cursor: default;
+}
+
+
+
+
+.minimapFrame {
+    /*
+     * Original 1024×768 output: one-pixel outer frame (799,3,222,167),
+     * enclosing the 220×165 minimap content at (800,4).
+     */
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    box-sizing: border-box;
+    width: 222px;
+    height: 167px;
+    border: 1px solid #dfe2d5;
+    background: #120f0b;
+    touch-action: none;
+    pointer-events: auto;
+}
+
+.minimapFrame[data-hidden='true'] {
+    visibility: hidden;
+}
+
+.minimapFrame canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    image-rendering: auto;
+}
+

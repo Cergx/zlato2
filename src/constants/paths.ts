@@ -1,4 +1,4 @@
-import { GameMode } from "./levels.ts";
+import type { GameMode } from "./levels.ts";
 
 export const AssetsBase = "/assets";
 
@@ -14,6 +14,7 @@ export const Paths = {
     SDB: `${AssetsBase}/sdb`,
     SOUNDS: `${AssetsBase}/sounds`,
     WEAR: `${AssetsBase}/wear`,
+    MINIMAP_TRANSITION_GLOW: `${AssetsBase}/engineres/interface/trigger_glow_map.bmp`,
 
     PERSON_PAD: (resource: string) => `${Paths.PERSONS}/${resource}/${resource}.pad`,
     PERSON_ANIMATION: (resource: string, animation: string) => `${Paths.PERSONS}/${resource}/animation/${animation}`,
@@ -36,6 +37,7 @@ export const Paths = {
     LEVEL_LAO: (levelPack: string) => `${Paths.LEVELS}/pack/${levelPack}/data/animated/${levelPack}.lao`,
 
     LEVEL_MASK: (levelPack: string, index: number) => `${Paths.LEVELS}/pack/${levelPack}/bitmaps/masks/mask_${index}.csx`,
+    LEVEL_ALT_MASK: (levelPack: string, index: number) => `${Paths.LEVELS}/pack/${levelPack}/bitmaps/masks/alt/mask_${index}.csx`,
     LEVEL_STATIC: (levelPack: string, index: number) => `${Paths.LEVELS}/pack/${levelPack}/bitmaps/static/static_${index}.csx`,
     LEVEL_TRIGGER: (levelPack: string, index: number) => `${Paths.LEVELS}/pack/${levelPack}/bitmaps/triggers/trigger_${index}.csx`
 };

@@ -1,0 +1,8 @@
+{"event":"clean_scr_program","asset":"levels/single/l1_1/scripts/init.scr","bytes":207,"statements":2}
+{"event":"clean_scr_evaluation","sequence":1,"depth":1,"kind":23,"nodeType":"variable","result":0}
+{"event":"clean_scr_evaluation","sequence":2,"depth":1,"kind":24,"nodeType":"literal","result":0}
+{"event":"clean_scr_evaluation","sequence":3,"depth":0,"kind":10,"nodeType":"binary","result":0}
+{"event":"clean_scr_evaluation","sequence":4,"depth":1,"kind":23,"nodeType":"variable","result":0}
+{"event":"clean_scr_evaluation","sequence":5,"depth":1,"kind":24,"nodeType":"literal","result":0}
+{"event":"clean_scr_evaluation","sequence":6,"depth":0,"kind":10,"nodeType":"binary","result":0}
+{"event":"clean_scr_trace_summary","evaluations":6,"steps":8,"variables":{"l1_svetlograd_n7_helper":0,"result":0}}

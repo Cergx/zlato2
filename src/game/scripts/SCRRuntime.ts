@@ -1,3 +1,5 @@
+import { getNativeSCRFunction } from "./NativeSCRABI.ts";
+
 export type SCRValue = number | string | boolean;
 
 export interface SCRSourceLocation {
@@ -94,6 +96,7 @@ export interface SCRDeclarationStatement extends SCRSourceRange {
     readonly type: "declaration";
     readonly name: string;
     readonly initialValue: SCRExpression;
+    readonly explicitInitializer: boolean;
 }
 
 export interface SCRAssignmentStatement extends SCRSourceRange {
@@ -132,10 +135,20 @@ export interface SCRHost {
     call: SCRHostCall;
 }
 
+export interface SCREvaluationTrace extends SCRSourceRange {
+    readonly sourceName: string;
+    readonly sequence: number;
+    readonly depth: number;
+    readonly kind: number;
+    readonly nodeType: SCRExpression["type"] | "assignment" | "declaration";
+    readonly result: SCRValue;
+}
+
 export interface SCRRuntimeOptions {
     readonly host?: SCRHost;
     readonly variables?: Readonly<Record<string, SCRValue>> | Iterable<readonly [string, SCRValue]>;
     readonly limits?: Partial<SCRExecutionLimits>;
+    readonly onEvaluation?: (trace: SCREvaluationTrace) => void;
 }
 
 export interface SCRExecutionResult {
@@ -176,6 +189,37 @@ const BINARY_PRECEDENCE: Readonly<Record<string, number>> = {
     "%": 6,
 };
 
+const NATIVE_SCR_BINARY_KINDS: Readonly<Record<SCRBinaryExpression["operator"], number>> = {
+    "||": 0,
+    "&&": 2,
+    "==": 7,
+    "!=": 6,
+    "<": 11,
+    "<=": 9,
+    ">": 10,
+    ">=": 8,
+    "+": 14,
+    "-": 15,
+    "*": 16,
+    "/": 17,
+    "%": 18,
+};
+
+const nativeSCRExpressionKind = (expression: SCRExpression): number => {
+    switch (expression.type) {
+        case "literal":
+            return typeof expression.value === "string" ? 22 : 24;
+        case "variable":
+            return 23;
+        case "call":
+            return 48;
+        case "unary":
+            return expression.operator === "!" ? 20 : expression.operator === "-" ? 15 : 24;
+        case "binary":
+            return NATIVE_SCR_BINARY_KINDS[expression.operator];
+    }
+};
+
 export type SCREventHandlerName = "OnEnter" | "OnHover" | "OnLeave" | "OnClick";
 
 export interface SCRScript {
@@ -184,6 +228,8 @@ export interface SCRScript {
     readonly program: SCRProgram;
     readonly handlers: Readonly<Partial<Record<SCREventHandlerName, SCRProgram>>>;
 }
+export type SCRHandlerSources = Readonly<Partial<Record<SCREventHandlerName, string>>>;
+
 
 const extractSCRHandlerBody = (source: string, handler: SCREventHandlerName): string | undefined => {
     const header = new RegExp(`^\\s*${handler}\\s*$`, "m").exec(source);
@@ -209,6 +255,15 @@ const extractSCRHandlerBody = (source: string, handler: SCREventHandlerName): st
         cursor++;
     }
     throw new Error(`SCR handler ${handler} is missing its closing brace`);
+};
+
+export const extractSCRHandlerSources = (source: string): SCRHandlerSources => {
+    const handlers: Partial<Record<SCREventHandlerName, string>> = {};
+    for (const handler of ["OnLeave", "OnHover", "OnClick", "OnEnter"] as const) {
+        const body = extractSCRHandlerBody(source, handler);
+        if (body !== undefined) handlers[handler] = body;
+    }
+    return handlers;
 };
 
 export const parseSCRScript = (
@@ -547,6 +602,7 @@ class Parser {
         const name = this.current();
         if (name.kind !== "identifier") throw this.error(name, `Expected variable name after '${declaration.text}'`);
         this.advance();
+        let explicitInitializer = false;
         let initialValue: SCRExpression = {
             type: "literal",
             value: normalizeSCRIdentifier(declaration.text) === "string" ? "" : 0,
@@ -554,11 +610,19 @@ class Parser {
             end: name.end,
         };
         if (this.current().kind === "operator" && this.current().text === "=") {
+            explicitInitializer = true;
             this.advance();
             initialValue = this.expression();
         }
         const semicolon = this.expectPunctuation(";", "Expected ';' after declaration");
-        return { type: "declaration", name: name.text, initialValue, start: declaration.start, end: semicolon.end };
+        return {
+            type: "declaration",
+            name: name.text,
+            initialValue,
+            explicitInitializer,
+            start: declaration.start,
+            end: semicolon.end,
+        };
     }
 
     private ifStatement(): SCRIfStatement {
@@ -634,6 +698,9 @@ class Parser {
             this.advance();
             if (!(this.current().kind === "punctuation" && this.current().text === "(")) {
                 return { type: "variable", name: token.text, start: token.start, end: token.end };
+            }
+            if (!getNativeSCRFunction(token.text)) {
+                throw this.error(token, `Unknown native SCR function '${token.text}'`);
             }
             this.advance();
             const arguments_: SCRExpression[] = [];
@@ -726,16 +793,20 @@ interface ExecutionState {
     readonly sourceName: string;
     readonly limits: SCRExecutionLimits;
     steps: number;
+    evaluationDepth: number;
+    evaluationSequence: number;
 }
 
 export class SCRRuntime {
     private readonly persistentVariables = new Map<string, SCRValue>();
     private readonly host: SCRHost | undefined;
     private readonly limits: SCRExecutionLimits;
+    private readonly onEvaluation: ((trace: SCREvaluationTrace) => void) | undefined;
 
     constructor(options: SCRRuntimeOptions = {}) {
         this.host = options.host;
         this.limits = mergeExecutionLimits(options.limits);
+        this.onEvaluation = options.onEvaluation;
         validateExecutionLimits(this.limits);
         if (options.variables !== undefined) {
             if (Symbol.iterator in Object(options.variables)) {
@@ -782,7 +853,13 @@ export class SCRRuntime {
     executeProgram(program: SCRProgram, overrides?: Partial<SCRExecutionLimits>): SCRExecutionResult {
         const limits = mergeExecutionLimits(overrides, this.limits);
         validateExecutionLimits(limits);
-        const state: ExecutionState = { sourceName: program.sourceName, steps: 0, limits };
+        const state: ExecutionState = {
+            sourceName: program.sourceName,
+            steps: 0,
+            limits,
+            evaluationDepth: 0,
+            evaluationSequence: 0,
+        };
         for (const statement of program.statements) {
             this.evaluateStatement(statement, state);
         }
@@ -793,10 +870,11 @@ export class SCRRuntime {
         this.step(statement.start, state);
         switch (statement.type) {
             case "declaration":
-                this.setVariable(statement.name, this.evaluateExpression(statement.initialValue, state));
+                if (statement.explicitInitializer) this.evaluateAssignment(statement, statement.initialValue, state);
+                else this.setVariable(statement.name, statement.initialValue.type === "literal" ? statement.initialValue.value : 0);
                 return;
             case "assignment":
-                this.setVariable(statement.name, this.evaluateExpression(statement.expression, state));
+                this.evaluateAssignment(statement, statement.expression, state);
                 return;
             case "expression":
                 this.evaluateExpression(statement.expression, state);
@@ -816,8 +894,64 @@ export class SCRRuntime {
         }
     }
 
+    private evaluateAssignment(
+        statement: SCRDeclarationStatement | SCRAssignmentStatement,
+        expression: SCRExpression,
+        state: ExecutionState,
+    ): void {
+        const depth = state.evaluationDepth;
+        state.evaluationDepth += 1;
+        try {
+            const result = this.evaluateExpression(expression, state);
+            this.setVariable(statement.name, result);
+            this.emitEvaluation(statement, state, depth, 50, statement.type, result);
+        } finally {
+            state.evaluationDepth -= 1;
+        }
+    }
+
     private evaluateExpression(expression: SCRExpression, state: ExecutionState): SCRValue {
         this.step(expression.start, state);
+        const depth = state.evaluationDepth;
+        state.evaluationDepth += 1;
+        try {
+            const result = this.evaluateExpressionValue(expression, state);
+            this.emitEvaluation(
+                expression,
+                state,
+                depth,
+                nativeSCRExpressionKind(expression),
+                expression.type,
+                result,
+            );
+            return result;
+        } finally {
+            state.evaluationDepth -= 1;
+        }
+    }
+
+    private emitEvaluation(
+        range: SCRSourceRange,
+        state: ExecutionState,
+        depth: number,
+        kind: number,
+        nodeType: SCREvaluationTrace["nodeType"],
+        result: SCRValue,
+    ): void {
+        state.evaluationSequence += 1;
+        this.onEvaluation?.({
+            sourceName: state.sourceName,
+            sequence: state.evaluationSequence,
+            depth,
+            kind,
+            nodeType,
+            result,
+            start: range.start,
+            end: range.end,
+        });
+    }
+
+    private evaluateExpressionValue(expression: SCRExpression, state: ExecutionState): SCRValue {
         switch (expression.type) {
             case "literal":
                 return expression.value;
@@ -837,8 +971,12 @@ export class SCRRuntime {
             throw this.error(state.sourceName, expression.start, `No host is configured for function '${expression.name}'`);
         }
         const arguments_ = expression.arguments.map((argument) => this.evaluateExpression(argument, state));
+        const name = normalizeSCRIdentifier(expression.name);
+        if (!getNativeSCRFunction(name)) {
+            throw this.error(state.sourceName, expression.start, `Unknown native SCR function '${expression.name}'`);
+        }
         try {
-            const result = this.host.call(normalizeSCRIdentifier(expression.name), arguments_);
+            const result = this.host.call(name, arguments_);
             if (result === undefined) {
                 return 0;
             }

@@ -1,0 +1,9 @@
+{"event":"clean_scr_program","asset":"levels/single/l1_1/scripts/tg_exit_l1_2.scr","handler":"OnHover","bytes":131,"bodyBytes":65,"statements":2}
+{"event":"clean_scr_evaluation","sequence":1,"depth":2,"kind":22,"nodeType":"literal","result":"L1_2"}
+{"event":"clean_scr_evaluation","sequence":2,"depth":2,"kind":22,"nodeType":"literal","result":"L1_2_e_L1_1"}
+{"event":"clean_scr_command","command":"map L1_2","immediate":1}
+{"event":"clean_scr_trigger_state","entrance":"L1_2_e_L1_1","entranceLength":11,"commands":1}
+{"event":"clean_scr_host_call","name":"wd_loadarea","arguments":["L1_2","L1_2_e_L1_1"],"result":0}
+{"event":"clean_scr_evaluation","sequence":3,"depth":1,"kind":48,"nodeType":"call","result":0}
+{"event":"clean_scr_evaluation","sequence":4,"depth":0,"kind":50,"nodeType":"assignment","result":0}
+{"event":"clean_scr_trace_summary","evaluations":4,"steps":5,"variables":{"l1_svetlograd_n7_helper":0,"result":0,"test":0}}

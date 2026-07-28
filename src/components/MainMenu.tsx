@@ -3,11 +3,13 @@ import { NEW_GAME_START, type GameMode } from "../constants/levels";
 import { readGameSettings, type GameSettings } from "../game/GameSettingsRuntime";
 import { loadCSX } from "../game/Assets";
 import type { GameSaveData } from "../game/PersistenceRuntime";
+import type { HeroProfile } from "../game/HeroProfileRuntime.ts";
 import { CreditsPanel } from "./CreditsPanel";
 import { OptionsMenuPanel } from "./OptionsMenuPanel";
 import { OriginalGuiLayer } from "./OriginalGuiLayer";
 import { MainMenuAnimationLayer } from "./MainMenuAnimationLayer";
 import { SaveLoadMenuPanel } from "./SaveLoadMenuPanel";
+import { CharacterGeneratorPanel } from "./HeroGeneratorPanel.tsx";
 import styles from "./MainMenu.module.scss";
 
 export interface GameLaunchRequest {
@@ -16,6 +18,7 @@ export interface GameLaunchRequest {
     readonly entrance?: string;
     readonly quickLoad?: boolean;
     readonly saveSlot?: string;
+    readonly heroProfile?: HeroProfile;
 }
 
 interface MainMenuProps {
@@ -23,7 +26,7 @@ interface MainMenuProps {
     readonly skipSplash?: boolean;
 }
 
-type MenuPanel = "main" | "options" | "about" | "load";
+type MenuPanel = "main" | "options" | "about" | "load" | "generator";
 
 const CsxBackdrop = ({ path }: { readonly path: string }) => {
     const [source, setSource] = useState<string | null>(null);
@@ -87,10 +90,11 @@ export const MainMenu = ({ onLaunch, skipSplash = false }: MainMenuProps) => {
     if (splash) return <SplashSequence onFinished={() => setSplash(false)} />;
 
     const launchNewGame = (gameMode: GameMode): void => {
-        const start = gameMode === "single"
-            ? NEW_GAME_START
-            : { gameMode, level: "l10_1", entrance: undefined } as const;
-        onLaunch({ gameMode: start.gameMode, level: start.level, entrance: start.entrance });
+        if (gameMode === "single") {
+            setPanel("generator");
+            return;
+        }
+        onLaunch({ gameMode, level: "l10_1", entrance: undefined });
     };
     const loadGame = (slot: string, save: GameSaveData): void => {
         onLaunch({
@@ -125,6 +129,13 @@ export const MainMenu = ({ onLaunch, skipSplash = false }: MainMenuProps) => {
                     />
                     {message && <output className={styles.message}>{message}</output>}
                 </>
+            )}
+
+            {panel === "generator" && (
+                <CharacterGeneratorPanel
+                    onClose={() => setPanel("main")}
+                    onCreate={(heroProfile) => onLaunch({ ...NEW_GAME_START, heroProfile })}
+                />
             )}
 
             {panel === "load" && (

@@ -25,6 +25,8 @@ dist-ssr
 /public/assets/
 /public/Data/
 /info/
+/tmp-ghidra/
+/tmp-ghidra-client/
 
 # Local scratch artifacts
 /.tmp/

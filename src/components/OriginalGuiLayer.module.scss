@@ -3,4 +3,10 @@
     inset: 0;
     overflow: hidden;
     color: #ead9a9;
+
+    pointer-events: none;
+
+    & > * {
+        pointer-events: all;
+    }
 }

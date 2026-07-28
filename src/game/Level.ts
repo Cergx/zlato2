@@ -18,7 +18,7 @@ import { Animation } from "./Animation.ts";
 import { LevelPerson, loadHeroSprites, loadLevelPerson, loadLevelPersons } from "./PersonSprite.ts";
 import { cellToWorld, WORLD_CELL_HEIGHT, WORLD_CELL_WIDTH, worldToCell } from "./WorldCoordinates.ts";
 import { AudioWeatherRuntime, type WeatherSnapshot } from "./AudioWeatherRuntime.ts";
-import { GameStateRuntime, type AreaTransitionRequest, type DynamicPersonDefinition, type GameRuntimeSnapshot } from "./GameStateRuntime.ts";
+import { GameStateRuntime, type AreaTransitionRequest, type DynamicPersonDefinition, type GameRuntimeSnapshot, type GameStateRuntimeOptions } from "./GameStateRuntime.ts";
 import type { CursorType } from "../enums/CursorTypes.ts";
 import { chooseSoundWave, type SoundShaderDefinition } from "./SoundShaderRuntime.ts";
 
@@ -62,6 +62,27 @@ const buildTriggerCells = (
     }];
 };
 
+const extractMaskForeground = (
+    mapImage: HTMLImageElement,
+    maskImage: HTMLCanvasElement | undefined,
+    x: number,
+    y: number,
+): HTMLCanvasElement | undefined => {
+    if (!maskImage) return undefined;
+    const foreground = document.createElement("canvas");
+    foreground.width = maskImage.width;
+    foreground.height = maskImage.height;
+    const context = foreground.getContext("2d");
+    if (!context) return undefined;
+    context.drawImage(mapImage, -x, -y);
+    context.globalCompositeOperation = "destination-out";
+    context.drawImage(maskImage, 0, 0);
+    context.globalCompositeOperation = "source-over";
+    maskImage.width = 0;
+    maskImage.height = 0;
+    return foreground;
+};
+
 export interface LevelStatic extends StaticDescription {
     image?: HTMLCanvasElement;
 }
@@ -73,6 +94,8 @@ export interface LevelAnimation extends AnimationDescription {
 export interface LevelMask extends MaskDescription {
     image?: HTMLCanvasElement;
     foreground?: HTMLCanvasElement;
+    alternateImage?: HTMLCanvasElement;
+    alternateForeground?: HTMLCanvasElement;
 }
 
 export interface LevelTriggerMask extends TriggerDescription {
@@ -105,6 +128,12 @@ export interface LevelData {
     player: LevelPerson;
 }
 
+
+export interface MapReferenceHint {
+    readonly triggerName: string;
+    readonly text: string;
+}
+
 export interface LevelOptions {
     onLoadArea: (request: AreaTransitionRequest) => void;
     onGlobalMap?: () => void;
@@ -115,6 +144,12 @@ export interface LevelOptions {
     onTrade?: () => void;
     onContainerOpen?: (owner: string, triggerName: string) => void;
     onStatusText?: (text?: string) => void;
+    onMessage?: GameStateRuntimeOptions["onMessage"];
+    resolveItemLiteraryName?: GameStateRuntimeOptions["resolveItemLiteraryName"];
+    onReferenceHint?: (hint?: MapReferenceHint) => void;
+    onClockChange?: (elapsedMinutes: number) => void;
+    onRestChange?: GameStateRuntimeOptions["onRestChange"];
+    onLoadingProgress?: (progress: number) => void;
     strictScriptAbi?: boolean;
 }
 
@@ -150,6 +185,7 @@ export class Level {
             onPersonSound: (shader) => this.playPersonSound(shader),
             onCombatAnimation: (technicalName, kind) => this.mapRenderer?.playPersonCombatAnimation(technicalName, kind),
             onMagicEffect: (technicalName, targetName) => this.mapRenderer?.playMagicEffect(technicalName, targetName),
+            onWorldMagicEffect: (technicalName, position) => this.mapRenderer?.playMagicEffectAt(technicalName, position),
             onWeather: (type) => this.audioWeather.setWeather(type),
         });
     }
@@ -160,12 +196,14 @@ export class Level {
     public async loadLevel(gameMode: GameMode, level: string, entranceName?: string) {
         if (this.destroyed) throw new Error("Нельзя загрузить уничтоженный уровень");
         console.log(`Загрузка уровня ${level} в режиме ${gameMode}`);
+        this.options.onLoadingProgress?.(0);
 
         const sdbBinaryData = await fetch(Paths.LEVEL_SDB(level, gameMode)).then(res => res.arrayBuffer());
         const sdbData = new SDBParser(sdbBinaryData).getData();
 
         const sefText = await fetch(Paths.LEVEL_SEF(level, gameMode)).then(res => res.text());
         const sefData = new SEFParser(sefText).getData();
+        this.options.onLoadingProgress?.(0.08);
         const levelPersonsPromise = loadLevelPersons(sefData.persons);
         const playerSpritesPromise = loadHeroSprites(Object.values(this.runtime.getEquippedItems()));
         const initScriptPromise = loadOptionalScript(Paths.LEVEL_SCRIPT_INITIALIZATION(level, gameMode));
@@ -174,6 +212,7 @@ export class Level {
         const lvlParser = new LVLParser(Paths.LEVEL(sefData.pack));
         await lvlParser.parse();
         const lvlData = lvlParser.getData();
+        this.options.onLoadingProgress?.(0.2);
 
         const levelStatics: LevelStatic[] = [];
         for (let i = 0; i < lvlData.staticDescriptions.length; i++) {
@@ -181,17 +220,22 @@ export class Level {
             const image = await loadCSX(Paths.LEVEL_STATIC(sefData.pack, description.number));
             levelStatics.push({ image, ...description });
         }
+        this.options.onLoadingProgress?.(0.42);
 
         const levelMasks: LevelMask[] = [];
         for (let i = 0; i < lvlData.maskDescriptions.length; i++) {
             const description = lvlData.maskDescriptions[i];
-
-            const image = description.number >= 0
-                ? await loadCSX(Paths.LEVEL_MASK(sefData.pack, description.number), { magentaTransparent: false })
-                : undefined;
-
-            levelMasks.push({ image, ...description });
+            const [image, alternateImage] = await Promise.all([
+                description.number >= 0
+                    ? loadCSX(Paths.LEVEL_MASK(sefData.pack, description.number), { magentaTransparent: false })
+                    : undefined,
+                description.number >= 0 && (description.type & 1) !== 0
+                    ? loadCSX(Paths.LEVEL_ALT_MASK(sefData.pack, description.number), { magentaTransparent: false })
+                    : undefined,
+            ]);
+            levelMasks.push({ image, alternateImage, ...description });
         }
+        this.options.onLoadingProgress?.(0.62);
 
         const triggerImages = new Map(await Promise.all(
             [...new Set(lvlData.triggerDescription.map((description) => description.number))]
@@ -207,6 +251,7 @@ export class Level {
             buildTriggerCells(trigger, trigger.image, lvlData.mapSize),
         ]));
 
+        this.options.onLoadingProgress?.(0.72);
         const levelDoors: LevelDoor[] = [];
         for (let i = 0; i < lvlData.doors.length; i++) {
             const door= lvlData.doors[i];
@@ -233,6 +278,7 @@ export class Level {
         const laoParser = new LAOParser(Paths.LEVEL_LAO(sefData.pack));
         await laoParser.parse();
         const laoData = laoParser.getData();
+        this.options.onLoadingProgress?.(0.8);
 
         const levelAnimations: LevelAnimation[] = [];
         for (let i = 0; i < lvlData.animationDescriptions.length; i++) {
@@ -256,24 +302,16 @@ export class Level {
             initScriptPromise,
             coreScriptPromise,
         ]);
+        this.options.onLoadingProgress?.(0.9);
         if (this.destroyed) return;
 
         for (const mask of levelMasks) {
-            if (!mask.image) continue;
-            const foreground = document.createElement("canvas");
-            foreground.width = mask.image.width;
-            foreground.height = mask.image.height;
-            const foregroundContext = foreground.getContext("2d");
-            if (!foregroundContext) continue;
-
-            foregroundContext.drawImage(mapImage, -mask.x, -mask.y);
-            foregroundContext.globalCompositeOperation = "destination-out";
-            foregroundContext.drawImage(mask.image, 0, 0);
-            foregroundContext.globalCompositeOperation = "source-over";
-            mask.foreground = foreground;
-            mask.image.width = 0;
-            mask.image.height = 0;
+            // Client.dll 0x1202AB64 loads the main array; 0x1202AC92 loads type-1
+            // `masks\\alt` resources used by closed-door mask cells.
+            mask.foreground = extractMaskForeground(mapImage, mask.image, mask.x, mask.y);
+            mask.alternateForeground = extractMaskForeground(mapImage, mask.alternateImage, mask.x, mask.y);
             mask.image = undefined;
+            mask.alternateImage = undefined;
         }
 
         const playerEntrance = entranceName
@@ -310,10 +348,11 @@ export class Level {
         this.mapRenderer = null;
         await this.runtime.loadLevel(this.levelData);
         this.levelData.levelPersons.push(...await loadLevelPersons([...this.runtime.getDynamicPersons()]));
+        this.options.onLoadingProgress?.(0.97);
         this.mapRenderer = new MapRenderer(
             this.canvas,
             this.levelData,
-            (tick, simulationTimeMs, playerPosition) => this.runtime.update(tick, simulationTimeMs, playerPosition),
+            (tick, simulationTimeMs, playerPosition, clockTimeMs) => this.runtime.update(tick, simulationTimeMs, playerPosition, clockTimeMs),
             (person) => {
                 void this.runtime.interactDeadPerson(person.name).then((opened) => {
                     if (opened || !person.scriptDialog) return;
@@ -323,6 +362,8 @@ export class Level {
             },
 
             (person) => {
+                const playerPosition = this.mapRenderer?.getPlayerWorldPosition();
+                if (playerPosition) this.runtime.setCombatantPosition("hero", playerPosition);
                 this.runtime.attackPerson(person.name);
                 this.mapRenderer?.setMagicTargeting(this.runtime.isHeroMagicTargeting());
             },
@@ -332,8 +373,17 @@ export class Level {
             (kind, name) => {
                 if (!name) {
                     this.options.onStatusText?.();
+                    this.options.onReferenceHint?.();
                     return;
                 }
+                if (kind === "reference") {
+                    const trigger = this.levelData?.sefData.triggers.find((candidate) => candidate.name === name);
+                    const text = trigger?.literaryName === undefined ? undefined : this.levelData?.sdbData[trigger.literaryName];
+                    this.options.onStatusText?.();
+                    this.options.onReferenceHint?.(text ? { triggerName: name, text } : undefined);
+                    return;
+                }
+                this.options.onReferenceHint?.();
                 if (kind === "person") {
                     const person = this.levelData?.levelPersons.find((candidate) => candidate.name === name);
                     const text = person?.literaryName === undefined ? person?.literaryLabel : this.levelData?.sdbData[person.literaryName];
@@ -349,6 +399,8 @@ export class Level {
                 const text = trigger?.literaryName === undefined ? undefined : this.levelData?.sdbData[trigger.literaryName];
                 this.options.onStatusText?.(text ?? name);
             },
+            () => this.runtime.getHeroAttackDistance(),
+            (technicalName, position) => this.runtime.setCombatantPosition(technicalName, position),
         );
         for (const [technicalName, present] of Object.entries(this.runtime.snapshot().persons)) {
             this.mapRenderer.setPersonPresent(technicalName, present);
@@ -357,6 +409,7 @@ export class Level {
         for (const door of scenario?.getDoorStates() ?? []) this.mapRenderer.setDoorState(door.name, door.opened, door.cells, door.activationCells);
         for (const trigger of scenario?.getTriggerStates() ?? []) this.mapRenderer.setTriggerState(trigger);
         this.audioWeather.loadLevel(lvlData);
+        this.options.onLoadingProgress?.(1);
     }
 
     public async changeLevel(gameMode: GameMode, level: string, entranceName?: string) {

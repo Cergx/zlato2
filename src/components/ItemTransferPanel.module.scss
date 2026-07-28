@@ -16,28 +16,44 @@
     pointer-events: none;
 }
 
-.traderName {
+.heroName {
     position: absolute;
-    left: 1.2%;
-    top: 1.2%;
     z-index: 2;
-    width: 24.8%;
-    font-size: 12px;
-    font-weight: 700;
-    line-height: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    color: #000;
+    font: 500 12px ZlatoPalatino, "Palatino Linotype", serif;
+    line-height: normal;
+    pointer-events: none;
     text-align: center;
-    text-shadow: 0 1px rgb(255 239 190 / 55%);
+    white-space: nowrap;
+}
+
+.tradeValue {
+    position: relative;
+    z-index: 4;
+    display: flex;
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    overflow: hidden;
+    color: #303000;
+    font: 500 12px ZlatoPalatino, "Palatino Linotype", serif;
+    line-height: normal;
+    pointer-events: none;
+    text-align: center;
 }
 
 .itemStrip {
-    position: absolute;
     z-index: 3;
-    display: grid;
-    gap: 2px;
-    box-sizing: border-box;
 }
 
-.itemStrip button {
+.itemButton {
     position: relative;
     min-width: 0;
     min-height: 0;
@@ -47,161 +63,40 @@
     cursor: pointer;
 }
 
-.itemStrip button:hover,
-.itemStrip button:focus-visible {
+.itemButton:hover,
+.itemButton:focus-visible {
     z-index: 5;
     border-color: rgb(227 190 92 / 90%);
     outline: 1px solid #e3be5c;
 }
 
-.itemStrip button > img,
-.itemStrip button > span:first-child {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    pointer-events: none;
-}
-
-.itemStrip button > strong {
-    position: absolute;
-    right: 1px;
-    bottom: 0;
-    padding: 0 2px;
-    color: #fff0b2;
-    background: rgb(25 12 3 / 80%);
-    font: 700 9px Arial, sans-serif;
-    text-shadow: 0 1px 2px #000;
-}
-
-.tooltip {
-    position: absolute;
-    bottom: calc(100% + 4px);
-    left: 50%;
-    z-index: 8;
-    display: none;
-    width: 190px;
-    padding: 6px;
-    border: 1px solid #887755;
-    color: #ddd0aa;
-    background: rgb(21 16 10 / 96%);
-    font: 11px/1.25 Arial, sans-serif;
-    text-align: left;
-    transform: translateX(-50%);
-    pointer-events: none;
-}
-
-.tooltip b { display: block; color: #f1d58c; }
-.itemStrip button:hover .tooltip,
-.itemStrip button:focus-visible .tooltip { display: block; }
 
 .authoredControls { z-index: 5; }
-.authoredControls :global([data-gui-type="GUI_DD_CONTAINER"]) { pointer-events: none; }
+
+/* Client.dll 0x1207133d selects shipped `main_interface` before drawing IDs 43..47. */
+.tradePanel :is(
+    [data-gui-id="43"],
+    [data-gui-id="44"],
+    [data-gui-id="45"],
+    [data-gui-id="46"],
+    [data-gui-id="47"]
+) > span {
+    color: #000;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: normal;
+    text-shadow: none;
+}
 
 .lootPanel { z-index: 31; }
 
 .lootBackground {
     position: absolute;
-    left: 24.21875%;
-    top: 29.9479167%;
-    z-index: 1;
-    width: 51.5625%;
-    height: 35.9375%;
     pointer-events: none;
 }
 
-.lootTitle {
-    position: absolute;
-    left: 34%;
-    top: 30.7%;
-    z-index: 3;
-    width: 32%;
-    overflow: hidden;
-    color: #c3bca5;
-    font: 700 10px ZlatoPalatino, serif;
-    text-align: center;
-    text-overflow: ellipsis;
-    text-shadow: 0 1px #000;
-    white-space: nowrap;
-}
 
-.lootScroll,
-.takeAll,
-.lootClose {
-    position: absolute;
-    z-index: 5;
-    border: 0;
-    padding: 0;
-    background: transparent;
-    cursor: pointer;
-}
 
-.lootScroll { width: 2.44140625%; height: 6.7708333%; }
-.lootOtherLeft { left: 32.03125%; top: 34.114583%; }
-.lootOtherRight { left: 65.52734375%; top: 34.114583%; }
-.lootHeroLeft { left: 32.03125%; top: 49.348958%; }
-.lootHeroRight { left: 65.52734375%; top: 49.348958%; }
-
-.takeAll {
-    left: 47.16796875%;
-    top: 43.359375%;
-    width: 5.2734375%;
-    height: 3.125%;
-}
-
-.takeAll:hover,
-.takeAll:focus-visible { background: url('/assets/engineres/gpanel/but13l.bmp') center / 100% 100% no-repeat; outline: 0; }
-.takeAll:active { background-image: url('/assets/engineres/gpanel/but13p.bmp'); }
-
-.lootClose {
-    left: 47.75390625%;
-    top: 58.0729167%;
-    width: 4.19921875%;
-    height: 4.9479167%;
-}
-
-.lootClose:hover,
-.lootClose:focus-visible { background: url('/assets/engineres/gpanel/but14l.bmp') center / 100% 100% no-repeat; outline: 0; }
-.lootClose:active { background-image: url('/assets/engineres/gpanel/but14p.bmp'); }
-
-.stackDialog {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    z-index: 9;
-    width: 24.0234375%;
-    height: 26.171875%;
-    transform: translate(-50%, -50%);
-}
-
-.stackDialog > img {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    pointer-events: none;
-}
-
-.stackDialog > :global([data-gui-script="stacks_gui"]) { z-index: 3; }
-
-.stackItem {
-    position: absolute;
-    z-index: 2;
-}
-
-.stackItem > img,
-.stackItem > span:first-child {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-}
-
-.stackItem > strong {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    color: #fff0b2;
-    text-shadow: 0 1px 2px #000;
-}
 
 .error {
     position: absolute;

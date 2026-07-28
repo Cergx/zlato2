@@ -5,6 +5,7 @@ import {
     validateDamageRange,
     type DamageKind,
     type DamageRange,
+    type ItemClass,
     type ItemDefinition,
     type ItemEffect,
 } from "./Items.ts";
@@ -59,15 +60,24 @@ export interface CombatantOptions {
 
 export interface PersonWeaponReference {
     readonly itemId: string;
-    readonly quantity: number;
-    readonly chance: number;
+    readonly minimumLevel: number;
+    readonly maximumLevel: number;
 }
 
 export interface PersonSpellReference {
     readonly spellId: string;
-    readonly castChance: number;
-    readonly parameter: number;
+    readonly argument0: number;
+    readonly argument1: number;
 }
+
+export interface PersonTradeCapabilities {
+    readonly change: number;
+    readonly repair: number;
+    readonly charging: number;
+    readonly identification: number;
+    readonly takeOffCurse: number;
+}
+
 
 export interface PersonCombatTemplate {
     readonly scriptId: string;
@@ -75,11 +85,13 @@ export interface PersonCombatTemplate {
     readonly level: number;
     readonly attributes: CharacterAttributes;
     readonly skills: Readonly<Record<string, number>>;
+    readonly weaponLevelOffset: number;
     readonly weapons: readonly PersonWeaponReference[];
     readonly spells: readonly PersonSpellReference[];
     readonly battleMagicUse: number;
     readonly lifeEscape: number;
     readonly lifeHealing: number;
+    readonly trade: PersonTradeCapabilities;
 }
 
 export type OriginalDamageKind = "crushing" | "hacking" | "pricking";
@@ -89,6 +101,9 @@ export type OriginalMagicKind = "shadows" | "nature" | "gods" | "elements" | "li
 
 export interface OriginalWeaponProfile {
     readonly itemId: string;
+    readonly itemClass?: ItemClass;
+    /** Native item-header flags used by Client.dll 0x12057638 to select HUD attack modes. */
+    readonly nativeFlags: number;
     readonly actionPointCost: number;
     readonly attackDistance: number;
     readonly baseHitChance: number;
@@ -134,6 +149,7 @@ export interface OriginalAttackResult {
     readonly hitChance: number;
     readonly actionPointCost: number;
     readonly damageByKind: Readonly<Record<OriginalDamageKind, number>>;
+    readonly elementalDamageByKind: Readonly<Record<OriginalElementalDamageKind, number>>;
     readonly appliedDamage: number;
     readonly healthBefore: number;
     readonly healthAfter: number;
@@ -142,6 +158,8 @@ export interface OriginalAttackResult {
 
 export const UNARMED_WEAPON_PROFILE: OriginalWeaponProfile = {
     itemId: "unarmed",
+    nativeFlags: 0x40,
+    itemClass: "mace",
     actionPointCost: 10,
     attackDistance: 6,
     baseHitChance: 90,
@@ -235,7 +253,7 @@ export class FactionRelations {
         assertIdentifier(leftFactionId, "Left faction id");
         assertIdentifier(rightFactionId, "Right faction id");
         if (leftFactionId === rightFactionId) return "friendly";
-        return this.relations.get(this.key(leftFactionId, rightFactionId)) ?? "neutral";
+        return this.relations.get(this.key(leftFactionId, rightFactionId)) ?? "friendly";
     }
 
     set(leftFactionId: string, rightFactionId: string, relation: FactionRelation): void {
@@ -401,6 +419,36 @@ export function originalExperienceThreshold(level: number): number {
     return boundedLevel * (boundedLevel + 1) * 50;
 }
 
+/** Server.dll 0x1401DC32..0x1401DD6F: level-range filter followed by cyclic 50% selection. */
+export function selectOriginalPersonWeapon(
+    references: readonly PersonWeaponReference[],
+    levelOffset: number,
+    currentLevel: number,
+    random: RandomSource,
+): PersonWeaponReference | undefined {
+    const candidates = references
+        .filter(({ minimumLevel, maximumLevel }) =>
+            minimumLevel + levelOffset <= currentLevel && currentLevel <= maximumLevel + levelOffset)
+        .slice(0, 32);
+    if (candidates.length === 0) return undefined;
+
+    let index = 0;
+    while (true) {
+        if (nextRandom(random, "person weapon selection") < 0.5) return candidates[index];
+        index = (index + 1) % candidates.length;
+    }
+}
+/** Server.dll 0x14017ddd..0x14017e3e: max axis plus 3/8 of the minor axis, truncated. */
+export const originalCombatDistance = (
+    left: Readonly<{ x: number; y: number }>,
+    right: Readonly<{ x: number; y: number }>,
+): number => {
+    const dx = Math.abs(left.x - right.x);
+    const dy = Math.abs(left.y - right.y);
+    return Math.trunc(Math.max(dx, dy) + Math.min(dx, dy) * 0.375);
+};
+
+
 /** Resolves one physical hit while preserving AGE's separate C/P/H damage channels. */
 export function resolveOriginalAttack(
     attacker: OriginalCombatProfile,
@@ -415,6 +463,7 @@ export function resolveOriginalAttack(
     const criticalMiss = succeeds(attacker.criticalMissChance, random, "critical miss roll");
     const hit = !criticalMiss && succeeds(hitChance, random, "original attack hit roll");
     const emptyDamage: Record<OriginalDamageKind, number> = { crushing: 0, hacking: 0, pricking: 0 };
+    const emptyElementalDamage: Record<OriginalElementalDamageKind, number> = { fire: 0, cold: 0, poison: 0 };
     if (!hit) {
         return {
             hit: false,
@@ -423,6 +472,7 @@ export function resolveOriginalAttack(
             hitChance,
             actionPointCost: attacker.weapon.actionPointCost,
             damageByKind: emptyDamage,
+            elementalDamageByKind: emptyElementalDamage,
             appliedDamage: 0,
             healthBefore: targetHealth,
             healthAfter: targetHealth,
@@ -437,7 +487,13 @@ export function resolveOriginalAttack(
         const rolled = rollDamage(attacker.weapon.damage[kind], random);
         damageByKind[kind] = Math.max(0, Math.round(rolled * multiplier) - target.damageResistance[kind]);
     }
-    const appliedDamage = Object.values(damageByKind).reduce((sum, value) => sum + value, 0);
+    const elementalDamageByKind: Record<OriginalElementalDamageKind, number> = { fire: 0, cold: 0, poison: 0 };
+    for (const kind of ORIGINAL_ELEMENTAL_DAMAGE_KINDS) {
+        const rolled = rollDamage(attacker.elementalDamage[kind], random);
+        elementalDamageByKind[kind] = Math.max(0, rolled - target.elementalResistance[kind]);
+    }
+    const appliedDamage = [...Object.values(damageByKind), ...Object.values(elementalDamageByKind)]
+        .reduce((sum, value) => sum + value, 0);
     const healthAfter = Math.max(0, targetHealth - appliedDamage);
     return {
         hit: true,
@@ -446,6 +502,7 @@ export function resolveOriginalAttack(
         hitChance,
         actionPointCost: attacker.weapon.actionPointCost,
         damageByKind,
+        elementalDamageByKind,
         appliedDamage,
         healthBefore: targetHealth,
         healthAfter,
@@ -471,15 +528,13 @@ export function parsePersonCombatScript(scriptId: string, source: string): Perso
     if (resourceId !== undefined) assertIdentifier(resourceId, `Person script ${scriptId} resource id`);
 
     const skills = readNumericBlock(raw.skills, `Person script ${scriptId} skills`);
-    const weapons = readWeaponReferences(raw.weapon, scriptId);
-    const spells = readSpellReferences(raw.magic, scriptId);
-    const ai = readNumericBlock(raw.ai, `Person script ${scriptId} AI`);
+    const weaponBlock = readWeaponReferences(source);
+    const spells = readSpellReferences(source);
+    const ai = readNumericScriptBlock(source, "ai");
+    const tradePanel = readNumericScriptBlock(source, "trade_panel");
     const battleMagicUse = ai.battle_magic_use ?? 0;
     const lifeEscape = ai.life_escape ?? 0;
     const lifeHealing = ai.life_healing ?? 0;
-    assertPercentage(battleMagicUse, `Person script ${scriptId} battle magic use`);
-    assertPercentage(lifeEscape, `Person script ${scriptId} life escape`);
-    assertPercentage(lifeHealing, `Person script ${scriptId} life healing`);
 
     return {
         scriptId,
@@ -487,11 +542,19 @@ export function parsePersonCombatScript(scriptId: string, source: string): Perso
         level,
         attributes,
         skills,
-        weapons,
+        weaponLevelOffset: weaponBlock.levelOffset,
+        weapons: weaponBlock.references,
         spells,
         battleMagicUse,
         lifeEscape,
         lifeHealing,
+        trade: {
+            change: tradePanel.change ?? 0,
+            repair: tradePanel.repair ?? 0,
+            charging: tradePanel.charging ?? 0,
+            identification: tradePanel.identification ?? 0,
+            takeOffCurse: tradePanel.take_off_curse ?? 0,
+        },
     };
 }
 
@@ -624,6 +687,7 @@ function createCombatStats(input: CombatStatsInput | undefined): CombatStats {
 }
 
 const ORIGINAL_DAMAGE_KINDS: readonly OriginalDamageKind[] = ["crushing", "hacking", "pricking"];
+const ORIGINAL_ELEMENTAL_DAMAGE_KINDS: readonly OriginalElementalDamageKind[] = ["fire", "cold", "poison"];
 
 const weaponSkillParameter = (itemId: string): string => {
     const normalized = itemId.toLowerCase();
@@ -660,37 +724,50 @@ function readNumericBlock(raw: ParsedValue | undefined, label: string): Record<s
     return values;
 }
 
-function readWeaponReferences(raw: ParsedValue | undefined, scriptId: string): PersonWeaponReference[] {
-    if (raw === undefined) return [];
-    if (!isParsedData(raw)) throw new Error(`Person script ${scriptId} weapon must be a block`);
-    const weapons: PersonWeaponReference[] = [];
-    for (const [itemId, value] of Object.entries(raw)) {
-        const values = readTwoNumbers(value, `Person script ${scriptId} weapon ${itemId}`);
-        if (values[0] <= 0) throw new Error(`Person script ${scriptId} weapon ${itemId} quantity must be positive`);
-        assertPercentage(values[1], `Person script ${scriptId} weapon ${itemId} chance`);
-        weapons.push({ itemId, quantity: values[0], chance: values[1] });
+function readWeaponReferences(
+    source: string,
+): { readonly levelOffset: number; readonly references: readonly PersonWeaponReference[] } {
+    const block = readScriptBlockSource(source, "weapon");
+    const levelOffset = Number(block.match(/\blevel_offset\s+(-?\d+)/i)?.[1] ?? 0);
+    const references: PersonWeaponReference[] = [];
+    for (const entry of block.matchAll(/(\S+)\s+(-?\d+)\s+(-?\d+)/g)) {
+        if (entry[1].toLowerCase() === "level_offset") continue;
+        references.push({
+            itemId: entry[1],
+            minimumLevel: Number(entry[2]),
+            maximumLevel: Number(entry[3]),
+        });
     }
-    return weapons;
+    return { levelOffset, references };
 }
 
-function readSpellReferences(raw: ParsedValue | undefined, scriptId: string): PersonSpellReference[] {
-    if (raw === undefined) return [];
-    if (!isParsedData(raw)) throw new Error(`Person script ${scriptId} magic must be a block`);
+/** Server.dll 0x1401E101..0x1401E1E3 parses both integers, then selects magic only by technical name. */
+function readSpellReferences(source: string): PersonSpellReference[] {
     const spells: PersonSpellReference[] = [];
-    for (const [spellId, value] of Object.entries(raw)) {
-        const values = readTwoNumbers(value, `Person script ${scriptId} spell ${spellId}`);
-        assertPercentage(values[0], `Person script ${scriptId} spell ${spellId} cast chance`);
-        spells.push({ spellId, castChance: values[0], parameter: values[1] });
+    for (const entry of readScriptBlockSource(source, "magic").matchAll(/(\S+)\s+(-?\d+)\s+(-?\d+)/g)) {
+        spells.push({
+            spellId: entry[1],
+            argument0: Number(entry[2]),
+            argument1: Number(entry[3]),
+        });
     }
     return spells;
 }
 
-function readTwoNumbers(value: unknown, label: string): readonly [number, number] {
-    if (!Array.isArray(value) || value.length !== 2 || !value.every((entry) => Number.isSafeInteger(entry) && entry >= 0)) {
-        throw new Error(`${label} must have two non-negative integer values`);
+function readNumericScriptBlock(source: string, name: string): Record<string, number> {
+    const values: Record<string, number> = {};
+    for (const entry of readScriptBlockSource(source, name).matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(-?\d+)/g)) {
+        values[entry[1].toLowerCase()] = Number(entry[2]);
     }
-    return [value[0], value[1]];
+    return values;
 }
+
+function readScriptBlockSource(source: string, name: string): string {
+    const uncommented = source.replace(/\/\/.*$/gm, "");
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return uncommented.match(new RegExp(`\\b${escapedName}\\s*:\\s*\\{([^}]*)\\}`, "i"))?.[1] ?? "";
+}
+
 
 function assertDamageRequest(request: DamageRequest): void {
     assertNonNegativeInteger(request.amount, "Damage amount");

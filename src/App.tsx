@@ -17,7 +17,7 @@ export const App = () => {
 
     const changeMode = (nextMode: GameMode): void => {
         const nextLevel = nextMode === "single" ? singleLevels[0] : multiplayerLevels[0];
-        setLaunch({ gameMode: nextMode, level: nextLevel });
+        setLaunch((current) => ({ gameMode: nextMode, level: nextLevel, heroProfile: current?.heroProfile }));
     };
 
     return (
@@ -28,11 +28,12 @@ export const App = () => {
                 ) : (
                     <>
                         <GameWindow
-                            key={`${launch.gameMode}-${launch.level}-${launch.entrance ?? ""}-${launch.saveSlot ?? "new"}`}
+                            key={`${launch.gameMode}-${launch.level}-${launch.entrance ?? ""}-${launch.saveSlot ?? "new"}-${launch.heroProfile?.name ?? "shipped"}`}
                             gameMode={launch.gameMode}
                             level={launch.level}
                             entrance={launch.entrance}
                             saveSlot={launch.saveSlot}
+                            heroProfile={launch.heroProfile}
                             onMainMenu={() => setLaunch(null)}
                             strictScriptAbi={strictScriptAbi}
                         />
@@ -48,7 +49,9 @@ export const App = () => {
                             </label>
                             <label>
                                 Уровень
-                                <select value={level} onChange={(event) => setLaunch({ gameMode, level: event.target.value })}>
+                                <select value={level} onChange={(event) => setLaunch((current) => current
+                                    ? { ...current, level: event.target.value, entrance: undefined, saveSlot: undefined }
+                                    : { gameMode, level: event.target.value })}>
                                     {levels.map((levelName) => <option key={levelName} value={levelName}>{levelName}</option>)}
                                 </select>
                             </label>

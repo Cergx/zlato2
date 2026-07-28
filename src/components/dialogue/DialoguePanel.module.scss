@@ -14,12 +14,12 @@
 
 .content {
     position: absolute;
-    z-index: 2;
+    z-index: 4;
     box-sizing: border-box;
     overflow-x: hidden;
     overflow-y: auto;
     color: #000;
-    line-height: normal;
+    line-height: 20px;
     text-align: left;
     scrollbar-width: none;
     outline: 0;
@@ -29,20 +29,38 @@
     display: none;
 }
 
-.phrase {
+.transcript {
     margin: 0;
+    padding: 0;
+}
+
+.line {
+    margin: 0;
+    padding-left: var(--dialogue-continuation-indent);
+    text-indent: calc(-1 * var(--dialogue-continuation-indent));
+}
+
+.npcLine {
+    color: #0b0074;
+}
+
+.heroLine {
     color: #000;
 }
 
-.speaker {
-    font: inherit;
+.npcLine .speaker {
+    color: #481a46;
+}
+
+.heroLine .speaker {
+    color: #7f0000;
 }
 
 .options {
-    margin: 7px 0 0;
-    padding: 0 0 0 49px;
+    margin: 0;
+    padding: 0;
     color: #000;
-    list-style: decimal;
+    list-style: none;
 }
 
 .optionItem {
@@ -50,22 +68,23 @@
 }
 
 .option {
-    display: inline;
-    width: auto;
+    display: block;
+    width: 100%;
     margin: 0;
-    padding: 0;
+    padding: 0 0 0 var(--dialogue-continuation-indent);
     color: #000;
     background: transparent;
     border: 0;
     font: inherit;
-    line-height: normal;
+    line-height: inherit;
     text-align: left;
+    text-indent: calc(-1 * var(--dialogue-continuation-indent));
     cursor: pointer;
 }
 
 .option:hover:not(:disabled),
 .option:focus-visible {
-    color: #0000c0;
+    color: #700000;
     outline: 0;
 }
 

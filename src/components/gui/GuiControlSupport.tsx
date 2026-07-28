@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type DragEvent } from "react";
+import { useEffect, useState, type CSSProperties, type DragEvent, type ReactNode } from "react";
 import {
     guiImageUrl,
     guiSoundUrl,
@@ -15,6 +15,7 @@ export interface GuiControlProps {
     readonly object: GuiObjectDefinition;
     readonly value: GuiControlValue | undefined;
     readonly listItems: readonly string[] | undefined;
+    readonly content: ReactNode | undefined;
     readonly ariaLabel: string | undefined;
     readonly onAction: GuiActionHandler | undefined;
     readonly onValueChange: GuiValueChangeHandler | undefined;

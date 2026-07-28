@@ -165,14 +165,17 @@ export const loadCompositedHeroSprites = async (equippedTechnicalNames: readonly
         .filter((mapping): mapping is WearMapping => mapping !== undefined);
     const profile = equippedMappings.find((mapping) => mapping.profile)?.profile ?? DEFAULT_PROFILE;
     const cacheKey = `${profile}:${equippedMappings.map((mapping) => mapping.group).sort().join(",")}`;
+    const actions = profile === "bows"
+        ? ACTIONS.map((action) => action.target === "attack" ? { ...action, file: "hits3.csx" } : action)
+        : ACTIONS;
     const cached = spriteCache.get(cacheKey);
     if (cached) return cached;
 
     const promise = (async (): Promise<PersonSpriteSet> => {
         const had = new HADParser(await fetchBuffer(`/assets/wear/${profile}/${profile}.had`));
-        const baseImages = await Promise.all(ACTIONS.map((action) => loadCSX(`/assets/wear/${profile}/animation/${action.file}`)));
+        const baseImages = await Promise.all(actions.map((action) => loadCSX(`/assets/wear/${profile}/animation/${action.file}`)));
         if (baseImages.some((image) => !image)) throw new Error(`Failed to load hero profile ${profile}`);
-        const composed = await Promise.all(ACTIONS.map((action, index) => {
+        const composed = await Promise.all(actions.map((action, index) => {
             const base = had.getAnimation(action.action);
             return composeAction(profile, action, base, baseImages[index]!, equippedMappings);
         }));

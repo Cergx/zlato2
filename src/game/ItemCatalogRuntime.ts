@@ -8,6 +8,11 @@ import {
     type ItemDefinition,
 } from "./systems/Items.ts";
 import type { OriginalDamageKind, OriginalWeaponProfile } from "./systems/Combat.ts";
+import {
+    itemSpecialPriceContribution,
+    parseItemSpecialPriceTable,
+    type ItemSpecialPriceTable,
+} from "./systems/ItemSpecialPricing.ts";
 
 export interface ItemSpecialEffect {
     readonly specialId: number;
@@ -24,10 +29,14 @@ export interface ShippedItem {
     readonly iconUrl?: string;
     readonly puppetUrl?: string;
     readonly specialEffects: readonly ItemSpecialEffect[];
+    readonly specialPriceContributions: readonly number[];
     readonly weaponProfile?: OriginalWeaponProfile;
     readonly nutrition: number;
     readonly magicId?: number;
+    readonly basePrice: number;
     readonly canDrop: boolean;
+    readonly durabilityLossChance: number;
+    readonly ignoresDurabilityLoss: boolean;
 
 }
 
@@ -40,6 +49,12 @@ const loadSdb = async (path: string): Promise<Record<number, string>> => {
     const response = await fetch(path);
     if (!response.ok) throw new Error(`Item database request failed for ${path}: HTTP ${response.status}`);
     return new SDBParser(await response.arrayBuffer()).getData();
+};
+
+const loadScript = async (path: string): Promise<string> => {
+    const response = await fetch(path);
+    if (!response.ok) throw new Error(`Script request failed for ${path}: HTTP ${response.status}`);
+    return new TextDecoder("windows-1251").decode(await response.arrayBuffer());
 };
 
 const normalizeResourcePath = (path: string): string | undefined => {
@@ -72,6 +87,7 @@ const readDamageRange = (properties: readonly number[], offset: number) => ({
 const createWeaponProfile = (
     technicalName: string,
     itemClass: ItemClass,
+    nativeFlags: number,
     properties: readonly number[],
 ): OriginalWeaponProfile | undefined => {
     if (!WEAPON_CLASSES.has(itemClass)) return undefined;
@@ -82,6 +98,8 @@ const createWeaponProfile = (
     };
     return {
         itemId: technicalName,
+        itemClass,
+        nativeFlags,
         actionPointCost: Math.max(1, properties[5] ?? 10),
         attackDistance: Math.max(1, properties[7] ?? 6),
         baseHitChance: Math.max(0, properties[9] ?? 0),
@@ -99,6 +117,7 @@ export class ShippedItemCatalog {
         technicalNames: Readonly<Record<number, string>>,
         private readonly literaryNames: Readonly<Record<number, string>>,
         private readonly descriptions: Readonly<Record<number, string>>,
+        private readonly specialPriceTable: ItemSpecialPriceTable,
     ) {
         for (const [numericId, technicalName] of Object.entries(technicalNames)) {
             this.technicalToNumeric.set(technicalName.toLowerCase(), Number(numericId));
@@ -106,12 +125,23 @@ export class ShippedItemCatalog {
     }
 
     public static async load(): Promise<ShippedItemCatalog> {
-        const [technicalNames, literaryNames, descriptions] = await Promise.all([
+        const [technicalNames, literaryNames, descriptions, specialPriceSource] = await Promise.all([
             loadSdb(`${Paths.SDB}/items/tech_names.sdb`),
             loadSdb(`${Paths.SDB}/items/lit_names.sdb`),
             loadSdb(`${Paths.SDB}/items/descriptions.sdb`),
+            loadScript(`${Paths.SCRIPTS}/item_class_specials/specials.scr`),
         ]);
-        return new ShippedItemCatalog(technicalNames, literaryNames, descriptions);
+        return new ShippedItemCatalog(
+            technicalNames,
+            literaryNames,
+            descriptions,
+            parseItemSpecialPriceTable(specialPriceSource),
+        );
+    }
+
+    public getLiteraryName(technicalName: string): string {
+        const numericId = this.technicalToNumeric.get(technicalName.toLowerCase());
+        return numericId === undefined ? technicalName : this.literaryNames[numericId] || technicalName;
     }
 
     public get(technicalName: string): Promise<ShippedItem> {
@@ -123,7 +153,7 @@ export class ShippedItemCatalog {
         const promise = fetch(`${Paths.ITEMS}/data/${numericId}.itm`).then(async (response) => {
             if (!response.ok) throw new Error(`Item asset request failed for ${technicalName}: HTTP ${response.status}`);
             const parsed = parseItemAsset(await response.arrayBuffer());
-            const weaponProfile = createWeaponProfile(technicalName, parsed.itemClass, parsed.nativeProperties);
+            const weaponProfile = createWeaponProfile(technicalName, parsed.itemClass, parsed.flags, parsed.nativeProperties);
             const specialEffects = parseSpecialEffects(
                 parsed.nativeProperties,
                 weaponProfile ? WEAPON_SPECIAL_EFFECT_OFFSET : DEFAULT_SPECIAL_EFFECT_OFFSET,
@@ -143,9 +173,13 @@ export class ShippedItemCatalog {
                 iconUrl: normalizeResourcePath(parsed.iconPath),
                 puppetUrl: normalizeResourcePath(parsed.worldImagePath),
                 specialEffects,
+                specialPriceContributions: specialEffects.map((effect) => itemSpecialPriceContribution(effect, this.specialPriceTable)),
                 weaponProfile,
                 nutrition: weaponProfile ? 0 : Math.max(0, parsed.nativeProperties[18] ?? 0),
+                basePrice: Math.max(0, parsed.nativeProperties[2] ?? 0),
                 canDrop: itemClassCanBeDropped(parsed.itemClass),
+                durabilityLossChance: Math.max(0, Math.min(100, parsed.nativeProperties[4] ?? 0)),
+                ignoresDurabilityLoss: (parsed.flags & 0x08) !== 0,
                 magicId: (parsed.itemClass === "book" || parsed.itemClass === "scroll")
                     && Number.isInteger(parsed.nativeProperties[18])
                     && parsed.nativeProperties[18] >= 0
@@ -161,6 +195,10 @@ export class ShippedItemCatalog {
 }
 
 export interface HeroInventoryItemView extends ShippedItem {
+    readonly stackKey: string;
+    readonly instanceId: string;
+    readonly durability: number;
+    readonly charges?: number;
     readonly quantity: number;
 }
 

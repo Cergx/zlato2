@@ -9,8 +9,10 @@ import {
 } from "./ScenarioRuntime.ts";
 import {
     SCRRuntime,
+    extractSCRHandlerSources,
     parseSCRScript,
     type SCRScript,
+    type SCRHandlerSources,
     type SCRValue,
 } from "./scripts/SCRRuntime.ts";
 import type { GameSaveData } from "./PersistenceRuntime.ts";
@@ -19,15 +21,20 @@ import {
     createCombatant,
     createOriginalCombatProfile,
     resolveOriginalAttack,
+    originalCombatDistance,
+    originalLevelForExperience,
+    selectOriginalPersonWeapon,
     type Combatant,
     type FactionRelation,
     type OriginalAttackResult,
     type OriginalCombatProfile,
     type OriginalWeaponProfile,
 } from "./systems/Combat.ts";
-import { cellToWorld, worldToCell, type WorldPosition } from "./WorldCoordinates.ts";
-import type { EquipmentSlot } from "./systems/Items.ts";
+import { worldToCell, type WorldPosition } from "./WorldCoordinates.ts";
+import { createItemInstance, type EquipmentSlot, type ItemClass, type ItemDefinition, type ItemInstance } from "./systems/Items.ts";
 import { materializeInventory, parseInventoryScript } from "./parsers/INVParser.ts";
+import { MONEY_ITEM_ID, nativeTradePriceMultiplier, type TradeOffer } from "./systems/Trade.ts";
+import { Inventory, InventoryTransaction, type InventoryCatalog, type InventoryStack } from "./systems/Inventory.ts";
 import { loadPersonCombatAssets, type PersonCombatAssets } from "./PersonAssetRuntime.ts";
 import type { ShippedItem } from "./ItemCatalogRuntime.ts";
 import type { SoundShaderDefinition } from "./SoundShaderRuntime.ts";
@@ -109,11 +116,23 @@ export interface RegenerationElapsedRuntimeSnapshot {
 }
 
 
+export interface InventoryStackRuntimeSnapshot {
+    readonly stackKey: string;
+    readonly id: string;
+    readonly technicalName: string;
+    readonly durability: number;
+    readonly charges?: number;
+    readonly quantity: number;
+}
+
 export interface GameRuntimeSnapshot {
     variables: Readonly<Record<string, SCRValue>>;
     persons: Readonly<Record<string, boolean>>;
+    personStatesByLevel: Readonly<Record<string, Readonly<Record<string, boolean>>>>;
     inventories: Readonly<Record<string, Readonly<Record<string, number>>>>;
+    inventoryStacks: Readonly<Record<string, readonly InventoryStackRuntimeSnapshot[]>>;
     equipped: Readonly<Partial<Record<EquipmentSlot, string>>>;
+    equippedStacks: Readonly<Partial<Record<EquipmentSlot, InventoryStack>>>;
     questFlags: Readonly<Record<string, boolean>>;
     stageFlags: Readonly<Record<string, boolean>>;
     locationAccess: Readonly<Record<string, number>>;
@@ -125,6 +144,15 @@ export interface GameRuntimeSnapshot {
     regenerationElapsed: Readonly<Record<string, RegenerationElapsedRuntimeSnapshot>>;
     combat: CombatRuntimeSnapshot;
 }
+
+export interface RestRuntimeState {
+    readonly active: boolean;
+    readonly requestedMinutes: number;
+    readonly remainingMinutes: number;
+}
+
+/** Client.dll defaults the rest clock multiplier to 60.0 at 0x1200282b..0x12002838. */
+export const NATIVE_REST_CLOCK_MINUTES_PER_SECOND = 60;
 
 export interface GameStateRuntimeOptions {
     onLoadArea: (request: AreaTransitionRequest) => void;
@@ -139,11 +167,15 @@ export interface GameStateRuntimeOptions {
     onTrade?: () => void;
     onContainerOpen?: (owner: string, triggerName: string) => void;
     onMessage?: (message: SCRValue) => void;
+    resolveItemLiteraryName?: (technicalName: string) => string;
     onWeather?: (type: number) => void;
     onSound?: (arguments_: readonly SCRValue[]) => void;
     onPersonSound?: (shader: SoundShaderDefinition) => void;
     onCombatAnimation?: (technicalName: string, kind: CombatAnimationKind) => void;
     onMagicEffect?: (technicalName: string, targetName: string) => void;
+    onWorldMagicEffect?: (technicalName: string, position: Readonly<WorldPosition>) => void;
+    onClockChange?: (elapsedMinutes: number) => void;
+    onRestChange?: (state: RestRuntimeState) => void;
     random?: () => number;
     now?: () => Date;
     addonMode?: boolean;
@@ -212,8 +244,6 @@ const ALLY_COMMANDS: Readonly<Record<string, number>> = {
 };
 
 
-export const EQUIPPED_INVENTORY_OWNER = "__hero_equipped__";
-
 
 interface ActiveMagicEffect {
     readonly spellId: number;
@@ -231,6 +261,13 @@ interface CombatProfileSource {
 }
 const EQUIPMENT_SLOTS: readonly EquipmentSlot[] = [
     "mainHand", "offHand", "ammo", "head", "body", "arms", "bracelet", "amulet", "ringLeft", "ringRight",
+];
+const DURABILITY_WEAPON_CLASSES = new Set<ItemClass>(["sword", "axe", "spear", "mace"]);
+const DURABILITY_ARMOR_SLOTS: readonly Readonly<{ slot: EquipmentSlot; itemClass: ItemClass }>[] = [
+    { slot: "body", itemClass: "armor" },
+    { slot: "head", itemClass: "helmet" },
+    { slot: "arms", itemClass: "bracers" },
+    { slot: "offHand", itemClass: "shield" },
 ];
 const MAGIC_SPELL_COUNT = 78;
 const MAGIC_HOTBAR_SIZE = 9;
@@ -349,14 +386,15 @@ export class GameStateRuntime {
     private readonly scr: SCRRuntime;
     private readonly factions = new FactionRelations();
     private readonly persons = new Map<string, boolean>();
-    private readonly inventories = new Map<string, Map<string, number>>();
+    private readonly personStatesByLevel = new Map<string, Map<string, boolean>>();
+    private readonly inventories = new Map<string, Inventory>();
+    private readonly inventoryGenerations = new Map<string, number>();
     private readonly questFlags = new Map<string, boolean>();
     private readonly stageFlags = new Map<string, boolean>();
     private readonly locationAccess = new Map<string, number>();
     private readonly personParameters = new Map<string, Map<string, number>>();
     private readonly bestiaryKills = new Map<string, number>();
     private readonly personConditions = new Map<string, Map<string, number | boolean>>();
-    private readonly equipped: Partial<Record<EquipmentSlot, string>> = {};
     private readonly combatants = new Map<string, Combatant>();
     private readonly personSounds = new Map<string, PersonCombatAssets["sounds"]>();
     private readonly corpseInventorySources = new Map<string, string>();
@@ -365,6 +403,8 @@ export class GameStateRuntime {
     private readonly combatProfiles = new Map<string, OriginalCombatProfile>();
     private readonly combatItems = new Map<string, readonly ShippedItem[]>();
     private readonly registeredItems = new Map<string, ShippedItem>();
+    private readonly inventoryCatalog: InventoryCatalog;
+    private inventorySerial = 0;
     private readonly combatProfileSources = new Map<string, CombatProfileSource>();
     private readonly combatantPositions = new Map<string, WorldPosition>();
     private readonly activeMagicEffects: ActiveMagicEffect[] = [];
@@ -387,34 +427,51 @@ export class GameStateRuntime {
     private scenario: ScenarioRuntime | null = null;
     private levelData: LevelData | null = null;
     private coreScript: SCRScript | null = null;
-    private readonly scrScripts = new Map<string, SCRScript>();
+    private readonly triggerScriptSources = new Map<string, SCRHandlerSources>();
     private generation = 0;
     private experience = 0;
     private elapsedMinutes = 0;
     private lastCoreTick = 0;
-    private lastSimulationTimeMs: number | undefined;
+    private lastClockTimeMs: number | undefined;
     private clockAccumulatorMs = 0;
+    private restRequestedMinutes = 0;
+    private restRemainingMinutes = 0;
     private npcRoutes: readonly NpcRouteState[] = [];
 
     public constructor(private readonly options: GameStateRuntimeOptions) {
         this.random = options.random ?? Math.random;
+        this.inventoryCatalog = {
+            get: (id): ItemDefinition => this.registeredItems.get(id.toLowerCase())?.definition ?? {
+                id,
+                itemClass: "unknown",
+                maxStack: 0x7fffffff,
+            },
+        };
         this.scr = new SCRRuntime({ host: { call: (name, arguments_) => this.callHost(name, arguments_) } });
     }
 
     public async loadLevel(levelData: LevelData): Promise<void> {
+        const previousPersonLevel = this.currentDynamicPersonLevel;
+        this.captureCurrentPersonStates();
         const generation = ++this.generation;
         this.levelData = levelData;
-        this.scrScripts.clear();
+        this.triggerScriptSources.clear();
         this.coreScript = levelData.coreScript ? parseSCRScript(levelData.coreScript, `${levelData.levelName}/core.scr`) : null;
         if (this.coreScript && Object.keys(this.coreScript.handlers).length > 0) {
             throw new Error(`${levelData.levelName}/core.scr contains event handlers; native core context expects top-level statements`);
         }
         this.lastCoreTick = 0;
-        this.lastSimulationTimeMs = undefined;
+        this.lastClockTimeMs = undefined;
         this.clockAccumulatorMs = 0;
         this.pendingDynamicRoute = undefined;
         this.pendingDynamicCombatLoads = [];
         this.currentDynamicPersonLevel = dynamicPersonLevelKey(levelData);
+        let savedPersonStates = new Map<string, boolean>();
+        if (previousPersonLevel === this.currentDynamicPersonLevel) {
+            this.personStatesByLevel.delete(this.currentDynamicPersonLevel);
+        } else {
+            savedPersonStates = new Map(this.personStatesByLevel.get(this.currentDynamicPersonLevel) ?? []);
+        }
         this.dynamicPersons = (this.dynamicPersonsByLevel.get(this.currentDynamicPersonLevel) ?? [])
             .map((person) => ({ ...person, position: { ...person.position } }));
 
@@ -439,6 +496,12 @@ export class GameStateRuntime {
         const assets = new Map(personAssets);
         this.createCombatants(levelData, assets, heroAssets);
         for (const person of this.dynamicPersons) this.registerPersonCombatant(person, assets.get(person.name.toLowerCase()));
+        if (savedPersonStates) {
+            for (const name of this.persons.keys()) {
+                const present = savedPersonStates.get(name.toLowerCase());
+                if (present !== undefined) this.setPersonPresence(name, present);
+            }
+        }
         if (levelData.initScript) {
             const initScript = parseSCRScript(levelData.initScript, `${levelData.levelName}/init.scr`);
             if (Object.keys(initScript.handlers).length > 0) {
@@ -449,26 +512,26 @@ export class GameStateRuntime {
         await Promise.all(this.pendingDynamicCombatLoads);
     }
 
-    public update(tick: number, simulationTimeMs: number, playerPosition: Readonly<WorldPosition>): void {
+    public update(
+        tick: number,
+        simulationTimeMs: number,
+        playerPosition: Readonly<WorldPosition>,
+        clockTimeMs = simulationTimeMs,
+    ): void {
         if (!this.scenario || !this.levelData) return;
         this.lastPlayerPosition = { ...playerPosition };
+        this.combatantPositions.set("hero", worldToCell(playerPosition));
         this.scenario.setPlayerWorldPosition(playerPosition);
-        if (this.lastSimulationTimeMs !== undefined) {
-            const delta = simulationTimeMs - this.lastSimulationTimeMs;
-            if (delta >= 0 && delta < 60_000) {
-                this.clockAccumulatorMs += delta;
-                const elapsedGameMinutes = Math.floor(this.clockAccumulatorMs / 1000);
-                if (elapsedGameMinutes > 0) {
-                    this.clockAccumulatorMs -= elapsedGameMinutes * 1000;
-                    this.advanceClock(elapsedGameMinutes);
-                }
-            }
+        if (this.lastClockTimeMs !== undefined) {
+            const delta = clockTimeMs - this.lastClockTimeMs;
+            if (Number.isFinite(delta) && delta >= 0) this.advanceClockTime(delta);
         }
-        this.lastSimulationTimeMs = simulationTimeMs;
+        this.lastClockTimeMs = clockTimeMs;
         this.npcRoutes = this.scenario.advanceRoutes(simulationTimeMs);
         if (this.coreScript && tick - this.lastCoreTick >= 20) {
             this.lastCoreTick = tick;
-            this.scr.executeProgram(this.coreScript.program);
+            const hero = this.combatants.get("hero");
+            if (hero && hero.health > 0) this.scr.executeProgram(this.coreScript.program);
         }
     }
 
@@ -503,14 +566,26 @@ export class GameStateRuntime {
         if (!trigger.inventoryName) return true;
 
         const inventoryOwner = `trigger:${trigger.name}`;
-        if (!this.inventories.has(inventoryOwner)) {
+        const existingOwner = this.inventoryOwner(inventoryOwner);
+        if (this.inventoryGenerations.get(existingOwner) !== this.generation) {
             const fileName = trigger.inventoryName.toLowerCase().endsWith(".inv")
                 ? trigger.inventoryName.toLowerCase()
                 : `${trigger.inventoryName.toLowerCase()}.inv`;
             const response = await fetch(`${Paths.SCRIPTS}/inventory/${fileName}`);
             if (!response.ok) throw new Error(`Failed to load trigger inventory ${fileName}: HTTP ${response.status}`);
             const source = new TextDecoder("windows-1251").decode(await response.arrayBuffer());
-            this.initializeInventory(inventoryOwner, materializeInventory(parseInventoryScript(source), this.random));
+            const script = parseInventoryScript(source);
+            const inventory = this.inventories.get(existingOwner);
+            const regenerate = script.regenerateChance > 0
+                && (script.regenerateChance > 100 || this.random() * 100 < script.regenerateChance);
+            if (!inventory || inventory.count === 0 || regenerate) {
+                this.inventories.delete(existingOwner);
+                this.initializeInventory(existingOwner, materializeInventory(script, {
+                    level: originalLevelForExperience(this.experience),
+                    random: this.random,
+                }));
+            }
+            this.inventoryGenerations.set(existingOwner, this.generation);
         }
         this.options.onContainerOpen?.(inventoryOwner, trigger.name);
         return true;
@@ -558,21 +633,116 @@ export class GameStateRuntime {
     public initializeInventory(owner: string, items: Readonly<Record<string, number>>): void {
         const existingOwner = this.inventoryOwner(owner);
         if (this.inventories.has(existingOwner)) return;
-        const inventory = new Map<string, number>();
+        const inventory = this.createInventory();
         for (const [item, quantity] of Object.entries(items)) {
             if (!Number.isSafeInteger(quantity) || quantity <= 0) throw new Error(`Invalid initial quantity for ${item}`);
-            inventory.set(item, quantity);
+            inventory.add(this.createInventoryItem(existingOwner, item), quantity);
         }
-        this.inventories.set(owner, inventory);
+        this.inventories.set(existingOwner, inventory);
+    }
+
+    public initializeInventoryFromScript(
+        owner: string,
+        source: string,
+        options: Readonly<{ periodicSecondPass?: boolean }> = {},
+    ): void {
+        const script = parseInventoryScript(source);
+        if (script.regenerateChance > 0 && script.regenerateChance <= 100) this.random();
+        this.initializeInventory(owner, materializeInventory(script, {
+            level: originalLevelForExperience(this.experience),
+            random: this.random,
+            periodicSecondPass: options.periodicSecondPass,
+        }));
+    }
+
+    public getTradePriceMultiplier(): number {
+        return nativeTradePriceMultiplier(
+            this.getPersonParameter("Hero", "skill_alchemy"),
+            this.options.addonMode ?? false,
+            Math.trunc(this.getPersonParameter("Hero", "special_perks")),
+        );
+    }
+
+    public exchangeTradeOffers(
+        trader: string,
+        heroOffer: TradeOffer,
+        traderOffer: TradeOffer,
+        buyCost: number,
+        sellCredit: number,
+    ): boolean {
+        if (![buyCost, sellCredit].every((value) => Number.isSafeInteger(value) && value >= 0)) return false;
+        const validateOffer = (owner: string, offer: TradeOffer): boolean => Object.entries(offer).every(([stackKey, quantity]) => {
+            const stack = this.inventoryStack(owner, stackKey);
+            return stack !== undefined
+                && stack.item.definitionId.toLowerCase() !== MONEY_ITEM_ID.toLowerCase()
+                && Number.isSafeInteger(quantity) && quantity > 0
+                && stack.quantity >= quantity;
+        });
+        if (!validateOffer("Hero", heroOffer) || !validateOffer(trader, traderOffer)) return false;
+
+        const balance = buyCost - sellCredit;
+        if (balance > 0 && this.itemCount("Hero", MONEY_ITEM_ID) < balance) return false;
+        if (balance < 0 && this.itemCount(trader, MONEY_ITEM_ID) < -balance) return false;
+
+        const transaction = new InventoryTransaction();
+        for (const [stackKey, quantity] of Object.entries(heroOffer)) {
+            if (!this.queueStackTransfer(transaction, "Hero", trader, stackKey, quantity)) return false;
+        }
+        for (const [stackKey, quantity] of Object.entries(traderOffer)) {
+            if (!this.queueStackTransfer(transaction, trader, "Hero", stackKey, quantity)) return false;
+        }
+        if (balance > 0 && !this.queueDefinitionTransfer(transaction, "Hero", trader, MONEY_ITEM_ID, balance)) return false;
+        if (balance < 0 && !this.queueDefinitionTransfer(transaction, trader, "Hero", MONEY_ITEM_ID, -balance)) return false;
+        try {
+            transaction.commit();
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    public hasInventory(owner: string): boolean {
+        return this.inventories.has(this.inventoryOwner(owner));
     }
 
     public getInventory(owner: string): Readonly<Record<string, number>> {
         const inventory = this.inventories.get(this.inventoryOwner(owner));
-        return inventory ? Object.fromEntries(inventory) : {};
+        if (!inventory) return {};
+        const counts = new Map<string, number>();
+        for (const { item, quantity } of inventory.snapshot().stacks) {
+            counts.set(item.definitionId, (counts.get(item.definitionId) ?? 0) + quantity);
+        }
+        return Object.fromEntries(counts);
     }
 
-    public transferInventoryItem(source: string, destination: string, item: string, quantity: number): boolean {
-        return this.transferItem(source, destination, item, quantity) === 1;
+    public getInventoryStacks(owner: string): readonly InventoryStackRuntimeSnapshot[] {
+        const inventory = this.inventories.get(this.inventoryOwner(owner));
+        if (!inventory) return [];
+        const grouped = new Map<string, InventoryStackRuntimeSnapshot>();
+        for (const { item, quantity } of inventory.snapshot().stacks) {
+            const stackKey = this.inventoryStackKey(item);
+            const current = grouped.get(stackKey);
+            grouped.set(stackKey, {
+                stackKey,
+                id: current?.id ?? item.id,
+                technicalName: item.definitionId,
+                durability: item.durability ?? 100,
+                ...(item.charges === undefined ? {} : { charges: item.charges }),
+                quantity: (current?.quantity ?? 0) + quantity,
+            });
+        }
+        return [...grouped.values()];
+    }
+
+    public transferInventoryItem(source: string, destination: string, stackKey: string, quantity: number): boolean {
+        const transaction = new InventoryTransaction();
+        if (!this.queueStackTransfer(transaction, source, destination, stackKey, quantity)) return false;
+        try {
+            transaction.commit();
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     public transferInventoryAll(source: string, destination: string): void {
@@ -586,15 +756,17 @@ export class GameStateRuntime {
         const inventorySource = this.corpseInventorySources.get(normalized);
         if (!combatant?.isDead || !this.lootableCorpses.has(normalized) || !inventorySource) return false;
 
-        const inventoryOwner = `corpse:${resolvedName ?? technicalName}`;
-        if (!this.inventories.has(this.inventoryOwner(inventoryOwner))) {
+        // The native person owns one inventory before and after death; trading and corpse
+        // looting therefore observe the same retained stacks rather than rerolling a corpse.
+        const inventoryOwner = `person:${resolvedName ?? technicalName}`;
+        if (!this.hasInventory(inventoryOwner)) {
             const fileName = inventorySource.toLowerCase().endsWith(".inv")
                 ? inventorySource.toLowerCase()
                 : `${inventorySource.toLowerCase()}.inv`;
             const response = await fetch(`${Paths.SCRIPTS}/inventory/${fileName}`);
             if (!response.ok) throw new Error(`Failed to load corpse inventory ${fileName}: HTTP ${response.status}`);
             const source = new TextDecoder("windows-1251").decode(await response.arrayBuffer());
-            this.initializeInventory(inventoryOwner, materializeInventory(parseInventoryScript(source), this.random));
+            this.initializeInventoryFromScript(inventoryOwner, source);
         }
         this.options.onContainerOpen?.(inventoryOwner, resolvedName ?? technicalName);
         return true;
@@ -605,40 +777,52 @@ export class GameStateRuntime {
         this.refreshHeroCombatProfile();
     }
 
-    public equipHeroItem(item: string, slot: EquipmentSlot): boolean {
+    public equipHeroItem(item: string, slot: EquipmentSlot, stackKey?: string): boolean {
         if (!EQUIPMENT_SLOTS.includes(slot)) throw new Error(`Unknown equipment slot ${slot}`);
-        if (this.itemCount("Hero", item) < 1) return false;
-        const previous = this.equipped[slot];
-        if (previous?.toLowerCase() === item.toLowerCase()) return true;
-        this.changeItemCount("Hero", item, -1);
-        if (previous) this.changeItemCount("Hero", previous, 1);
-        this.equipped[slot] = item;
-        this.refreshHeroCombatProfile();
-        return true;
+        const inventory = this.inventories.get(this.inventoryOwner("Hero"));
+        if (!inventory) return false;
+        const stack = stackKey
+            ? this.inventoryStack("Hero", stackKey)
+            : inventory.snapshot().stacks.find(({ item: candidate }) => candidate.definitionId.toLowerCase() === item.toLowerCase());
+        if (!stack || stack.item.definitionId.toLowerCase() !== item.toLowerCase()) return false;
+        try {
+            inventory.equip(stack.item, slot, slot === "ammo" ? stack.quantity : 1);
+            this.refreshHeroCombatProfile();
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     public unequipHeroItem(slot: EquipmentSlot): boolean {
-        const item = this.equipped[slot];
-        if (!item) return false;
-        this.changeItemCount("Hero", item, 1);
-        delete this.equipped[slot];
-        this.refreshHeroCombatProfile();
-        return true;
+        const inventory = this.inventories.get(this.inventoryOwner("Hero"));
+        if (!inventory?.getEquipped(slot)) return false;
+        try {
+            inventory.unequip(slot);
+            this.refreshHeroCombatProfile();
+            return true;
+        } catch {
+            return false;
+        }
     }
 
-    public dropHeroItem(item: string, quantity = 1): boolean {
+    public dropHeroItem(item: string, quantity = 1, stackKey?: string): boolean {
         if (!Number.isSafeInteger(quantity) || quantity <= 0) throw new Error("Drop quantity must be a positive integer");
-        if (this.itemCount("Hero", item) < quantity) return false;
-        return this.changeItemCount("Hero", item, -quantity) === 1;
+        return stackKey
+            ? this.removeInventoryStack("Hero", stackKey, quantity)
+            : this.changeItemCount("Hero", item, -quantity) === 1;
     }
 
     public useHeroItem(
         item: string,
         effects: readonly { readonly specialId: number; readonly amount: number }[],
         nutrition: number,
+        stackKey?: string,
     ): boolean {
-        if (this.itemCount("Hero", item) < 1) return false;
-        this.changeItemCount("Hero", item, -1);
+        const removed = stackKey
+            ? this.removeInventoryStack("Hero", stackKey, 1)
+            : this.changeItemCount("Hero", item, -1) === 1;
+        if (!removed) return false;
         for (const effect of effects) {
             const parameter = itemSpecialParameterName(effect.specialId);
             const current = this.personParameters.get("Hero")?.get(parameter) ?? 0;
@@ -650,11 +834,13 @@ export class GameStateRuntime {
         }
         return true;
     }
-    public learnHeroMagic(item: string, magicId: number): boolean {
+    public learnHeroMagic(item: string, magicId: number, stackKey?: string): boolean {
         if (!Number.isSafeInteger(magicId) || magicId < 0 || magicId >= MAGIC_SPELL_COUNT) return false;
         if (this.getPersonParameter("Hero", magicSpellParameter(magicId)) !== 0) return false;
-        if (this.itemCount("Hero", item) < 1) return false;
-        this.changeItemCount("Hero", item, -1);
+        const removed = stackKey
+            ? this.removeInventoryStack("Hero", stackKey, 1)
+            : this.changeItemCount("Hero", item, -1) === 1;
+        if (!removed) return false;
         this.setPersonParameter("Hero", magicSpellParameter(magicId), 1);
         return true;
     }
@@ -705,7 +891,19 @@ export class GameStateRuntime {
 
 
     public getEquippedItems(): Readonly<Partial<Record<EquipmentSlot, string>>> {
-        return { ...this.equipped };
+        const inventory = this.inventories.get(this.inventoryOwner("Hero"));
+        return Object.fromEntries(
+            Object.entries(inventory?.snapshot().equipped ?? {}).map(([slot, stack]) => [slot, stack?.item.definitionId]),
+        );
+    }
+
+    public getHeroAttackDistance(): number {
+        return this.combatProfiles.get("hero")?.weapon.attackDistance ?? 6;
+    }
+
+    public setCombatantPosition(technicalName: string, worldPosition: Readonly<WorldPosition>): void {
+        const resolvedName = this.resolveCombatantName(technicalName);
+        if (resolvedName) this.combatantPositions.set(resolvedName, worldToCell(worldPosition));
     }
 
     public setCombatMode(active: boolean): void {
@@ -745,7 +943,7 @@ export class GameStateRuntime {
             this.currentCombatant = enemy;
             this.remainingActionPoints.set(enemy, profile.actionPoints);
             while ((this.remainingActionPoints.get(enemy) ?? 0) >= profile.weapon.actionPointCost && !hero.isDead) {
-                this.performCombatAttack(enemy, "hero");
+                if (!this.performCombatAttack(enemy, "hero")) break;
             }
         }
 
@@ -787,29 +985,43 @@ export class GameStateRuntime {
     }
 
     public restore(save: GameSaveData): void {
+        this.cancelRest();
         this.restoreScriptVariables(save.scriptVariables);
         this.inventories.clear();
-        for (const [owner, items] of Object.entries(save.inventories)) {
-            if (owner === EQUIPPED_INVENTORY_OWNER) continue;
-            this.inventories.set(owner, new Map(Object.entries(items)));
+        for (const [owner, stacks] of Object.entries(save.inventories)) {
+            const inventory = this.createInventory();
+            inventory.restore(stacks.map(({ quantity, ...item }) => ({ item, quantity })));
+            this.inventories.set(owner, inventory);
         }
-        for (const slot of EQUIPMENT_SLOTS) delete this.equipped[slot];
-        for (const encoded of Object.keys(save.inventories[EQUIPPED_INVENTORY_OWNER] ?? {})) {
-            const separator = encoded.indexOf(":");
-            const slot = encoded.slice(0, separator) as EquipmentSlot;
-            const item = encoded.slice(separator + 1);
-            if (separator > 0 && EQUIPMENT_SLOTS.includes(slot) && item) this.equipped[slot] = item;
-        }
+        const heroOwner = this.inventoryOwner("Hero");
+        const heroInventory = this.inventories.get(heroOwner) ?? this.createInventory();
+        heroInventory.restore(
+            heroInventory.snapshot().stacks,
+            Object.fromEntries(Object.entries(save.equipped).map(([slot, stack]) => [
+                slot,
+                stack && { item: { ...stack }, quantity: stack.quantity },
+            ])),
+        );
+        this.inventories.set(heroOwner, heroInventory);
         this.questFlags.clear();
         for (const [name, value] of Object.entries(save.questFlags)) this.questFlags.set(name, value);
         if (Object.keys(save.persons).length > 0) {
             this.persons.clear();
             for (const [name, present] of Object.entries(save.persons)) this.setPersonPresence(name, present);
         }
+        this.personStatesByLevel.clear();
+        for (const [level, persons] of Object.entries(save.personStatesByLevel)) {
+            this.personStatesByLevel.set(level, new Map(
+                Object.entries(persons).map(([name, present]) => [name.toLowerCase(), present]),
+            ));
+        }
         this.stageFlags.clear();
         for (const [name, value] of Object.entries(save.stageFlags)) this.stageFlags.set(name, value);
         this.locationAccess.clear();
-        for (const [name, value] of Object.entries(save.locationAccess)) this.locationAccess.set(name, value);
+        for (const [name, value] of Object.entries(save.locationAccess)) {
+            this.locationAccess.set(name, value);
+            this.scr.setVariable(`${name}_state`, value);
+        }
         this.personParameters.clear();
         for (const [person, values] of Object.entries(save.personParameters)) {
             this.personParameters.set(person, new Map(Object.entries(values).map(([name, value]) => [name.toLowerCase(), value])));
@@ -819,6 +1031,7 @@ export class GameStateRuntime {
         this.experience = save.experience;
         this.elapsedMinutes = save.clock.day * 24 * 60 + save.clock.minuteOfDay;
         this.clockAccumulatorMs = 0;
+        this.lastClockTimeMs = undefined;
         if (this.scenario) {
             for (const [name, opened] of Object.entries(save.doors)) this.scenario.setDoorOpened(name, opened);
             for (const [name, state] of Object.entries(save.triggers)) {
@@ -829,6 +1042,56 @@ export class GameStateRuntime {
         this.restoreMagicState(save);
         this.restoreCombatantVitals(save.personParameters);
     }
+    public beginRest(minutes: number): boolean {
+        if (!Number.isFinite(minutes) || !Number.isInteger(minutes) || minutes <= 0) {
+            throw new Error("Rest duration must be a positive integer number of minutes");
+        }
+        if (this.restRemainingMinutes > 0) return false;
+        this.clockAccumulatorMs = 0;
+        this.restRequestedMinutes = minutes;
+        this.restRemainingMinutes = minutes;
+        this.publishRestState();
+        return true;
+    }
+
+    public cancelRest(): boolean {
+        if (this.restRemainingMinutes <= 0) return false;
+        this.clockAccumulatorMs = 0;
+        this.restRequestedMinutes = 0;
+        this.restRemainingMinutes = 0;
+        this.publishRestState();
+        return true;
+    }
+
+    public getRestState(): RestRuntimeState {
+        return Object.freeze({
+            active: this.restRemainingMinutes > 0,
+            requestedMinutes: this.restRequestedMinutes,
+            remainingMinutes: this.restRemainingMinutes,
+        });
+    }
+
+    public advanceClockTime(deltaMs: number): void {
+        if (!Number.isFinite(deltaMs) || deltaMs < 0) throw new Error("Clock delta must be a non-negative finite number");
+        const resting = this.restRemainingMinutes > 0;
+        this.clockAccumulatorMs += deltaMs * (resting ? NATIVE_REST_CLOCK_MINUTES_PER_SECOND : 1);
+        let elapsedGameMinutes = Math.floor(this.clockAccumulatorMs / 1000);
+        if (elapsedGameMinutes <= 0) return;
+        if (resting) elapsedGameMinutes = Math.min(elapsedGameMinutes, this.restRemainingMinutes);
+        this.clockAccumulatorMs -= elapsedGameMinutes * 1000;
+        this.advanceClock(elapsedGameMinutes);
+        if (!resting) return;
+        this.restRemainingMinutes -= elapsedGameMinutes;
+        if (this.restRemainingMinutes > 0) return;
+        this.clockAccumulatorMs = 0;
+        this.restRequestedMinutes = 0;
+        this.publishRestState();
+    }
+
+    private publishRestState(): void {
+        this.options.onRestChange?.(this.getRestState());
+    }
+
     public advanceClock(minutes: number): void {
         if (!Number.isFinite(minutes) || minutes < 0) throw new Error("Clock advancement must be a non-negative finite number");
         this.elapsedMinutes += minutes;
@@ -844,6 +1107,7 @@ export class GameStateRuntime {
             this.advanceMagicEffects(step);
             remaining -= step;
         }
+        if (minutes > 0) this.options.onClockChange?.(this.elapsedMinutes);
     }
 
 
@@ -859,8 +1123,11 @@ export class GameStateRuntime {
         return {
             variables: Object.fromEntries(this.scr.variableEntries()),
             persons: Object.fromEntries(this.persons),
-            inventories: Object.fromEntries([...this.inventories].map(([owner, items]) => [owner, Object.fromEntries(items)])),
-            equipped: { ...this.equipped },
+            personStatesByLevel: this.personStatesByLevelSnapshot(),
+            inventories: Object.fromEntries([...this.inventories.keys()].map((owner) => [owner, this.getInventory(owner)])),
+            inventoryStacks: Object.fromEntries([...this.inventories.keys()].map((owner) => [owner, this.getInventoryStacks(owner)])),
+            equipped: this.getEquippedItems(),
+            equippedStacks: { ...(this.inventories.get(this.inventoryOwner("Hero"))?.snapshot().equipped ?? {}) },
             questFlags: Object.fromEntries(this.questFlags),
             stageFlags: Object.fromEntries(this.stageFlags),
             locationAccess: Object.fromEntries(this.locationAccess),
@@ -944,17 +1211,17 @@ export class GameStateRuntime {
                 : ["OnLeave"] as const;
         const sourcePath = Paths.LEVEL_SCRIPT(levelData.levelName, levelData.gameMode, scriptFileName);
         if (generation !== this.generation) return;
-        const cacheKey = `${levelData.gameMode}:${levelData.levelName.toLowerCase()}:${scriptFileName}:${request.phase}`;
-        let script = this.scrScripts.get(cacheKey);
+        const cacheKey = `${levelData.gameMode}:${levelData.levelName.toLowerCase()}:${scriptFileName}`;
+        let script = this.triggerScriptSources.get(cacheKey);
         if (!script) {
             const source = await decodeScript(sourcePath);
             if (generation !== this.generation) return;
-            script = parseSCRScript(source, `${levelData.levelName}/${scriptFileName}`, undefined, handlers);
-            this.scrScripts.set(cacheKey, script);
+            script = extractSCRHandlerSources(source);
+            this.triggerScriptSources.set(cacheKey, script);
         }
         for (const handler of handlers) {
-            const program = script.handlers[handler];
-            if (program) this.scr.executeProgram(program);
+            const body = script[handler];
+            if (body !== undefined) this.scr.execute(body, `${levelData.levelName}/${scriptFileName}:${handler}`);
         }
     }
 
@@ -971,29 +1238,40 @@ export class GameStateRuntime {
                     level: stringArgument(arguments_, 0, name).toLowerCase(),
                     entrance: typeof arguments_[1] === "string" ? arguments_[1] : undefined,
                 });
-                return 1;
+                return 0;
             }
             case "rs_globalmap":
                 this.options.onGlobalMap?.();
-                return 1;
+                return 0;
             case "rs_startdialog":
                 this.options.onDialog?.(arguments_);
-                return 1;
+                return 0;
             case "rs_gettribesrelation":
                 return relationScores[this.factions.get(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name))];
             case "rs_settribesrelation":
                 this.factions.set(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name), relationFromScript(arguments_[2] ?? 1));
-                return 1;
+                return 0;
             case "rs_ispersonexistsi": {
-                const personIndex = typeof arguments_[1] === "string" ? 1 : 0;
-                return this.persons.get(stringArgument(arguments_, personIndex, name)) === true ? 1 : 0;
+                const level = stringArgument(arguments_, 0, name);
+                const person = stringArgument(arguments_, 1, name);
+                const currentLevel = this.levelData?.levelName;
+                if (currentLevel && currentLevel.toLowerCase() === level.toLowerCase()) {
+                    if (person.toLowerCase() === "hero") return this.combatants.has("hero") ? 1 : 0;
+                    const present = [...this.persons].find(([candidate]) => candidate.toLowerCase() === person.toLowerCase())?.[1];
+                    return present === true ? 1 : 0;
+                }
+                const stored = this.personStatesByLevel.get(`${this.levelData?.gameMode ?? "single"}:${level.toLowerCase()}`);
+                return stored ? (stored.get(person.toLowerCase()) === true ? 1 : 0) : 1;
             }
             case "rs_delperson":
-                return this.setPersonPresence(stringArgument(arguments_, 0, name), false);
+                this.setPersonPresence(stringArgument(arguments_, 0, name), false);
+                return 0;
             case "rs_addperson_1":
-                return this.stageDynamicPerson(arguments_, name);
+                this.stageDynamicPerson(arguments_, name);
+                return 0;
             case "rs_addperson_2":
-                return this.materializeDynamicPerson(arguments_, name);
+                this.materializeDynamicPerson(arguments_, name);
+                return 0;
             case "rs_testpersonhasitem":
                 return this.itemCount(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name)) > 0 ? 1 : 0;
             case "rs_getitemcounti":
@@ -1007,47 +1285,68 @@ export class GameStateRuntime {
                 );
             case "rs_persontransferallitemsi":
                 return this.transferAllItems(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name));
+            // Server.dll 0x140412A4/0x14041320/0x14041400/0x14041478 accept (string, string, number) and return 0.0.
             case "rs_personadditem":
-            case "rs_personadditemtotrade":
-                return this.changeItemCount(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name), arguments_[2] === undefined ? 1 : numberArgument(arguments_, 2, name));
+            case "rs_personadditemtotrade": {
+                if (arguments_.length !== 3) return 0;
+                const owner = stringArgument(arguments_, 0, name);
+                const item = stringArgument(arguments_, 1, name);
+                const quantity = numberArgument(arguments_, 2, name);
+                const changed = this.changeItemCount(owner, item, quantity);
+                if (changed === 1 && quantity > 0 && this.inventoryOwner(owner).toLowerCase() === "hero") {
+                    this.notifyItemReceived(item, quantity);
+                }
+                return 0;
+            }
             case "rs_personremoveitem":
             case "rs_personremoveitemtotrade":
-                return this.changeItemCount(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name), -(arguments_[2] === undefined ? 1 : numberArgument(arguments_, 2, name)));
+                if (arguments_.length !== 3) return 0;
+                this.changeItemCount(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name), -numberArgument(arguments_, 2, name));
+                return 0;
             case "rs_getmoney":
                 return this.itemCount("Hero", "MON_1_0_1");
             case "rs_getpersonparameteri":
             case "rs_getpersonskilli":
                 return this.getPersonParameter(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name));
             case "rs_setpersonparameteri":
-                return this.setPersonParameter(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name), numberArgument(arguments_, 2, name));
+                this.setPersonParameter(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name), numberArgument(arguments_, 2, name));
+                return 0;
             case "rs_addexp":
                 this.experience += numberArgument(arguments_, 0, name);
-                return this.experience;
+                return 0;
             case "rs_questcomplete":
                 this.questFlags.set(stringArgument(arguments_, 0, name), true);
-                return 1;
+                return 0;
             case "rs_questenable":
-            case "rs_storylinequestenable":
-                this.questFlags.set(stringArgument(arguments_, 0, name), false);
-                return 1;
+            case "rs_storylinequestenable": {
+                const quest = stringArgument(arguments_, 0, name);
+                const isNew = !this.questFlags.has(quest);
+                this.questFlags.set(quest, false);
+                if (isNew) this.options.onMessage?.("Добавлена запись в журнал");
+                return 0;
+            }
             case "rs_stagecomplete":
                 this.stageFlags.set(`${stringArgument(arguments_, 0, name)}:${stringArgument(arguments_, 1, name)}`, true);
-                return 1;
+                return 0;
             case "rs_stageenable":
                 this.stageFlags.set(`${stringArgument(arguments_, 0, name)}:${stringArgument(arguments_, 1, name)}`, false);
-                return 1;
-            case "rs_setlocationaccess":
-                this.locationAccess.set(stringArgument(arguments_, 0, name).toLowerCase(), numberArgument(arguments_, 1, name));
-                return 1;
+                return 0;
+            case "rs_setlocationaccess": {
+                const location = stringArgument(arguments_, 0, name);
+                const access = numberArgument(arguments_, 1, name);
+                this.locationAccess.set(location.toLowerCase(), access);
+                this.scr.setVariable(`${location}_state`, access);
+                return 0;
+            }
             case "rs_enabletrigger":
                 this.requireScenario(name).setTriggerActive(stringArgument(arguments_, 0, name), numberArgument(arguments_, 1, name) !== 0);
-                return 1;
+                return 0;
             case "wd_setvisible":
                 this.requireScenario(name).setTriggerVisible(stringArgument(arguments_, 0, name), numberArgument(arguments_, 1, name) !== 0);
-                return 1;
+                return 0;
             case "rs_setdoorstate":
                 this.requireScenario(name).setDoorOpened(stringArgument(arguments_, 0, name), numberArgument(arguments_, 1, name) !== 0);
-                return 1;
+                return 0;
             case "rs_getdaysfrombeginningi":
                 return Math.floor(this.elapsedMinutes / (24 * 60));
             case "rs_getcurrenttimeofdayi":
@@ -1124,14 +1423,27 @@ export class GameStateRuntime {
                 return this.unrecoveredHostCall(name);
             case "rs_setundeadstate":
             case "rs_setinjured":
-                return this.setPersonCondition(name, stringArgument(arguments_, 0, name), numberArgument(arguments_, 1, name) !== 0);
-            case "le_casteffect":
-            case "le_castmagic":
+                this.setPersonCondition(name, stringArgument(arguments_, 0, name), numberArgument(arguments_, 1, name) !== 0);
+                return 0;
+            case "le_casteffect": {
+                const technicalName = stringArgument(arguments_, 1, name);
+                const x = numberArgument(arguments_, 2, name);
+                const y = numberArgument(arguments_, 3, name);
+                this.options.onWorldMagicEffect?.(technicalName, { x, y });
+                return 0;
+            }
+            case "le_castmagic": {
+                const technicalName = stringArgument(arguments_, 0, name);
+                const x = numberArgument(arguments_, 1, name);
+                const y = numberArgument(arguments_, 2, name);
+                this.options.onWorldMagicEffect?.(technicalName, { x, y });
+                return 0;
+            }
             case "le_deleffect":
                 return this.unrecoveredHostCall(name);
             case "c_finished":
                 this.options.onFinished?.(numberArgument(arguments_, 0, name));
-                return 1;
+                return 0;
             default:
                 throw new Error(`Unsupported SCR host function ${name}`);
         }
@@ -1213,7 +1525,7 @@ export class GameStateRuntime {
 
     private registerPersonCombatant(person: SEFPerson, personAssets?: PersonCombatAssets): void {
         this.persons.set(person.name, true);
-        this.combatantPositions.set(person.name, cellToWorld(person.position));
+        this.combatantPositions.set(person.name, { ...person.position });
         if (personAssets?.sounds) this.personSounds.set(person.name.toLowerCase(), personAssets.sounds);
         const normalizedName = person.name.toLowerCase();
         if (person.scriptInventory) this.corpseInventorySources.set(normalizedName, person.scriptInventory);
@@ -1253,7 +1565,7 @@ export class GameStateRuntime {
         const parameterOwner = this.resolveParameterOwner("hero") ?? "Hero";
         const parameters = Object.fromEntries(this.personParameters.get(parameterOwner) ?? []);
         parameters.experience = this.experience;
-        const items = Object.values(this.equipped)
+        const items = Object.values(this.getEquippedItems())
             .map((name) => name && this.registeredItems.get(name.toLowerCase()))
             .filter((item): item is ShippedItem => item !== undefined);
         this.combatItems.set("hero", items);
@@ -1328,10 +1640,18 @@ export class GameStateRuntime {
     }
 
     private selectPersonWeapons(assets: PersonCombatAssets): readonly ShippedItem[] {
-        const references = assets.template?.weapons ?? [];
-        if (references.length === 0 || assets.weapons.length === 0) return [];
-        const selectedIndex = references.findIndex((reference) => this.random() * 100 < reference.chance);
-        return [assets.weapons[selectedIndex < 0 ? 0 : selectedIndex]];
+        const template = assets.template;
+        if (!template || template.weapons.length === 0 || assets.weapons.length === 0) return [];
+        const reference = selectOriginalPersonWeapon(
+            template.weapons,
+            template.weaponLevelOffset,
+            originalLevelForExperience(this.experience),
+            this.random,
+        );
+        if (!reference) return [];
+        const weapon = assets.weapons.find(({ technicalName }) =>
+            technicalName.toLowerCase() === reference.itemId.toLowerCase());
+        return weapon ? [weapon] : [];
     }
 
     private performCombatAttack(attackerName: string, targetName: string): OriginalAttackResult | undefined {
@@ -1345,11 +1665,22 @@ export class GameStateRuntime {
             this.combatMessage = "Недостаточно очков действия";
             return undefined;
         }
+        const attackerPosition = this.combatantPositions.get(attackerName);
+        const targetPosition = this.combatantPositions.get(targetName);
+        if (attackerPosition && targetPosition
+            && originalCombatDistance(attackerPosition, targetPosition) > attackerProfile.weapon.attackDistance) {
+            this.combatMessage = "Слишком большая дистанция для атаки";
+            return undefined;
+        }
+        if (!this.consumeAttackResource(attackerName, attackerProfile.weapon.itemId)) return undefined;
+
 
         const result = resolveOriginalAttack(attackerProfile, targetProfile, target.health, this.random);
         this.remainingActionPoints.set(attackerName, remaining - result.actionPointCost);
         target.health = result.healthAfter;
         target.isDead = result.killed;
+        if (result.hit) this.damageAttackWeapon(attackerName, attackerProfile.weapon.itemId);
+        if (result.hit) this.damageTargetArmor(targetName);
         const heroKilled = result.killed && targetName.toLowerCase() === "hero";
         if (heroKilled) this.options.onHeroDeath?.();
         if (result.killed && attackerName.toLowerCase() === "hero") this.recordBestiaryKill(targetName);
@@ -1371,6 +1702,71 @@ export class GameStateRuntime {
         this.syncCombatParameters(attackerName);
         this.syncCombatParameters(targetName);
         return result;
+    }
+
+    private consumeAttackResource(attackerName: string, weaponItemId: string): boolean {
+        if (attackerName.toLowerCase() !== "hero") return true;
+        const inventory = this.inventories.get(this.inventoryOwner("Hero"));
+        if (!inventory) return true;
+        const weapon = this.registeredItems.get(weaponItemId.toLowerCase());
+        const requiredAmmoClass = weapon?.definition.itemClass === "bow"
+            ? "arrows"
+            : weapon?.definition.itemClass === "crossbow"
+                ? "bolts"
+                : weapon?.definition.itemClass === "firearm"
+                    ? "ammo"
+                    : undefined;
+        if (!requiredAmmoClass) return true;
+        const ammoStack = inventory.getEquipped("ammo");
+        const ammo = ammoStack && this.registeredItems.get(ammoStack.item.definitionId.toLowerCase());
+        if (!ammoStack || ammo?.definition.itemClass !== requiredAmmoClass) {
+            this.combatMessage = "Нет подходящих боеприпасов";
+            return false;
+        }
+        inventory.consumeEquipped("ammo", 1);
+        this.refreshHeroCombatProfile();
+        return true;
+    }
+
+    private damageAttackWeapon(attackerName: string, weaponItemId: string): void {
+        if (attackerName.toLowerCase() !== "hero") return;
+        const inventory = this.inventories.get(this.inventoryOwner("Hero"));
+        const weapon = this.registeredItems.get(weaponItemId.toLowerCase());
+        if (!inventory || !weapon || !DURABILITY_WEAPON_CLASSES.has(weapon.definition.itemClass)
+            || weapon.ignoresDurabilityLoss || weapon.durabilityLossChance <= 0
+            || this.random() * 100 >= weapon.durabilityLossChance) return;
+        const slot = (["mainHand", "offHand"] as const).find((candidate) =>
+            inventory.getEquipped(candidate)?.item.definitionId.toLowerCase() === weaponItemId.toLowerCase());
+        if (!slot) return;
+        const durabilityBefore = inventory.getEquipped(slot)?.item.durability ?? 100;
+        inventory.damageEquipped(slot, 1);
+        if (durabilityBefore === 11) this.options.onMessage?.(`${weapon.literaryName} почти разрушен`);
+        if (durabilityBefore <= 1) this.options.onMessage?.(`Предмет ${weapon.literaryName} разрушен`);
+        this.refreshHeroCombatProfile();
+    }
+
+    private damageTargetArmor(targetName: string): void {
+        if (targetName.toLowerCase() !== "hero") return;
+        const inventory = this.inventories.get(this.inventoryOwner("Hero"));
+        if (!inventory) return;
+        const candidates = DURABILITY_ARMOR_SLOTS.flatMap(({ slot, itemClass }) => {
+            const stack = inventory.getEquipped(slot);
+            const item = stack && this.registeredItems.get(stack.item.definitionId.toLowerCase());
+            return item && item.definition.itemClass === itemClass && !item.ignoresDurabilityLoss
+                ? [{ slot, item }]
+                : [];
+        });
+        if (candidates.length === 0) return;
+        const selected = candidates.length === 1
+            ? candidates[0]
+            : candidates[Math.floor(this.random() * candidates.length)];
+        if (selected.item.durabilityLossChance <= 0
+            || (selected.item.durabilityLossChance <= 100 && this.random() * 100 >= selected.item.durabilityLossChance)) return;
+        const durabilityBefore = inventory.getEquipped(selected.slot)?.item.durability ?? 100;
+        inventory.damageEquipped(selected.slot, 1);
+        if (durabilityBefore === 11) this.options.onMessage?.(`${selected.item.literaryName} почти разрушен`);
+        if (durabilityBefore <= 1) this.options.onMessage?.(`Предмет ${selected.item.literaryName} разрушен`);
+        this.refreshHeroCombatProfile();
     }
 
     private recordBestiaryKill(targetName: string): void {
@@ -1488,15 +1884,11 @@ export class GameStateRuntime {
         if (magic.target !== "enemy" || magic.radius <= 0) return [primaryTargetName];
         const center = this.combatantPositions.get(primaryTargetName);
         if (!center) return [primaryTargetName];
-        const maximumDistanceSquared = magic.radius * magic.radius;
         return [...this.combatants]
             .filter(([name, combatant]) => name !== "hero" && !combatant.isDead && this.persons.get(name) !== false)
             .filter(([name]) => {
                 const position = this.combatantPositions.get(name);
-                if (!position) return name === primaryTargetName;
-                const dx = position.x - center.x;
-                const dy = position.y - center.y;
-                return dx * dx + dy * dy <= maximumDistanceSquared;
+                return position ? originalCombatDistance(position, center) <= magic.radius : name === primaryTargetName;
             })
             .map(([name]) => name);
     }
@@ -1803,14 +2195,42 @@ export class GameStateRuntime {
         return [...this.personParameters.keys()].find((candidate) => candidate.toLowerCase() === normalized);
     }
 
+    private captureCurrentPersonStates(): void {
+        if (!this.currentDynamicPersonLevel || this.persons.size === 0) return;
+        this.personStatesByLevel.set(this.currentDynamicPersonLevel, new Map(
+            [...this.persons].map(([name, present]) => [name.toLowerCase(), present]),
+        ));
+    }
+
+    private personStatesByLevelSnapshot(): Readonly<Record<string, Readonly<Record<string, boolean>>>> {
+        const levels = new Map(this.personStatesByLevel);
+        if (this.currentDynamicPersonLevel && this.persons.size > 0) {
+            levels.set(this.currentDynamicPersonLevel, new Map(
+                [...this.persons].map(([name, present]) => [name.toLowerCase(), present]),
+            ));
+        }
+        return Object.fromEntries([...levels].map(([level, persons]) => [level, Object.fromEntries(persons)]));
+    }
+
     private setPersonPresence(name: string, present: boolean): number {
         this.persons.set(name, present);
+        if (this.currentDynamicPersonLevel) {
+            const level = this.personStatesByLevel.get(this.currentDynamicPersonLevel) ?? new Map<string, boolean>();
+            level.set(name.toLowerCase(), present);
+            this.personStatesByLevel.set(this.currentDynamicPersonLevel, level);
+        }
         this.options.onPersonPresence?.(name, present);
         return 1;
     }
 
     private itemCount(owner: string, item: string): number {
-        return this.inventories.get(this.inventoryOwner(owner))?.get(item) ?? 0;
+        const inventory = this.inventories.get(this.inventoryOwner(owner));
+        if (!inventory) return 0;
+        const normalized = item.toLowerCase();
+        return inventory.snapshot().stacks.reduce(
+            (total, stack) => total + (stack.item.definitionId.toLowerCase() === normalized ? stack.quantity : 0),
+            0,
+        );
     }
 
     private inventoryOwner(owner: string): string {
@@ -1818,33 +2238,165 @@ export class GameStateRuntime {
         return [...this.inventories.keys()].find((candidate) => candidate.toLowerCase() === normalized) ?? owner;
     }
 
+    private createInventory(): Inventory {
+        return new Inventory(this.inventoryCatalog, { capacity: 0x7fffffff });
+    }
+
+    private createInventoryItem(owner: string, definitionId: string, durability = 100, charges?: number): ItemInstance {
+        this.inventorySerial += 1;
+        return createItemInstance(definitionId, {
+            id: `${owner}:${definitionId}:${this.inventorySerial}`,
+            durability,
+            ...(charges === undefined ? {} : { charges }),
+        });
+    }
+
+    private inventoryStackKey(item: ItemInstance): string {
+        return JSON.stringify([item.definitionId.toLowerCase(), item.durability ?? 100, item.charges ?? null]);
+    }
+
+    private inventoryStack(owner: string, stackKey: string): { readonly item: ItemInstance; readonly quantity: number } | undefined {
+        const inventory = this.inventories.get(this.inventoryOwner(owner));
+        if (!inventory) return undefined;
+        const matching = inventory.snapshot().stacks.filter(({ item }) => this.inventoryStackKey(item) === stackKey);
+        if (matching.length === 0) return undefined;
+        return {
+            item: matching[0].item,
+            quantity: matching.reduce((total, stack) => total + stack.quantity, 0),
+        };
+    }
+
+    private notifyItemReceived(item: string, quantity: number): void {
+        if (quantity <= 0) return;
+        if (item.toLowerCase() === MONEY_ITEM_ID.toLowerCase()) {
+            this.options.onMessage?.(`Получено ${quantity} монет`);
+            return;
+        }
+        const literaryName = this.options.resolveItemLiteraryName?.(item)
+            ?? this.registeredItems.get(item.toLowerCase())?.literaryName
+            ?? item;
+        this.options.onMessage?.(`Получен предмет: ${literaryName}`);
+    }
+
     private changeItemCount(owner: string, item: string, delta: number): number {
         if (!Number.isSafeInteger(delta)) throw new Error("Inventory quantity must be a safe integer");
+        if (delta === 0) return 1;
         const resolvedOwner = this.inventoryOwner(owner);
-        const inventory = this.inventories.get(resolvedOwner) ?? new Map<string, number>();
-        const next = (inventory.get(item) ?? 0) + delta;
-        if (next < 0) return 0;
-        if (next === 0) inventory.delete(item);
-        else inventory.set(item, next);
-        this.inventories.set(resolvedOwner, inventory);
+        const inventory = this.inventories.get(resolvedOwner) ?? this.createInventory();
+        if (delta > 0) {
+            inventory.add(this.createInventoryItem(resolvedOwner, item), delta);
+            this.inventories.set(resolvedOwner, inventory);
+            return 1;
+        }
+        const quantity = -delta;
+        if (this.itemCount(resolvedOwner, item) < quantity) return 0;
+        const transaction = new InventoryTransaction();
+        if (!this.queueDefinitionRemoval(transaction, resolvedOwner, item, quantity)) return 0;
+        transaction.commit();
         return 1;
+    }
+
+    private removeInventoryStack(owner: string, stackKey: string, quantity: number): boolean {
+        if (!Number.isSafeInteger(quantity) || quantity <= 0) return false;
+        const inventory = this.inventories.get(this.inventoryOwner(owner));
+        const stack = this.inventoryStack(owner, stackKey);
+        if (!inventory || !stack || stack.quantity < quantity) return false;
+        try {
+            new InventoryTransaction().remove(inventory, stack.item, quantity).commit();
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    private queueStackTransfer(
+        transaction: InventoryTransaction,
+        source: string,
+        destination: string,
+        stackKey: string,
+        quantity: number,
+    ): boolean {
+        if (!Number.isSafeInteger(quantity) || quantity <= 0) return false;
+        const sourceInventory = this.inventories.get(this.inventoryOwner(source));
+        const stack = this.inventoryStack(source, stackKey);
+        if (!sourceInventory || !stack || stack.quantity < quantity) return false;
+        const destinationOwner = this.inventoryOwner(destination);
+        const destinationInventory = this.inventories.get(destinationOwner) ?? this.createInventory();
+        this.inventories.set(destinationOwner, destinationInventory);
+        transaction.transfer(sourceInventory, destinationInventory, stack.item, quantity);
+        return true;
+    }
+
+    private queueDefinitionTransfer(
+        transaction: InventoryTransaction,
+        source: string,
+        destination: string,
+        definitionId: string,
+        quantity: number,
+    ): boolean {
+        const sourceInventory = this.inventories.get(this.inventoryOwner(source));
+        if (!sourceInventory || this.itemCount(source, definitionId) < quantity) return false;
+        const destinationOwner = this.inventoryOwner(destination);
+        const destinationInventory = this.inventories.get(destinationOwner) ?? this.createInventory();
+        this.inventories.set(destinationOwner, destinationInventory);
+        let remaining = quantity;
+        for (const stack of sourceInventory.snapshot().stacks) {
+            if (stack.item.definitionId.toLowerCase() !== definitionId.toLowerCase()) continue;
+            const moved = Math.min(remaining, stack.quantity);
+            transaction.transfer(sourceInventory, destinationInventory, stack.item, moved);
+            remaining -= moved;
+            if (remaining === 0) return true;
+        }
+        return false;
+    }
+
+    private queueDefinitionRemoval(
+        transaction: InventoryTransaction,
+        owner: string,
+        definitionId: string,
+        quantity: number,
+    ): boolean {
+        const inventory = this.inventories.get(this.inventoryOwner(owner));
+        if (!inventory || this.itemCount(owner, definitionId) < quantity) return false;
+        let remaining = quantity;
+        for (const stack of inventory.snapshot().stacks) {
+            if (stack.item.definitionId.toLowerCase() !== definitionId.toLowerCase()) continue;
+            const removed = Math.min(remaining, stack.quantity);
+            transaction.remove(inventory, stack.item, removed);
+            remaining -= removed;
+            if (remaining === 0) return true;
+        }
+        return false;
     }
 
     private transferItem(source: string, destination: string, item: string, quantity: number): number {
         if (!Number.isSafeInteger(quantity) || quantity <= 0) throw new Error("Transfer quantity must be a positive safe integer");
-        if (this.itemCount(source, item) < quantity) return 0;
-        this.changeItemCount(source, item, -quantity);
-        this.changeItemCount(destination, item, quantity);
-        return 1;
+        const transaction = new InventoryTransaction();
+        if (!this.queueDefinitionTransfer(transaction, source, destination, item, quantity)) return 0;
+        try {
+            transaction.commit();
+            return 1;
+        } catch {
+            return 0;
+        }
     }
 
     private transferAllItems(source: string, destination: string): number {
-        const sourceInventory = this.inventories.get(source);
-        if (!sourceInventory || sourceInventory.size === 0) return 1;
-        for (const [item, quantity] of [...sourceInventory]) {
-            this.transferItem(source, destination, item, quantity);
+        const sourceInventory = this.inventories.get(this.inventoryOwner(source));
+        if (!sourceInventory || sourceInventory.count === 0) return 1;
+        const transaction = new InventoryTransaction();
+        for (const stack of sourceInventory.snapshot().stacks) {
+            const destinationOwner = this.inventoryOwner(destination);
+            const destinationInventory = this.inventories.get(destinationOwner) ?? this.createInventory();
+            this.inventories.set(destinationOwner, destinationInventory);
+            transaction.transfer(sourceInventory, destinationInventory, stack.item, stack.quantity);
         }
-        return 1;
+        try {
+            transaction.commit();
+            return 1;
+        } catch {
+            return 0;
+        }
     }
 
     private getPersonParameter(person: string, parameter: string): number {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import {
     loadGuiDefinition,
     type GuiDefinition,
@@ -16,7 +16,7 @@ import { GuiDragDropContainer } from "./gui/GuiDragDropContainer.tsx";
 import { GuiDragDropObject } from "./gui/GuiDragDropObject.tsx";
 import { GuiEdit } from "./gui/GuiEdit.tsx";
 import { GuiListbox } from "./gui/GuiListbox.tsx";
-import { GuiSimpleButton } from "./gui/GuiSimpleButton.tsx";
+import { GuiSimpleButton } from "./gui/GuiButton.tsx";
 import { GuiSlider } from "./gui/GuiSlider.tsx";
 import { GuiVerticalSlider } from "./gui/GuiVerticalSlider.tsx";
 import { GuiTooltip, type GuiTooltipAnchor } from "./gui/GuiTooltip.tsx";
@@ -29,7 +29,9 @@ interface OriginalGuiLayerProps {
     readonly script: string;
     readonly values?: Readonly<Record<number, GuiControlValue>>;
     readonly labels?: Readonly<Record<number, string>>;
+    readonly sliderLimits?: Readonly<Record<number, { readonly minimum: number; readonly maximum: number }>>;
     readonly items?: Readonly<Record<number, readonly string[]>>;
+    readonly objectContents?: Readonly<Record<number, ReactNode>>;
     readonly onAction?: GuiActionHandler;
     readonly tooltips?: Readonly<Record<number, string>>;
     readonly tooltipDelayMs?: number;
@@ -71,7 +73,9 @@ export const OriginalGuiLayer = ({
     script,
     values = {},
     labels = {},
+    sliderLimits = {},
     items = {},
+    objectContents = {},
     tooltips = {},
     tooltipDelayMs = 0,
     onAction,
@@ -160,12 +164,20 @@ export const OriginalGuiLayer = ({
         onPointerOver={handlePointerOver} onPointerOut={handlePointerOut}>
         {definition?.objects
             .filter((object: GuiObjectDefinition) => !objectIds || objectIds.includes(object.id))
-            .map((object: GuiObjectDefinition) => <GuiObjectControl key={object.id}
-                object={enabledObjectIds.includes(object.id) ? { ...object, enabled: true } : object}
-                value={values[object.id]} listItems={items[object.id]}
-                ariaLabel={labels[object.id]} onAction={onAction} onValueChange={onValueChange}
-                onDragOver={onDragOver} onDrop={onDrop} inactive={inactiveObjectIds.includes(object.id)}
-                canvasWidth={canvasWidth} canvasHeight={canvasHeight} />)}
+            .map((object: GuiObjectDefinition) => {
+                const limits = sliderLimits[object.id];
+                const configuredObject = {
+                    ...object,
+                    ...(enabledObjectIds.includes(object.id) ? { enabled: true } : {}),
+                    ...(limits ? { sliderLowLimit: limits.minimum, sliderHighLimit: limits.maximum } : {}),
+                };
+                return <GuiObjectControl key={object.id}
+                    object={configuredObject} value={values[object.id]} listItems={items[object.id]}
+                    content={objectContents[object.id]}
+                    ariaLabel={labels[object.id]} onAction={onAction} onValueChange={onValueChange}
+                    onDragOver={onDragOver} onDrop={onDrop} inactive={inactiveObjectIds.includes(object.id)}
+                    canvasWidth={canvasWidth} canvasHeight={canvasHeight} />;
+            })}
         {activeTooltip && <GuiTooltip text={activeTooltip.text} anchor={activeTooltip.anchor}
             canvasWidth={canvasWidth} canvasHeight={canvasHeight} />}
     </div>;

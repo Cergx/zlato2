@@ -4,6 +4,11 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { AGEParser } from "../src/game/parsers/AGEParser.ts";
 import { DialogueRuntime } from "../src/game/dialogue/DialogueRuntime.ts";
+import {
+    decodeDialogueReplyPacket,
+    encodeDialogueReplyPacket,
+    encodeDialogueSnapshotPacket,
+} from "../src/game/dialogue/DialoguePacketRuntime.ts";
 import { SCRRuntime, parseSCR } from "../src/game/scripts/SCRRuntime.ts";
 
 const strictHost = process.argv.includes("--strict-host");
@@ -18,6 +23,7 @@ const root = resolve(process.cwd());
 const events = [];
 const emit = (event) => events.push(event);
 const readBytes = async (relativePath) => readFile(resolve(root, relativePath));
+const packetHex = (bytes) => Buffer.from(bytes).toString("hex");
 const exactArrayBuffer = (buffer) => buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 const readCP1251 = async (relativePath) => new TextDecoder("windows-1251").decode(await readBytes(relativePath));
 
@@ -45,7 +51,17 @@ const parseAge = async () => {
 
 const replayDialogue = async () => {
     const phrases = await parsePhrases();
-    const variables = new Map([["HeroName", "Hero"], ["money", 0], ["price", 0]]);
+    const variables = new Map([
+        ["HeroName", "Hero"],
+        ["money", 0],
+        ["price", 0],
+        ["demon_univ", 0],
+        ["result", 0],
+    ]);
+    const emptyPacketBytes = new Uint8Array(0);
+    let dialogueTurn = 1;
+    let dialogueStep = 0;
+    let dialogueEvaluationSequence = 0;
     const runtime = new DialogueRuntime({
         resolvePhrase: (phraseId) => phrases[phraseId] ?? `#missing:${phraseId}`,
         readVariable: (name) => variables.get(name),
@@ -53,20 +69,70 @@ const replayDialogue = async () => {
         onFunctionCall: ({ id, name, arguments: args, record }) => {
             emit({ event: "age_function", id, name: name ?? null, record: record.index, arguments: args });
         },
+        onRecordEvaluated: ({ record, result, depth }) => {
+            dialogueEvaluationSequence += 1;
+            emit({
+                event: "age_evaluation",
+                turn: dialogueTurn,
+                sequence: dialogueEvaluationSequence,
+                depth,
+                record: record.index,
+                result,
+            });
+        },
+        onNodeEvaluated: ({ record, result, branch, successor }) => {
+            dialogueStep += 1;
+            emit({ event: "age_node", turn: dialogueTurn, step: dialogueStep, record: record.index, result, branch, successor });
+        },
         invokeFunction: () => 0,
-        onStateChange: (state) => emit({
-            event: "dialogue_state",
-            revision: state.revision,
-            status: state.status,
-            phraseId: state.phraseId,
-            options: state.options.map(({ id, enabled }) => ({ id, enabled })),
-        }),
+        onStateChange: (state) => {
+            if (state.status === "active" && state.phraseId !== null) {
+                const packet = encodeDialogueSnapshotPacket({
+                    updateCounter: state.revision,
+                    phraseId: state.phraseId,
+                    replyIds: state.options.map(({ id }) => id),
+                    context: -1,
+                    owner: 0,
+                    substitutionBlob: emptyPacketBytes,
+                    voiceBasename: emptyPacketBytes,
+                });
+                emit({
+                    event: "dialogue_packet",
+                    direction: "server_to_client",
+                    turn: dialogueTurn === 1 ? "opening" : "first_reply",
+                    opcode: packet[0],
+                    byteLength: packet.byteLength,
+                    bytes: packetHex(packet),
+                });
+            }
+            emit({
+                event: "dialogue_state",
+                revision: state.revision,
+                status: state.status,
+                phraseId: state.phraseId,
+                options: state.options.map(({ id, enabled }) => ({ id, enabled })),
+            });
+            dialogueTurn += 1;
+            dialogueStep = 0;
+            dialogueEvaluationSequence = 0;
+        },
         onEnd: (state) => emit({ event: "dialogue_end", reason: state.endReason }),
     });
     const program = await parseAge();
     emit({ event: "age_program", bytes: program.byteLength, encoding: program.encoding, records: program.records.length, openingRecord: program.openingRecord });
     const first = runtime.start(program, "demon_univ");
-    if (first.status === "active" && first.options[0]?.enabled) runtime.choose(first.options[0].id);
+    if (first.status === "active" && first.options[0]?.enabled) {
+        const packet = encodeDialogueReplyPacket(first.options[0].id);
+        emit({
+            event: "dialogue_packet",
+            direction: "client_to_server",
+            turn: "first_reply",
+            opcode: packet[0],
+            byteLength: packet.byteLength,
+            bytes: packetHex(packet),
+        });
+        runtime.choose(decodeDialogueReplyPacket(packet));
+    }
 };
 
 const replayScript = async (relativePath) => {

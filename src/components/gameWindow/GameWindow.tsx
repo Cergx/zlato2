@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Game } from "../../game/Game";
+import { Game, type LoadingStage } from "../../game/Game";
 import { useCursor } from "../../context/CursorContext";
 import { CursorType } from "../../enums/CursorTypes.ts";
 import styles from "./GameWindow.module.scss";
@@ -13,18 +13,39 @@ import { RecoveredGameMenuPanel, type GameMenuPanelKind } from "./GameMenuPanel.
 import { PauseMenu } from "../PauseMenu.tsx";
 import { readGameSettings, type GameSettings } from "../../game/GameSettingsRuntime.ts";
 import { LoadingScreen } from "./LoadingScreen";
-import { ItemTransferPanel } from "../ItemTransferPanel";
+import { ItemTransferPanel } from "../TradeLootPanel";
 import { RelaxPanel } from "./RelaxPanel.tsx";
+import type { HeroProfile } from "../../game/HeroProfileRuntime.ts";
+import { ProfessionSkillsPanel } from "./ProfessionSkillsPanel.tsx";
+import { GUI_TOOLTIP_DELAY_MS, type ProfessionSkillDefinition } from "../../constants/clientDll.ts";
+import { GuiTooltip } from "../gui/GuiTooltip.tsx";
+import type { MapReferenceHint } from "../../game/Level.ts";
 
 interface GameWindowProps {
     gameMode: "single" | "multiplayer";
     level: string;
     entrance?: string;
     saveSlot?: string;
+    heroProfile?: HeroProfile;
     strictScriptAbi?: boolean;
     onMainMenu: () => void;
 
 }
+
+
+const MAP_REFERENCE_TOOLTIP_ANCHOR = Object.freeze({ left: 200, top: 699, width: 624, height: 17 });
+
+const MapReferenceTooltip = ({ hint }: { readonly hint: MapReferenceHint | null }) => {
+    const [visible, setVisible] = useState<MapReferenceHint | null>(null);
+    useEffect(() => {
+        setVisible(null);
+        if (!hint) return;
+        const timer = window.setTimeout(() => setVisible(hint), GUI_TOOLTIP_DELAY_MS);
+        return () => window.clearTimeout(timer);
+    }, [hint]);
+    return visible ? <GuiTooltip text={visible.text} anchor={MAP_REFERENCE_TOOLTIP_ANCHOR}
+        fixedWidth={MAP_REFERENCE_TOOLTIP_ANCHOR.width} canvasWidth={1024} canvasHeight={768} /> : null;
+};
 
 const WeatherOverlay = ({ getGame }: { getGame: () => Game | null }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -83,7 +104,7 @@ const WeatherOverlay = ({ getGame }: { getGame: () => Game | null }) => {
     return <canvas className={styles.weather} width={1024} height={768} ref={canvasRef} aria-hidden="true" />;
 };
 
-export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu, strictScriptAbi = false }: GameWindowProps) => {
+export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, onMainMenu, strictScriptAbi = false }: GameWindowProps) => {
 
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const gameRef = useRef<Game | null>(null);
@@ -93,10 +114,20 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu, st
     const [finishedEnding, setFinishedEnding] = useState<number | null>(null);
     const [runtimeError, setRuntimeError] = useState<string | null>(null);
     const [statusText, setStatusText] = useState("");
+    const [statusMessages, setStatusMessages] = useState<readonly Readonly<{ id: number; text: string }>[]>([]);
+    const [referenceHint, setReferenceHint] = useState<MapReferenceHint | null>(null);
+    const [quickSaveSignal, setQuickSaveSignal] = useState(0);
+    const [needParamsSignal, setNeedParamsSignal] = useState(0);
     const [loadingLevel, setLoadingLevel] = useState(level);
     const [loading, setLoading] = useState(true);
+    const [loadingStage, setLoadingStage] = useState<LoadingStage>("Инициализация...");
+    const [loadingProgress, setLoadingProgress] = useState(0);
     const [transferPanel, setTransferPanel] = useState<{ owner: string; title: string; mode: "loot" | "trade" } | null>(null);
-    const [activePanel, setActivePanel] = useState<GameMenuPanelKind | "inventory" | "skills" | "characteristics" | "pause" | "relax" | null>(null);
+    const [activePanel, setActivePanel] = useState<GameMenuPanelKind | "inventory" | "skills" | "characteristics" | "pause" | "relax" | "profession" | null>(null);
+    const [professionPanel, setProfessionPanel] = useState<{
+        readonly selected: ProfessionSkillDefinition;
+        readonly available: readonly ProfessionSkillDefinition[];
+    } | null>(null);
     const [settings, setSettings] = useState<GameSettings>(() => readGameSettings());
     const chooseDialogue = useCallback((optionId: number) => {
         gameRef.current?.chooseDialogue(optionId);
@@ -134,17 +165,28 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu, st
                     setTransferPanel(null);
                     setDialogueState(null);
                     setWorldMapLocations(null);
+                    setReferenceHint(null);
                 },
                 onCursorChange: setCursor,
                 onError: (error) => setRuntimeError(error instanceof Error ? error.message : String(error)),
                 onStatusTextChange: (text) => setStatusText(text ?? ""),
-                onLoadingStateChange: (active, loadingName) => {
+                onStatusMessage: (text) => setStatusMessages((current) => {
+                    const id = (current[current.length - 1]?.id ?? 0) + 1;
+                    return [...current, { id, text }].slice(-64);
+                }),
+                onReferenceHintChange: (hint) => setReferenceHint(hint ?? null),
+                onInterfaceIcon: (index) => {
+                    if (index === 4) setNeedParamsSignal((current) => current + 1);
+                },
+                onLoadingStateChange: (active, loadingName, stage, progress) => {
                     setLoadingLevel(loadingName);
+                    setLoadingStage(stage);
+                    setLoadingProgress(progress);
                     setLoading(active);
                 },
                 onContainerOpen: (owner, title) => setTransferPanel({ owner, title, mode: "loot" }),
                 onTradeRequest: (owner, title) => setTransferPanel({ owner, title, mode: "trade" }),
-            }, { strictScriptAbi });
+            }, { strictScriptAbi, heroProfile, requireHeroProfile: gameMode === "single" && !saveSlot });
             const start = async (): Promise<void> => {
                 await gameRef.current?.start(gameMode, level, entrance);
                 if (saveSlot) await gameRef.current?.load(saveSlot);
@@ -156,7 +198,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu, st
             ? gameRef.current.load(saveSlot)
             : gameRef.current.changeLevel(gameMode, level, entrance);
         void change.catch((error) => setRuntimeError(error instanceof Error ? error.message : String(error)));
-    }, [entrance, gameMode, level, saveSlot, setCursor, strictScriptAbi]);
+    }, [entrance, gameMode, heroProfile, level, saveSlot, setCursor, strictScriptAbi]);
 
     useEffect(() => () => {
         gameRef.current?.stop();
@@ -170,6 +212,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu, st
             if (event.key === "F5") {
                 try {
                     gameRef.current?.quickSave();
+                    setQuickSaveSignal((signal) => signal + 1);
                 } catch (error) {
                     setRuntimeError(error instanceof Error ? error.message : String(error));
                 }
@@ -185,22 +228,31 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu, st
         const handleEscape = (event: KeyboardEvent): void => {
             if (event.key !== "Escape") return;
             event.preventDefault();
+            if (activePanel === "relax") gameRef.current?.cancelRest();
             setActivePanel((current) => current === "pause" ? null : "pause");
         };
         window.addEventListener("keydown", handleEscape);
         return () => window.removeEventListener("keydown", handleEscape);
-    }, []);
+    }, [activePanel]);
 
     return (
         <div className={`${styles.gameWindow} ${cursorClassName}`} style={{ filter: `brightness(${Number(settings[2]) || 100}%)` }}>
             <canvas width={1024} height={768} ref={canvasRef} />
             <WeatherOverlay getGame={getGame} />
+            <MapReferenceTooltip hint={!activePanel && dialogueState?.status !== "active" && !worldMapLocations && !loading ? referenceHint : null} />
 
             <GameHud
                 getGame={getGame}
                 statusText={statusText}
+                statusMessages={statusMessages}
+                quickSaveSignal={quickSaveSignal}
+                needParamsSignal={needParamsSignal}
 
                 onSkills={() => togglePanel("skills")}
+                onProfessionSkill={(selected, available) => {
+                    setProfessionPanel({ selected, available });
+                    setActivePanel("profession");
+                }}
                 onInventory={() => togglePanel("inventory")}
                 onJournal={() => togglePanel("journal")}
                 onMagic={() => togglePanel("magic")}
@@ -208,12 +260,15 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu, st
                 onRest={() => togglePanel("relax")}
                 skillsActive={activePanel === "skills"}
             />
-            {(activePanel === "inventory" || activePanel === "skills" || activePanel === "characteristics") && gameRef.current && <InventoryPanel game={gameRef.current} initialView={activePanel} onClose={closePanel} />}
-            {activePanel && activePanel !== "inventory" && activePanel !== "skills" && activePanel !== "characteristics" && activePanel !== "pause" && activePanel !== "relax" && gameRef.current && <RecoveredGameMenuPanel game={gameRef.current} kind={activePanel} onClose={closePanel} />}
+            {(activePanel === "inventory" || activePanel === "characteristics") && gameRef.current && <InventoryPanel game={gameRef.current} initialView={activePanel} onClose={closePanel} />}
+            {activePanel && activePanel !== "inventory" && activePanel !== "skills" && activePanel !== "characteristics" && activePanel !== "pause" && activePanel !== "relax" && activePanel !== "profession" && gameRef.current && <RecoveredGameMenuPanel game={gameRef.current} kind={activePanel} onClose={closePanel} />}
             {activePanel === "pause" && (
                 <PauseMenu getGame={getGame} onClose={closePanel} onMainMenu={onMainMenu} onApplySettings={setSettings} />
             )}
             {activePanel === "relax" && gameRef.current && <RelaxPanel game={gameRef.current} onClose={closePanel} />}
+            {activePanel === "profession" && professionPanel && (
+                <ProfessionSkillsPanel initialSkillId={professionPanel.selected.id} onClose={closePanel} />
+            )}
 
             {transferPanel && gameRef.current && (
                 <ItemTransferPanel game={gameRef.current} {...transferPanel} onClose={() => setTransferPanel(null)} />
@@ -234,7 +289,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, onMainMenu, st
                     onClose={closeWorldMap}
                 />
             )}
-            {loading && <LoadingScreen level={loadingLevel} />}
+            {loading && <LoadingScreen level={loadingLevel} stage={loadingStage} progress={loadingProgress} />}
             {finishedEnding !== null && (
                 <section className={styles.finished} role="status">
                     <h2>Игра завершена</h2>
