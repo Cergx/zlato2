@@ -98,10 +98,11 @@ type RenderItem =
     | { kind: "person"; runtime: PersonRuntime };
 
 const renderPriority: Record<RenderKind, number> = {
-    person: 0,
+    static: 0,
     animation: 1,
-    static: 2,
+    person: 2,
 };
+const STATIC_SCENERY_VISIBLE = 0x2;
 
 const doorRenderDepth = (cells: readonly TilePosition[], fallback: number): number => {
     let depth = Number.NEGATIVE_INFINITY;
@@ -120,6 +121,7 @@ export class MapRenderer {
     private player: PersonRuntime;
     private worldGrid: WorldGrid;
     private renderQueue: RenderItem[];
+    private backgroundStatics: readonly LevelStatic[];
     private lastFrameTime = performance.now();
     private simulationAccumulatorMs = 0;
     private simulationTick = 0;
@@ -258,7 +260,7 @@ export class MapRenderer {
         private readonly onDoorClick?: (name: string) => void,
         private readonly onTriggerClick?: (name: string) => void,
         private readonly onCursorChange?: (cursor: CursorType) => void,
-        private readonly onHoverTarget?: (kind?: HoverTargetKind, name?: string) => void,
+        private readonly onHoverTarget?: (kind?: HoverTargetKind, name?: string, doorOpened?: boolean) => void,
         private readonly getHeroAttackDistance?: () => number,
         private readonly onPersonPositionChange?: (technicalName: string, position: Readonly<WorldPosition>) => void,
         onCombatMovementStep?: () => boolean,
@@ -276,6 +278,7 @@ export class MapRenderer {
         this.getCombatVisualState = getCombatVisualState;
         this.persons = this.createPersonRuntimes(levelData);
         this.player = this.createPlayerRuntime(levelData.player);
+        this.backgroundStatics = this.createBackgroundStatics(levelData);
         this.worldGrid = new WorldGrid(levelData.lvlData.maskHDR);
         this.createInteractionRuntimes(levelData);
         this.refreshInteractiveVisuals();
@@ -294,6 +297,7 @@ export class MapRenderer {
         this.levelData = levelData;
         this.persons = this.createPersonRuntimes(levelData);
         this.player = this.createPlayerRuntime(levelData.player);
+        this.backgroundStatics = this.createBackgroundStatics(levelData);
         this.worldGrid = new WorldGrid(levelData.lvlData.maskHDR);
         this.renderQueue = this.createRenderQueue(levelData);
         this.createInteractionRuntimes(levelData);
@@ -490,6 +494,9 @@ export class MapRenderer {
         if (activationCells) door.activationCells = activationCells.map((cell) => ({ ...cell }));
         door.depth = doorRenderDepth(door.cells, door.levelDoor.levelStatic.position.y + (door.levelDoor.levelStatic.image?.height ?? 0));
         this.refreshAlternateMaskTiles();
+        if (this.showHints && this.hoveredTargetKey.toLowerCase() === `door:${name}`.toLowerCase()) {
+            this.onHoverTarget?.("door", name, opened);
+        }
     }
 
     public setTriggerState(trigger: ScenarioTriggerState): void {
@@ -565,6 +572,7 @@ export class MapRenderer {
             this.canvas.width,
             this.canvas.height,
         );
+        for (const levelStatic of this.backgroundStatics) this.drawBackgroundStatic(levelStatic);
 
         this.renderQueue.sort((left, right) => {
             const depthDelta = this.renderDepth(left) - this.renderDepth(right);
@@ -574,6 +582,7 @@ export class MapRenderer {
         for (const item of this.renderQueue) this.drawRenderItem(item, highlightTime);
         this.drawMagicEffects(highlightTime);
         this.drawTriggerMaskHighlights(highlightTime);
+        this.drawDoorMaskHighlights(highlightTime);
     }
 
     private drawMagicEffects(now: number): void {
@@ -630,6 +639,45 @@ export class MapRenderer {
             );
         }
     }
+    private drawDoorMaskHighlights(now: number): void {
+        const context = this.highlightContext;
+        if (!context) return;
+        for (const door of this.doors.values()) {
+            const hovered = this.hoveredTargetKey.toLowerCase() === `door:${door.name}`.toLowerCase();
+            if (!this.flashInteractiveObjects && !hovered) continue;
+            const mask = this.doorInteractionMask(door);
+            if (!mask) continue;
+            const drawX = mask.position.x - this.offset.x;
+            const drawY = mask.position.y - this.offset.y;
+            if (drawX > this.canvas.width || drawY > this.canvas.height
+                || drawX + mask.image.width < 0 || drawY + mask.image.height < 0) continue;
+
+            if (this.highlightCanvas.width !== mask.image.width) this.highlightCanvas.width = mask.image.width;
+            if (this.highlightCanvas.height !== mask.image.height) this.highlightCanvas.height = mask.image.height;
+            context.clearRect(0, 0, mask.image.width, mask.image.height);
+            context.drawImage(
+                this.levelData.image,
+                mask.position.x, mask.position.y, mask.image.width, mask.image.height,
+                0, 0, mask.image.width, mask.image.height,
+            );
+            if (!door.opened) {
+                const levelStatic = door.levelDoor.levelStatic;
+                if (levelStatic.image) {
+                    context.drawImage(
+                        levelStatic.image,
+                        levelStatic.position.x - mask.position.x,
+                        levelStatic.position.y - mask.position.y,
+                    );
+                }
+            }
+            context.save();
+            context.globalCompositeOperation = "destination-in";
+            context.drawImage(mask.image, 0, 0);
+            context.restore();
+            this.drawPreparedHighlight(drawX, drawY, now, true);
+        }
+    }
+
 
     private advanceSimulation(clockTimeMs: number) {
         this.simulationTick++;
@@ -645,9 +693,18 @@ export class MapRenderer {
         this.onSimulationStep?.(this.simulationTick, simulationTime, this.getPlayerWorldPosition(), clockTimeMs);
     }
 
+    private createBackgroundStatics(levelData: LevelData): readonly LevelStatic[] {
+        const doorStatics = new Set(levelData.levelDoors.map((door) => door.levelStatic));
+        return levelData.levelStatics.filter((levelStatic) =>
+            !doorStatics.has(levelStatic)
+            && (levelStatic.param1 & STATIC_SCENERY_VISIBLE) !== 0
+            && levelStatic.image !== undefined);
+    }
+
     private createRenderQueue(levelData: LevelData): RenderItem[] {
         const queue: RenderItem[] = [];
-        for (const levelStatic of levelData.levelStatics) {
+        const doorStatics = new Set(levelData.levelDoors.map((door) => door.levelStatic));
+        for (const levelStatic of doorStatics) {
             if (levelStatic.image) queue.push({ kind: "static", levelStatic });
         }
         for (const levelAnimation of levelData.levelAnimations) {
@@ -715,7 +772,7 @@ export class MapRenderer {
     private drawRenderItem(item: RenderItem, now: number) {
         switch (item.kind) {
             case "static":
-                if (this.isStaticVisible(item.levelStatic)) this.drawStatic(item.levelStatic, now);
+                if (this.isStaticVisible(item.levelStatic)) this.drawStatic(item.levelStatic);
                 break;
             case "animation":
                 this.drawAnimation(item.levelAnimation);
@@ -1124,18 +1181,19 @@ export class MapRenderer {
         return undefined;
     }
 
+    private doorInteractionMask(door: DoorRuntime): LevelTriggerMask | undefined {
+        const action = door.opened ? door.levelDoor.closeAction : door.levelDoor.openAction;
+        return this.triggerMasksByName.get(action.toLowerCase());
+    }
+
     private findDoorAt(position: Readonly<WorldPosition>): DoorRuntime | undefined {
-        const cell = worldToCell(position);
         for (const door of this.doors.values()) {
-            if (door.cells.some((candidate) => candidate.x === cell.x && candidate.y === cell.y)
-                || door.activationCells.some((candidate) => candidate.x === cell.x && candidate.y === cell.y)) return door;
-            const levelStatic = door.levelDoor.levelStatic;
-            const image = levelStatic.image;
-            if (!image) continue;
-            const x = Math.floor(position.x - levelStatic.position.x);
-            const y = Math.floor(position.y - levelStatic.position.y);
-            if (x < 0 || y < 0 || x >= image.width || y >= image.height) continue;
-            const context = image.getContext("2d", { willReadFrequently: true });
+            const mask = this.doorInteractionMask(door);
+            if (!mask) continue;
+            const x = Math.floor(position.x - mask.position.x);
+            const y = Math.floor(position.y - mask.position.y);
+            if (x < 0 || y < 0 || x >= mask.image.width || y >= mask.image.height) continue;
+            const context = mask.image.getContext("2d", { willReadFrequently: true });
             if ((context?.getImageData(x, y, 1, 1).data[3] ?? 0) > 16) return door;
         }
         return undefined;
@@ -1217,7 +1275,8 @@ export class MapRenderer {
         this.hoveredPerson = nextPerson;
         if (key === this.hoveredTargetKey && !personChanged) return;
         this.hoveredTargetKey = key;
-        if (this.showHints) this.onHoverTarget?.(kind, name);
+        const doorOpened = kind === "door" && name ? this.doors.get(name)?.opened : undefined;
+        if (this.showHints) this.onHoverTarget?.(kind, name, doorOpened);
         else this.onHoverTarget?.();
     }
 
@@ -1415,7 +1474,7 @@ export class MapRenderer {
         return true;
     }
 
-    private drawStatic(levelStatic: LevelStatic, now: number) {
+    private drawBackgroundStatic(levelStatic: LevelStatic): void {
         const image = levelStatic.image;
         if (!this.ctx || !image) return;
 
@@ -1424,14 +1483,17 @@ export class MapRenderer {
         if (x > this.canvas.width || y > this.canvas.height) return;
         if (x + image.width < 0 || y + image.height < 0) return;
         this.ctx.drawImage(image, x, y);
-        const door = this.doorsByStatic.get(levelStatic);
-        if (door && this.hoveredTargetKey.toLowerCase() === `door:${door.name}`.toLowerCase()) {
-            if (this.highlightCanvas.width !== image.width) this.highlightCanvas.width = image.width;
-            if (this.highlightCanvas.height !== image.height) this.highlightCanvas.height = image.height;
-            this.highlightContext?.clearRect(0, 0, image.width, image.height);
-            this.highlightContext?.drawImage(image, 0, 0);
-            this.drawPreparedHighlight(x, y, now, false);
-        }
+    }
+
+    private drawStatic(levelStatic: LevelStatic) {
+        const image = levelStatic.image;
+        if (!this.ctx || !image) return;
+
+        const x = levelStatic.position.x - this.offset.x;
+        const y = levelStatic.position.y - this.offset.y;
+        if (x > this.canvas.width || y > this.canvas.height) return;
+        if (x + image.width < 0 || y + image.height < 0) return;
+        this.ctx.drawImage(image, x, y);
         this.drawOccluders({
             x: levelStatic.position.x,
             y: levelStatic.position.y,

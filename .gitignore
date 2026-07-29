@@ -24,6 +24,7 @@ dist-ssr
 
 # Local scratch artifacts
 .tmp-*.png
+tmp-*.png
 /.tmp/
 /tmp-ghidra/
 /tmp-ghidra-client/

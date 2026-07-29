@@ -433,7 +433,7 @@ export class Level {
             (name) => this.runtime.toggleDoor(name),
             (name) => void this.runtime.interactTrigger(name).catch((error) => console.error(`Не удалось взаимодействовать с ${name}`, error)),
             (cursor) => this.options.onCursorChange?.(cursor),
-            (kind, name) => {
+            (kind, name, doorOpened) => {
                 if (!name) {
                     this.options.onStatusText?.();
                     this.options.onReferenceHint?.();
@@ -466,7 +466,8 @@ export class Level {
                 }
                 if (kind === "door") {
                     const door = this.levelData?.levelDoors.find((candidate) => candidate.sefName === name);
-                    this.options.onStatusText?.((door?.isOpened ? door.nameOpened : door?.nameClosed) ?? name);
+                    const opened = doorOpened ?? door?.isOpened ?? false;
+                    this.options.onStatusText?.((opened ? door?.nameOpened : door?.nameClosed) ?? name);
                     return;
                 }
                 const trigger = this.levelData?.sefData.triggers.find((candidate) => candidate.name === name);
