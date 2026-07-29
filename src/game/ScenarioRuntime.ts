@@ -326,7 +326,9 @@ export class ScenarioRuntime {
             if (this.doors.has(lvlDoor.sefName)) throw new Error(`Duplicate joined door ${lvlDoor.sefName}`);
             const sefDoor = this.sefData.doors[lvlDoor.sefName];
             if (!sefDoor) continue;
-            const cells = expandDoorBarrierCells(this.resolveCells(this.sefData.cellGroups, sefDoor.cellsName, `SEF door ${lvlDoor.sefName}`));
+            const cells = sefDoor.cellsName
+                ? expandDoorBarrierCells(this.resolveCells(this.sefData.cellGroups, sefDoor.cellsName, `SEF door ${lvlDoor.sefName}`))
+                : [];
             const activationCells = this.resolveCells(this.lvlData.cellGroups, lvlDoor.cellGroup, `LVL door ${lvlDoor.sefName}`);
             const door: DoorRecord = {
                 name: lvlDoor.sefName,
@@ -345,8 +347,9 @@ export class ScenarioRuntime {
     private createPerson(person: SEFPerson, index: number): NpcRecord {
         const anchor = this.requireCell(person.position, `NPC ${index} position`);
         const mode = person.routeType ?? "STAY";
+        const routeName = person.route ?? (this.sefData.cellGroups.track ? "track" : undefined);
         const route = mode === "MOVED" || mode === "MOVED_FLIP"
-            ? this.resolveCells(this.sefData.cellGroups, person.route, `NPC ${index} route`)
+            ? this.resolveCells(this.sefData.cellGroups, routeName, `NPC ${index} route`)
             : [];
         const targetIndex = route.length === 0 ? 0 : this.initialTargetIndex(anchor, route);
         return {

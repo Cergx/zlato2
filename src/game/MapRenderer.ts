@@ -87,7 +87,7 @@ interface ActiveMagicAnimation {
     readonly startedAt: number;
 }
 
-type HoverTargetKind = "person" | "door" | "trigger" | "reference";
+type HoverTargetKind = "person" | "door" | "trigger" | "reference" | "ground";
 
 
 type RenderKind = "static" | "animation" | "person";
@@ -128,6 +128,8 @@ export class MapRenderer {
     private readonly onSimulationStep?: (tick: number, simulationTimeMs: number, playerPosition: Readonly<WorldPosition>, clockTimeMs: number) => void;
     private readonly onPersonClick?: (person: LevelPerson) => void;
     private readonly onPersonAttack?: (person: LevelPerson) => void;
+    private readonly onCombatMovementStep?: () => boolean;
+    private readonly getCombatVisualState?: (technicalName: string) => Readonly<{ relation: "friendly" | "neutral" | "hostile"; current: boolean; active: boolean }>;
     private readonly hiddenPersons = new Set<string>();
     private readonly deadPersons = new Set<string>();
     private pendingPersonInteraction: PendingInteraction | undefined;
@@ -144,7 +146,12 @@ export class MapRenderer {
     private readonly highlightContext = this.highlightCanvas.getContext("2d");
     private combatMode = false;
     private magicTargeting = false;
+    private aiTurn = false;
+    private currentCombatant: string | undefined;
+    private dialogueSpeakerCombatantId: string | undefined;
+    private playerCombatChargedTargetIndex = -1;
     private readonly magicEffects: ActiveMagicAnimation[] = [];
+    private paused = false;
 
     private readonly simulationStepMs = 1000 / 60;
     private walkingSpeed = 48;
@@ -157,11 +164,12 @@ export class MapRenderer {
     private readonly randomMovementRadius = 8;
 
     private readonly handleClick = (event: MouseEvent) => {
+        if (this.paused || this.aiTurn) return;
         if (event.button !== 0) return;
         if (this.deadPersons.has("hero")) return;
         const clickPosition = this.eventWorldPosition(event);
         const clickedPerson = this.findPersonAt(clickPosition);
-        const deadPerson = clickedPerson ? this.deadPersons.has(clickedPerson.person.name.toLowerCase()) : false;
+        const deadPerson = clickedPerson ? this.deadPersons.has(clickedPerson.person.combatantId.toLowerCase()) : false;
         const attack = !deadPerson && (event.shiftKey || this.combatMode || this.magicTargeting);
         if (clickedPerson && (attack || clickedPerson.person.scriptDialog || deadPerson)) {
             this.beginPersonInteraction(clickedPerson, attack, event.detail > 1);
@@ -174,7 +182,8 @@ export class MapRenderer {
         }
         const clickedTrigger = this.findTriggerAt(clickPosition);
         if (clickedTrigger) {
-            this.beginTriggerInteraction(clickedTrigger, event.detail > 1);
+            if (clickedTrigger.transition) this.movePlayerIntoTransition(clickedTrigger, event.detail > 1);
+            else this.beginTriggerInteraction(clickedTrigger, event.detail > 1);
             return;
         }
 
@@ -183,6 +192,12 @@ export class MapRenderer {
     };
 
     private readonly handleMouseMove = (event: MouseEvent) => {
+        if (this.paused) return;
+        if (this.aiTurn) {
+            this.setHoveredTarget();
+            this.changeCursor(CursorType.NPC_TURN);
+            return;
+        }
         const local = this.eventCanvasPosition(event);
         const edgeCursor = this.edgeCursor(local);
 
@@ -194,8 +209,8 @@ export class MapRenderer {
         const world = { x: local.x + this.offset.x, y: local.y + this.offset.y };
         const person = this.findPersonAt(world);
         if (person) {
-            this.setHoveredTarget("person", person.person.name, person);
-            this.changeCursor(this.deadPersons.has(person.person.name.toLowerCase()) ? CursorType.TAKE : this.magicTargeting ? CursorType.CAST : event.shiftKey || this.combatMode ? CursorType.ATTACK : person.person.scriptDialog ? CursorType.TALK : CursorType.NPC_TURN);
+            this.setHoveredTarget("person", person.person.combatantId, person);
+            this.changeCursor(this.deadPersons.has(person.person.combatantId.toLowerCase()) ? CursorType.TAKE : this.magicTargeting ? CursorType.CAST : event.shiftKey || this.combatMode ? CursorType.ATTACK : person.person.scriptDialog ? CursorType.TALK : CursorType.NPC_TURN);
             return;
         }
         const door = this.findDoorAt(world);
@@ -206,7 +221,11 @@ export class MapRenderer {
         }
         const trigger = this.findTriggerAt(world, true);
         const reference = trigger ? this.isReferenceTrigger(trigger) : false;
-        this.setHoveredTarget(reference ? "reference" : trigger ? "trigger" : undefined, trigger?.name);
+        if (trigger) this.setHoveredTarget(reference ? "reference" : "trigger", trigger.name);
+        else {
+            const groundStatus = this.combatMode && !this.magicTargeting ? this.combatGroundHoverStatus(world) : undefined;
+            this.setHoveredTarget(groundStatus ? "ground" : undefined, groundStatus);
+        }
         this.changeCursor(trigger ? this.cursorForTrigger(trigger) : CursorType.NORMAL);
     };
 
@@ -216,7 +235,7 @@ export class MapRenderer {
     };
 
     private readonly handleKeyDown = (event: KeyboardEvent) => {
-        if (event.key !== "Alt") return;
+        if (this.paused || event.key !== "Alt") return;
         event.preventDefault();
         this.refreshInteractiveVisuals();
         this.flashInteractiveObjects = true;
@@ -242,6 +261,10 @@ export class MapRenderer {
         private readonly onHoverTarget?: (kind?: HoverTargetKind, name?: string) => void,
         private readonly getHeroAttackDistance?: () => number,
         private readonly onPersonPositionChange?: (technicalName: string, position: Readonly<WorldPosition>) => void,
+        onCombatMovementStep?: () => boolean,
+        getCombatVisualState?: (technicalName: string) => Readonly<{ relation: "friendly" | "neutral" | "hostile"; current: boolean; active: boolean }>,
+        private readonly getHeroCombatActionPoints?: () => number,
+        private readonly onHeroCombatActionComplete?: () => boolean,
     ) {
         this.canvas = canvas;
         this.ctx = canvas.getContext("2d");
@@ -249,6 +272,8 @@ export class MapRenderer {
         this.onSimulationStep = onSimulationStep;
         this.onPersonClick = onPersonClick;
         this.onPersonAttack = onPersonAttack;
+        this.onCombatMovementStep = onCombatMovementStep;
+        this.getCombatVisualState = getCombatVisualState;
         this.persons = this.createPersonRuntimes(levelData);
         this.player = this.createPlayerRuntime(levelData.player);
         this.worldGrid = new WorldGrid(levelData.lvlData.maskHDR);
@@ -332,7 +357,10 @@ export class MapRenderer {
             player: { ...this.player.position },
             persons: this.persons
                 .filter(({ person }) => !this.hiddenPersons.has(person.name))
-                .map(({ position }) => ({ ...position })),
+                .map(({ person, position }) => ({
+                    ...position,
+                    relation: this.getCombatVisualState?.(person.combatantId).relation ?? "friendly",
+                })),
             transitions: [...this.triggers.values()]
                 .filter((trigger) => trigger.active && trigger.transition)
                 .flatMap((trigger) => {
@@ -394,7 +422,7 @@ export class MapRenderer {
         const normalized = technicalName.toLowerCase();
         const runtime = normalized === "hero"
             ? this.player
-            : this.persons.find((candidate) => candidate.person.name.toLowerCase() === normalized);
+            : this.persons.find((candidate) => candidate.person.combatantId.toLowerCase() === normalized);
         if (!runtime) return;
         if (kind === "die") this.deadPersons.add(normalized);
         runtime.combatAnimation = { kind, startedAt: this.simulationTick * this.simulationStepMs };
@@ -402,6 +430,33 @@ export class MapRenderer {
         runtime.targetIndex = 0;
         runtime.moving = false;
         runtime.running = false;
+    }
+
+    public faceCombatant(technicalName: string, targetPosition: Readonly<WorldPosition>): void {
+        const normalized = technicalName.toLowerCase();
+        const runtime = normalized === "hero"
+            ? this.player
+            : this.persons.find((candidate) => candidate.person.combatantId.toLowerCase() === normalized);
+        if (!runtime) return;
+        runtime.direction = this.directionFromVector(targetPosition.x - runtime.position.x, targetPosition.y - runtime.position.y);
+    }
+    public setDialogueSpeaker(combatantId?: string): void {
+        this.dialogueSpeakerCombatantId = combatantId?.toLowerCase();
+        if (!this.dialogueSpeakerCombatantId) return;
+        const runtime = this.persons.find(
+            (candidate) => candidate.person.combatantId.toLowerCase() === this.dialogueSpeakerCombatantId,
+        );
+        if (runtime) runtime.moving = false;
+    }
+
+
+    public canCombatantSee(technicalName: string, targetPosition: Readonly<WorldPosition>): boolean {
+        const normalized = technicalName.toLowerCase();
+        const runtime = normalized === "hero"
+            ? this.player
+            : this.persons.find((candidate) => candidate.person.combatantId.toLowerCase() === normalized);
+        return runtime !== undefined
+            && this.worldGrid.hasLineOfSight(worldToCell(runtime.position), worldToCell(targetPosition));
     }
 
     public playMagicEffect(technicalName: string, targetName: string): void {
@@ -454,6 +509,18 @@ export class MapRenderer {
         if (!active && this.currentCursor === CursorType.CAST) this.changeCursor(this.combatMode ? CursorType.ATTACK : CursorType.NORMAL);
     }
 
+    public setPaused(paused: boolean): void {
+        if (this.paused === paused) return;
+        this.paused = paused;
+        this.flashInteractiveObjects = false;
+        this.setHoveredTarget();
+        this.changeCursor(CursorType.NORMAL);
+        if (!paused) {
+            this.lastFrameTime = performance.now();
+            this.simulationAccumulatorMs = 0;
+        }
+    }
+
     public getSimulationTick(): number {
         return this.simulationTick;
     }
@@ -472,6 +539,7 @@ export class MapRenderer {
     }
 
     public draw() {
+        if (this.paused) return;
         const ctx = this.ctx;
         if (!ctx) return;
 
@@ -525,8 +593,9 @@ export class MapRenderer {
     }
 
     private personWorldPosition(technicalName: string): Readonly<WorldPosition> | undefined {
-        if (technicalName === "hero") return this.player.position;
-        return this.persons.find((candidate) => candidate.person.name.toLowerCase() === technicalName)?.position;
+        const normalized = technicalName.toLowerCase();
+        if (normalized === "hero") return this.player.position;
+        return this.persons.find((candidate) => candidate.person.combatantId.toLowerCase() === normalized)?.position;
     }
 
 
@@ -552,7 +621,13 @@ export class MapRenderer {
             context.globalCompositeOperation = "destination-in";
             context.drawImage(trigger.image, 0, 0);
             context.restore();
-            this.drawPreparedHighlight(drawX, drawY, now, this.flashInteractiveObjects && !hovered);
+            this.drawPreparedHighlight(
+                drawX,
+                drawY,
+                now,
+                hovered || (this.flashInteractiveObjects && !hovered),
+                this.triggers.get(trigger.name)?.transition ? 1 : undefined,
+            );
         }
     }
 
@@ -715,38 +790,52 @@ export class MapRenderer {
         return blocked;
     }
 
-    private planRoute(runtime: PersonRuntime, destination: Readonly<WorldPosition>): boolean {
-        const path = this.worldGrid.findPath(worldToCell(runtime.position), worldToCell(destination), this.blockedCells(runtime));
+    private planRoute(runtime: PersonRuntime, destination: Readonly<WorldPosition>, exactGoal = false): boolean {
+        const path = this.worldGrid.findPath(worldToCell(runtime.position), worldToCell(destination), this.blockedCells(runtime), exactGoal);
+        if (path.length === 0) return false;
         runtime.route = path.slice(1).map(cellToWorld);
         runtime.targetIndex = 0;
         runtime.moving = runtime.route.length > 0;
-        return runtime.moving;
+        return true;
     }
 
-    private movePlayerTo(destination: Readonly<WorldPosition>, running: boolean): void {
-        this.planRoute(this.player, destination);
+    private movePlayerTo(destination: Readonly<WorldPosition>, running: boolean, exactGoal = true): boolean {
+        if (!this.planRoute(this.player, destination, exactGoal)) return false;
+        this.playerCombatChargedTargetIndex = -1;
         this.player.waitUntil = 0;
         this.player.running = (running || this.alwaysRun) && this.player.moving;
+        return true;
+    }
+
+    private movePlayerIntoTransition(trigger: TriggerRuntime, running: boolean): void {
+        this.pendingPersonInteraction = undefined;
+        const playerCell = worldToCell(this.player.position);
+        const cells = [...trigger.cells].sort((left, right) =>
+            Math.hypot(left.x - playerCell.x, left.y - playerCell.y)
+            - Math.hypot(right.x - playerCell.x, right.y - playerCell.y));
+        for (const cell of cells) {
+            if (this.movePlayerTo(cellToWorld(cell), running, true)) return;
+        }
     }
 
     private beginPersonInteraction(runtime: PersonRuntime, attack: boolean, running: boolean): void {
         this.pendingPersonInteraction = { kind: "person", runtime, attack };
         if (this.completePendingInteraction()) return;
-        this.movePlayerTo(runtime.position, running);
+        this.movePlayerTo(runtime.position, running, false);
         if (!this.player.moving) this.pendingPersonInteraction = undefined;
     }
 
     private beginDoorInteraction(door: DoorRuntime, running: boolean): void {
         this.pendingPersonInteraction = { kind: "door", door };
         if (this.completePendingInteraction()) return;
-        this.movePlayerTo(this.nearestInteractionPosition(door.activationCells.length > 0 ? door.activationCells : door.cells), running);
+        this.movePlayerTo(this.nearestInteractionPosition(door.activationCells.length > 0 ? door.activationCells : door.cells), running, false);
         if (!this.player.moving) this.pendingPersonInteraction = undefined;
     }
 
     private beginTriggerInteraction(trigger: TriggerRuntime, running: boolean): void {
         this.pendingPersonInteraction = { kind: "trigger", trigger };
         if (this.completePendingInteraction()) return;
-        this.movePlayerTo(this.nearestInteractionPosition(trigger.cells), running);
+        this.movePlayerTo(this.nearestInteractionPosition(trigger.cells), running, false);
         if (!this.player.moving) this.pendingPersonInteraction = undefined;
     }
 
@@ -787,6 +876,10 @@ export class MapRenderer {
         this.player.running = false;
         this.player.direction = this.directionFromVector(target.x - this.player.position.x, target.y - this.player.position.y);
         if (interaction.kind === "person") {
+            interaction.runtime.direction = this.directionFromVector(
+                this.player.position.x - interaction.runtime.position.x,
+                this.player.position.y - interaction.runtime.position.y,
+            );
             if (interaction.attack) this.onPersonAttack?.(interaction.runtime.person);
             else this.onPersonClick?.(interaction.runtime.person);
         } else if (interaction.kind === "door") {
@@ -795,6 +888,72 @@ export class MapRenderer {
             this.onTriggerClick?.(interaction.trigger.name);
         }
         return true;
+    }
+
+    public setCombatState(active: boolean, currentCombatant?: string): void {
+        const enteringCombat = active && !this.combatMode;
+        const previousCombatant = this.currentCombatant;
+        this.combatMode = active;
+        this.currentCombatant = currentCombatant;
+        this.aiTurn = active && currentCombatant !== undefined && currentCombatant !== "hero";
+        if (previousCombatant && previousCombatant !== currentCombatant && previousCombatant !== "hero") {
+            const previousRuntime = this.persons.find((candidate) => candidate.person.combatantId === previousCombatant);
+            if (previousRuntime?.route.length === 0) previousRuntime.moving = false;
+        }
+        if (enteringCombat) {
+            for (const runtime of this.persons) {
+                runtime.route = [];
+                runtime.targetIndex = 0;
+                runtime.moving = false;
+            }
+        }
+        if (this.aiTurn) {
+            this.player.route = [];
+            this.player.targetIndex = 0;
+            this.pendingPersonInteraction = undefined;
+            this.changeCursor(CursorType.NPC_TURN);
+        } else if (this.currentCursor === CursorType.NPC_TURN) {
+            this.changeCursor(CursorType.NORMAL);
+        }
+    }
+
+    public stepCombatant(technicalName: string, targetPosition: Readonly<WorldPosition>, away: boolean): WorldPosition | undefined {
+        const runtime = this.persons.find((candidate) => candidate.person.combatantId.toLowerCase() === technicalName.toLowerCase());
+        if (!runtime) return undefined;
+        const current = worldToCell(runtime.position);
+        const target = worldToCell(targetPosition);
+        const blocked = this.blockedCells(runtime);
+        let next: TilePosition | undefined;
+        if (away) {
+            const candidates: TilePosition[] = [];
+            for (let y = -1; y <= 1; y += 1) {
+                for (let x = -1; x <= 1; x += 1) {
+                    if (x !== 0 || y !== 0) candidates.push({ x: current.x + x, y: current.y + y });
+                }
+            }
+            next = candidates
+                .filter((candidate) => this.worldGrid.findPath(current, candidate, blocked).length === 2)
+                .sort((left, right) => originalCombatDistance(right, target) - originalCombatDistance(left, target))[0];
+        } else {
+            const routes: TilePosition[][] = [];
+            for (let y = -1; y <= 1; y += 1) {
+                for (let x = -1; x <= 1; x += 1) {
+                    if (x === 0 && y === 0) continue;
+                    const destination = { x: target.x + x, y: target.y + y };
+                    const route = this.worldGrid.findPath(current, destination, blocked);
+                    if (route.length > 1) routes.push(route);
+                }
+            }
+            routes.sort((left, right) => left.length - right.length);
+            next = routes[0]?.[1];
+        }
+        if (!next) return undefined;
+        const destination = cellToWorld(next);
+        runtime.route = [destination];
+        runtime.targetIndex = 0;
+        runtime.moving = true;
+        runtime.direction = this.directionFromVector(destination.x - runtime.position.x, destination.y - runtime.position.y);
+        return destination;
     }
 
     private updatePlayer(deltaSeconds: number) {
@@ -808,9 +967,20 @@ export class MapRenderer {
             return;
         }
 
+        if (this.combatMode && this.playerCombatChargedTargetIndex !== this.player.targetIndex) {
+            if (this.onCombatMovementStep && !this.onCombatMovementStep()) {
+                this.player.route = [];
+                this.player.targetIndex = 0;
+                this.player.running = false;
+                this.pendingPersonInteraction = undefined;
+                return;
+            }
+            this.playerCombatChargedTargetIndex = this.player.targetIndex;
+        }
         this.moveRuntimeTowards(this.player, target, (this.player.running ? this.runningSpeed : this.walkingSpeed) * deltaSeconds);
         if (Math.hypot(target.x - this.player.position.x, target.y - this.player.position.y) < 0.001) {
             this.player.targetIndex++;
+            if (this.combatMode && this.onHeroCombatActionComplete?.()) return;
             if (this.completePendingInteraction()) return;
             this.player.moving = this.player.targetIndex < this.player.route.length;
             if (!this.player.moving) {
@@ -822,12 +992,26 @@ export class MapRenderer {
 
     private updatePersons(now: number, deltaSeconds: number) {
         for (const runtime of this.persons) {
-            runtime.moving = false;
+            if (!this.combatMode || runtime.person.combatantId !== this.currentCombatant || runtime.route.length > 0) runtime.moving = false;
             if (this.hiddenPersons.has(runtime.person.name)) continue;
+            if (runtime.person.combatantId.toLowerCase() === this.dialogueSpeakerCombatantId) {
+                runtime.moving = false;
+                continue;
+            }
             if (this.pendingPersonInteraction?.kind === "person"
                 && !this.pendingPersonInteraction.attack
                 && this.pendingPersonInteraction.runtime === runtime) continue;
-            if (this.combatMode || runtime.combatAnimation) continue;
+            if (runtime.combatAnimation) continue;
+            if (this.combatMode) {
+                const combatTarget = runtime.route[runtime.targetIndex];
+                if (!combatTarget) continue;
+                this.moveRuntimeTowards(runtime, combatTarget, this.walkingSpeed * deltaSeconds);
+                if (Math.hypot(combatTarget.x - runtime.position.x, combatTarget.y - runtime.position.y) < 0.001) {
+                    runtime.route = [];
+                    runtime.targetIndex = 0;
+                }
+                continue;
+            }
             if (runtime.person.routeType === "STAY") continue;
             if (runtime.person.routeType === "STAY_ROTATE") {
                 if (now >= runtime.waitUntil) {
@@ -863,7 +1047,7 @@ export class MapRenderer {
             runtime.position.x = target.x;
             runtime.position.y = target.y;
             runtime.moving = true;
-            if (runtime !== this.player) this.onPersonPositionChange?.(runtime.person.name, runtime.position);
+            if (runtime !== this.player) this.onPersonPositionChange?.(runtime.person.combatantId, runtime.position);
             return;
         }
         const ratio = travel / distance;
@@ -871,7 +1055,7 @@ export class MapRenderer {
         runtime.position.y += dy * ratio;
         runtime.direction = this.directionFromVector(dx, dy);
         runtime.moving = true;
-        if (runtime !== this.player) this.onPersonPositionChange?.(runtime.person.name, runtime.position);
+        if (runtime !== this.player) this.onPersonPositionChange?.(runtime.person.combatantId, runtime.position);
     }
 
     private planNpcRoute(runtime: PersonRuntime, now: number): boolean {
@@ -890,7 +1074,7 @@ export class MapRenderer {
                 if (walkable) destination = cellToWorld(walkable);
             }
         }
-        if (!destination || !this.planRoute(runtime, destination)) {
+        if (!destination || !this.planRoute(runtime, destination) || !runtime.moving) {
             runtime.waitUntil = now + this.routeDelay(runtime);
             return false;
         }
@@ -1037,6 +1221,16 @@ export class MapRenderer {
         else this.onHoverTarget?.();
     }
 
+    private combatGroundHoverStatus(world: Readonly<WorldPosition>): string | undefined {
+        const remaining = this.getHeroCombatActionPoints?.();
+        if (remaining === undefined) return undefined;
+        const route = this.worldGrid.findPath(worldToCell(this.player.position), worldToCell(world), this.blockedCells(this.player), true);
+        if (route.length === 0) return undefined;
+        const required = route.length - 1;
+        if (required === 0) return undefined;
+        return required > remaining ? "unreachable" : String(required);
+    }
+
     private cursorForTrigger(trigger: TriggerRuntime): CursorType {
         switch (trigger.cursorName?.toUpperCase()) {
             case "CURSOR_TAKE": return CursorType.TAKE;
@@ -1052,6 +1246,11 @@ export class MapRenderer {
         if (cursor === this.currentCursor) return;
         this.currentCursor = cursor;
         this.onCursorChange?.(cursor);
+    }
+
+    private finishCombatAnimation(runtime: PersonRuntime): void {
+        runtime.combatAnimation = undefined;
+        if (runtime === this.player) this.onHeroCombatActionComplete?.();
     }
 
     private personRenderFrame(runtime: PersonRuntime, now: number): PersonRenderFrame {
@@ -1075,8 +1274,8 @@ export class MapRenderer {
                     frame = combat.kind === "die" && elapsed >= clip.metadata.duration
                         ? clip.metadata.frameCount - 1
                         : Math.min(clip.metadata.frameCount - 1, Math.floor(elapsed * clip.metadata.frameCount / Math.max(1, clip.metadata.duration)));
-                } else runtime.combatAnimation = undefined;
-            } else if (combat.kind !== "die") runtime.combatAnimation = undefined;
+                } else this.finishCombatAnimation(runtime);
+            } else if (combat.kind !== "die") this.finishCombatAnimation(runtime);
         }
 
         if (!metadata || !image || frame === undefined) {
@@ -1122,15 +1321,28 @@ export class MapRenderer {
         context.restore();
     }
 
-    private drawPersonHighlight(frame: PersonRenderFrame, drawX: number, drawY: number, now: number): void {
+    private drawPersonHighlight(runtime: PersonRuntime, frame: PersonRenderFrame, drawX: number, drawY: number): void {
+        const state = this.getCombatVisualState?.(runtime.person.combatantId);
         const context = this.highlightContext;
-        if (!context) return;
+        const target = this.ctx;
+        if (!state || !context || !target) return;
         if (this.highlightCanvas.width !== frame.width) this.highlightCanvas.width = frame.width;
         if (this.highlightCanvas.height !== frame.height) this.highlightCanvas.height = frame.height;
         context.clearRect(0, 0, frame.width, frame.height);
         this.drawPersonFrame(frame, context, 0, 0);
-        this.drawPreparedHighlight(drawX, drawY, now, false);
+        context.globalCompositeOperation = "source-in";
+        context.fillStyle = state.relation === "hostile" ? "#ff2418"
+            : state.relation === "friendly" ? "#42ff38" : "#ffe43b";
+        context.fillRect(0, 0, frame.width, frame.height);
+        context.globalCompositeOperation = "source-over";
+
+        target.save();
+        target.globalAlpha = 0.48;
+        target.globalCompositeOperation = "screen";
+        target.drawImage(this.highlightCanvas, drawX, drawY);
+        target.restore();
     }
+
 
     private drawPerson(runtime: PersonRuntime, now: number) {
         const ctx = this.ctx;
@@ -1144,7 +1356,7 @@ export class MapRenderer {
 
         this.drawPersonFrame(frame, ctx, drawX, drawY);
         if (runtime !== this.player && this.hoveredPerson === runtime) {
-            this.drawPersonHighlight(frame, drawX, drawY, now);
+            this.drawPersonHighlight(runtime, frame, drawX, drawY);
         }
         this.drawOccluders({
             x: frame.worldX,
@@ -1185,11 +1397,11 @@ export class MapRenderer {
         this.interactiveTriggerMasks = triggerMasks;
     }
 
-    private drawPreparedHighlight(drawX: number, drawY: number, now: number, steady: boolean): void {
+    private drawPreparedHighlight(drawX: number, drawY: number, now: number, steady: boolean, opacity?: number): void {
         const target = this.ctx;
         if (!target) return;
         target.save();
-        target.globalAlpha = steady ? 0.48 : 0.2 + (Math.sin(now / 120) + 1) * 0.2;
+        target.globalAlpha = opacity ?? (steady ? 0.48 : 0.2 + (Math.sin(now / 120) + 1) * 0.2);
         target.globalCompositeOperation = "screen";
         target.drawImage(this.highlightCanvas, drawX, drawY);
         target.restore();

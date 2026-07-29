@@ -1,0 +1,55 @@
+.block {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.controls {
+    z-index: 1;
+}
+
+.text {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    color: #211407;
+    font: 500 12px ZlatoPalatino, "Palatino Linotype", serif;
+    pointer-events: none;
+    text-shadow: 0 1px rgb(255 239 190 / 55%);
+    white-space: nowrap;
+}
+
+.label,
+.heading,
+.value,
+.fieldValue {
+    position: absolute;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.heading {
+    font: 600 14px ZlatoPalatino, "Palatino Linotype", serif;
+    text-align: center;
+}
+
+.value,
+.fieldValue {
+    display: grid;
+    place-items: center;
+    text-align: center;
+}
+
+.fieldValue {
+    text-overflow: ellipsis;
+}
+
+.roleState {
+    position: absolute;
+    z-index: 3;
+    width: 20px;
+    height: 20px;
+    pointer-events: none;
+}

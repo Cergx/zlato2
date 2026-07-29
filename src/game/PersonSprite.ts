@@ -1,5 +1,5 @@
 import { Paths } from "../constants/paths.ts";
-import { loadCSX } from "./Assets.ts";
+import { loadCSX, loadOptionalCSX } from "./Assets.ts";
 import { PADAnimation, PADParser } from "./parsers/PADParser.ts";
 import type { SEFPerson } from "./parsers/SEFParser.ts";
 import { loadCompositedHeroSprites } from "./HeroWear.ts";
@@ -32,6 +32,7 @@ export interface PersonSpriteSet {
 }
 
 export interface LevelPerson extends SEFPerson {
+    combatantId: string;
     worldPosition: WorldPosition;
     sprites: PersonSpriteSet;
 }
@@ -87,10 +88,7 @@ const loadOptionalAnimation = async (
     actions: readonly number[],
 ): Promise<{ readonly image: HTMLCanvasElement; readonly animation: PADAnimation } | undefined> => {
     for (const file of files) {
-        const url = Paths.PERSON_ANIMATION(resource, file);
-        const response = await fetch(url);
-        if (!response.ok) continue;
-        const image = await loadCSX(url);
+        const image = await loadOptionalCSX(Paths.PERSON_ANIMATION(resource, file));
         if (!image) continue;
         for (const action of actions) {
             if (!pad.hasAnimation(action)) continue;
@@ -154,8 +152,20 @@ export const loadHeroSprites = (equippedTechnicalNames: readonly string[] = []):
 
 export const loadLevelPerson = async (person: SEFPerson): Promise<LevelPerson> => ({
     ...person,
+    combatantId: person.name,
     worldPosition: cellToWorld(person.position),
     sprites: await loadPersonSprites(person.name),
 });
 
-export const loadLevelPersons = (persons: SEFPerson[]): Promise<LevelPerson[]> => Promise.all(persons.map(loadLevelPerson));
+export const loadLevelPersons = async (persons: SEFPerson[]): Promise<LevelPerson[]> => {
+    const occurrences = new Map<string, number>();
+    return Promise.all(persons.map(async (person) => {
+        const normalized = person.name.toLowerCase();
+        const occurrence = (occurrences.get(normalized) ?? 0) + 1;
+        occurrences.set(normalized, occurrence);
+        return {
+            ...await loadLevelPerson(person),
+            combatantId: occurrence === 1 ? person.name : `${person.name}#${occurrence}`,
+        };
+    }));
+};

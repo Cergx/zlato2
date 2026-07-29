@@ -8,7 +8,6 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
 dist-ssr
 *.local
 
@@ -22,11 +21,14 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-/public/assets/
-/public/Data/
-/info/
+
+# Local scratch artifacts
+.tmp-*.png
+/.tmp/
 /tmp-ghidra/
 /tmp-ghidra-client/
 
-# Local scratch artifacts
-/.tmp/
+/public/assets/
+/public/Data/
+/info/
+/dist/

@@ -63,7 +63,6 @@
     cursor: pointer;
 }
 
-.itemButton:hover,
 .itemButton:focus-visible {
     z-index: 5;
     border-color: rgb(227 190 92 / 90%);
@@ -72,6 +71,8 @@
 
 
 .authoredControls { z-index: 5; }
+
+.tradePanel [data-hero-stats-block] { z-index: 6; }
 
 /* Client.dll 0x1207133d selects shipped `main_interface` before drawing IDs 43..47. */
 .tradePanel :is(
@@ -86,6 +87,25 @@
     font-weight: 500;
     line-height: normal;
     text-shadow: none;
+}
+
+/* Client.dll 0x1207148e writes disabled COLORREF 0x00606060 before the caption draw. */
+.tradePanel :is(
+    [data-gui-id="43"],
+    [data-gui-id="45"],
+    [data-gui-id="46"],
+    [data-gui-id="47"]
+):disabled {
+    filter: none;
+}
+
+.tradePanel :is(
+    [data-gui-id="43"],
+    [data-gui-id="45"],
+    [data-gui-id="46"],
+    [data-gui-id="47"]
+):disabled > span {
+    color: #606060;
 }
 
 .lootPanel { z-index: 31; }

@@ -74,40 +74,6 @@
 }
 
 
-.inventory-progression-value {
-    position: absolute;
-    z-index: 4;
-    display: grid;
-    place-items: center;
-    color: #211407;
-    font: inherit;
-    text-shadow: 0 1px rgb(238 209 144 / 45%);
-    pointer-events: none;
-}
-
-.inventory-field-value {
-    position: absolute;
-    z-index: 4;
-    display: grid;
-    box-sizing: border-box;
-    place-items: center;
-    overflow: hidden;
-    color: #211407;
-    font: inherit;
-    text-align: center;
-    text-overflow: ellipsis;
-    text-shadow: 0 1px rgb(238 209 144 / 45%);
-    white-space: nowrap;
-    pointer-events: none;
-}
-
-.inventory-role-state {
-    position: absolute;
-    z-index: 4;
-    width: 20px;
-    height: 20px;
-    pointer-events: none;
-}
 
 .inventory-quick-access {
     z-index: 4;
@@ -130,31 +96,11 @@
 }
 
 
-.inventory-equipment-slot:hover,
 .inventory-equipment-slot:focus-visible,
-.inventory-item:hover,
 .inventory-item:focus-visible {
     z-index: 6;
 }
 
-.inventory-panel .inventory-selection {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    z-index: 2;
-    width: 108%;
-    height: 108%;
-    opacity: 0;
-    transform: translate(-50%, -50%);
-    pointer-events: none;
-}
-
-.inventory-equipment-slot:hover .inventory-selection,
-.inventory-equipment-slot:focus-visible .inventory-selection,
-.inventory-item:hover .inventory-selection,
-.inventory-item:focus-visible .inventory-selection {
-    opacity: 1;
-}
 
 
 .inventory-bag {

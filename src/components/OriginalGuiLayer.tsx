@@ -39,6 +39,7 @@ interface OriginalGuiLayerProps {
     readonly className?: string;
     readonly objectIds?: readonly number[];
     readonly inactiveObjectIds?: readonly number[];
+    readonly disabledObjectIds?: readonly number[];
     readonly enabledObjectIds?: readonly number[];
     readonly onDragOver?: GuiDragHandler;
     readonly onDrop?: GuiDragHandler;
@@ -85,6 +86,7 @@ export const OriginalGuiLayer = ({
     className,
     objectIds,
     inactiveObjectIds = [],
+    disabledObjectIds = [],
     enabledObjectIds = [],
     canvasWidth = 1024,
     canvasHeight = 768,
@@ -169,6 +171,7 @@ export const OriginalGuiLayer = ({
                 const configuredObject = {
                     ...object,
                     ...(enabledObjectIds.includes(object.id) ? { enabled: true } : {}),
+                    ...(disabledObjectIds.includes(object.id) ? { enabled: false } : {}),
                     ...(limits ? { sliderLowLimit: limits.minimum, sliderHighLimit: limits.maximum } : {}),
                 };
                 return <GuiObjectControl key={object.id}

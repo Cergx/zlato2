@@ -10,6 +10,7 @@ import {
 } from "./parsers/LVLParser.ts";
 import { Paths } from "../constants/paths.ts";
 import { SDBData, SDBParser } from "./parsers/SDBParser.ts";
+import { COMBAT_GROUND_STATUS_STRING_IDS } from "../constants/clientDll.ts";
 import { SEFData, SEFDoor, SEFParser, type TilePosition } from "./parsers/SEFParser.ts";
 import { MapRenderer } from "./MapRenderer.ts";
 import { LAOData, LAOParser } from "./parsers/LAOParser.ts";
@@ -28,6 +29,15 @@ const loadOptionalScript = async (path: string): Promise<string | undefined> => 
     const response = await fetch(path);
     if (!response.ok || response.headers.get("content-type")?.includes("text/html")) return undefined;
     return new TextDecoder("windows-1251").decode(await response.arrayBuffer());
+};
+
+let interfaceStringsPromise: Promise<SDBData> | undefined;
+const loadInterfaceStrings = (): Promise<SDBData> => {
+    interfaceStringsPromise ??= fetch(`${Paths.SDB}/user_interface.sdb`).then(async (response) => {
+        if (!response.ok) throw new Error(`Interface strings failed: HTTP ${response.status}`);
+        return new SDBParser(await response.arrayBuffer()).getData();
+    });
+    return interfaceStringsPromise;
 };
 
 const buildTriggerCells = (
@@ -60,6 +70,30 @@ const buildTriggerCells = (
         x: Math.min(Math.max(fallback.x, 0), maximumCellX),
         y: Math.min(Math.max(fallback.y, 0), maximumCellY),
     }];
+};
+const createTransitionOpacityMask = (source: HTMLCanvasElement): HTMLCanvasElement => {
+    const canvas = document.createElement("canvas");
+    canvas.width = source.width;
+    canvas.height = source.height;
+    const sourceContext = source.getContext("2d", { willReadFrequently: true });
+    const targetContext = canvas.getContext("2d");
+    if (!sourceContext || !targetContext) throw new Error("Не удалось преобразовать маску перехода");
+    const imageData = sourceContext.getImageData(0, 0, source.width, source.height);
+    let maximumOpacity = 0;
+    for (let offset = 0; offset < imageData.data.length; offset += 4) {
+        if (imageData.data[offset + 3] === 0) continue;
+        maximumOpacity = Math.max(maximumOpacity, imageData.data[offset], imageData.data[offset + 1], imageData.data[offset + 2]);
+    }
+    const opacityScale = maximumOpacity > 0 ? 255 / maximumOpacity : 0;
+    for (let offset = 0; offset < imageData.data.length; offset += 4) {
+        const opacity = Math.max(imageData.data[offset], imageData.data[offset + 1], imageData.data[offset + 2]);
+        imageData.data[offset] = 255;
+        imageData.data[offset + 1] = 255;
+        imageData.data[offset + 2] = 255;
+        imageData.data[offset + 3] = Math.round(imageData.data[offset + 3] * opacity * opacityScale / 255);
+    }
+    targetContext.putImageData(imageData, 0, 0);
+    return canvas;
 };
 
 const extractMaskForeground = (
@@ -146,9 +180,11 @@ export interface LevelOptions {
     onStatusText?: (text?: string) => void;
     onMessage?: GameStateRuntimeOptions["onMessage"];
     resolveItemLiteraryName?: GameStateRuntimeOptions["resolveItemLiteraryName"];
+    resolveHeroName?: GameStateRuntimeOptions["resolveHeroName"];
     onReferenceHint?: (hint?: MapReferenceHint) => void;
     onClockChange?: (elapsedMinutes: number) => void;
     onRestChange?: GameStateRuntimeOptions["onRestChange"];
+    onCombatModeChange?: (active: boolean) => void;
     onLoadingProgress?: (progress: number) => void;
     strictScriptAbi?: boolean;
 }
@@ -162,16 +198,24 @@ export class Level {
     private canvas: HTMLCanvasElement;
     private mapRenderer: MapRenderer | null = null;
     private destroyed = false;
+    private paused = false;
     private levelData: LevelData | null = null;
     private readonly oneShotAudio = new Set<HTMLAudioElement>();
+    private interfaceStrings: SDBData = {};
 
     constructor(canvas: HTMLCanvasElement, private readonly options: LevelOptions) {
         this.canvas = canvas;
         this.runtime = new GameStateRuntime({
             ...options,
+            resolveInterfaceString: (id) => this.interfaceStrings[id],
             onPersonPresence: (technicalName, present) => this.mapRenderer?.setPersonPresent(technicalName, present),
             onDynamicPerson: (person) => void this.addDynamicPerson(person).catch((error) => console.error(`Не удалось добавить персонажа ${person.name}`, error)),
             onDoorChange: ({ door }) => this.mapRenderer?.setDoorState(door.name, door.opened, door.cells, door.activationCells),
+            onCombatModeChange: (active) => {
+                this.audioWeather.setCombatMode(active);
+                this.mapRenderer?.setCombatState(active, this.runtime.snapshot().combat.currentCombatant);
+                this.options.onCombatModeChange?.(active);
+            },
             onTriggerChange: (trigger) => this.mapRenderer?.setTriggerState(trigger),
             onContainerOpen: (owner, targetName) => {
                 const trigger = this.levelData?.sefData.triggers.find((candidate) => candidate.name === targetName);
@@ -184,6 +228,10 @@ export class Level {
             },
             onPersonSound: (shader) => this.playPersonSound(shader),
             onCombatAnimation: (technicalName, kind) => this.mapRenderer?.playPersonCombatAnimation(technicalName, kind),
+            onCombatantMoveRequest: (technicalName, targetPosition, away) =>
+                this.mapRenderer?.stepCombatant(technicalName, targetPosition, away),
+            onCombatantFace: (technicalName, targetPosition) => this.mapRenderer?.faceCombatant(technicalName, targetPosition),
+            onCombatantCanSee: (technicalName, targetPosition) => this.mapRenderer?.canCombatantSee(technicalName, targetPosition) ?? false,
             onMagicEffect: (technicalName, targetName) => this.mapRenderer?.playMagicEffect(technicalName, targetName),
             onWorldMagicEffect: (technicalName, position) => this.mapRenderer?.playMagicEffectAt(technicalName, position),
             onWeather: (type) => this.audioWeather.setWeather(type),
@@ -198,8 +246,12 @@ export class Level {
         console.log(`Загрузка уровня ${level} в режиме ${gameMode}`);
         this.options.onLoadingProgress?.(0);
 
-        const sdbBinaryData = await fetch(Paths.LEVEL_SDB(level, gameMode)).then(res => res.arrayBuffer());
+        const [sdbBinaryData, interfaceStrings] = await Promise.all([
+            fetch(Paths.LEVEL_SDB(level, gameMode)).then(res => res.arrayBuffer()),
+            loadInterfaceStrings(),
+        ]);
         const sdbData = new SDBParser(sdbBinaryData).getData();
+        this.interfaceStrings = interfaceStrings;
 
         const sefText = await fetch(Paths.LEVEL_SEF(level, gameMode)).then(res => res.text());
         const sefData = new SEFParser(sefText).getData();
@@ -241,9 +293,15 @@ export class Level {
             [...new Set(lvlData.triggerDescription.map((description) => description.number))]
                 .map(async (number) => [number, await loadCSX(Paths.LEVEL_TRIGGER(sefData.pack, number))] as const),
         ));
+        const transitionNames = new Set(sefData.triggers
+            .filter((trigger) => trigger.isTransition)
+            .map((trigger) => trigger.name.toLowerCase()));
         const triggerMasks: LevelTriggerMask[] = lvlData.triggerDescription.map((description) => {
-            const image = triggerImages.get(description.number);
-            if (!image) throw new Error(`Не найдена маска триггера ${description.name}`);
+            const sourceImage = triggerImages.get(description.number);
+            if (!sourceImage) throw new Error(`Не найдена маска триггера ${description.name}`);
+            const image = transitionNames.has(description.name.toLowerCase())
+                ? createTransitionOpacityMask(sourceImage)
+                : sourceImage;
             return { ...description, image };
         });
         const triggerCells = Object.fromEntries(triggerMasks.map((trigger) => [
@@ -333,6 +391,7 @@ export class Level {
         const playerPosition = playerEntrance?.position ?? { x: 0, y: 0 };
         const player: LevelPerson = {
             name: "hero",
+            combatantId: "hero",
             position: playerPosition,
             worldPosition: cellToWorld(playerPosition),
             direction: playerEntrance?.direction ?? "DOWN",
@@ -352,19 +411,23 @@ export class Level {
         this.mapRenderer = new MapRenderer(
             this.canvas,
             this.levelData,
-            (tick, simulationTimeMs, playerPosition, clockTimeMs) => this.runtime.update(tick, simulationTimeMs, playerPosition, clockTimeMs),
+            (tick, simulationTimeMs, playerPosition, clockTimeMs) => {
+                this.runtime.update(tick, simulationTimeMs, playerPosition, clockTimeMs);
+                const combat = this.runtime.snapshot().combat;
+                this.mapRenderer?.setCombatState(combat.active, combat.currentCombatant);
+            },
             (person) => {
-                void this.runtime.interactDeadPerson(person.name).then((opened) => {
+                void this.runtime.interactDeadPerson(person.combatantId).then((opened) => {
                     if (opened || !person.scriptDialog) return;
                     const literaryName = person.literaryName === undefined ? undefined : this.levelData?.sdbData[person.literaryName];
-                    this.options.onDialog?.([person.name, person.scriptDialog, literaryName ?? person.literaryLabel ?? person.name]);
+                    this.options.onDialog?.([person.name, person.scriptDialog, literaryName ?? person.literaryLabel ?? person.name, person.combatantId]);
                 }).catch((error) => console.error(`Не удалось открыть инвентарь ${person.name}`, error));
             },
 
             (person) => {
                 const playerPosition = this.mapRenderer?.getPlayerWorldPosition();
                 if (playerPosition) this.runtime.setCombatantPosition("hero", playerPosition);
-                this.runtime.attackPerson(person.name);
+                this.runtime.attackPerson(person.combatantId);
                 this.mapRenderer?.setMagicTargeting(this.runtime.isHeroMagicTargeting());
             },
             (name) => this.runtime.toggleDoor(name),
@@ -376,6 +439,15 @@ export class Level {
                     this.options.onReferenceHint?.();
                     return;
                 }
+                if (kind === "ground") {
+                    const stringId = name === "unreachable"
+                        ? COMBAT_GROUND_STATUS_STRING_IDS.unreachableThisTurn
+                        : COMBAT_GROUND_STATUS_STRING_IDS.requiredActionPoints;
+                    const template = this.interfaceStrings[stringId];
+                    this.options.onReferenceHint?.();
+                    this.options.onStatusText?.(template?.replace("%d", name));
+                    return;
+                }
                 if (kind === "reference") {
                     const trigger = this.levelData?.sefData.triggers.find((candidate) => candidate.name === name);
                     const text = trigger?.literaryName === undefined ? undefined : this.levelData?.sdbData[trigger.literaryName];
@@ -385,9 +457,11 @@ export class Level {
                 }
                 this.options.onReferenceHint?.();
                 if (kind === "person") {
-                    const person = this.levelData?.levelPersons.find((candidate) => candidate.name === name);
-                    const text = person?.literaryName === undefined ? person?.literaryLabel : this.levelData?.sdbData[person.literaryName];
-                    this.options.onStatusText?.(text ?? name);
+                    const person = this.levelData?.levelPersons.find((candidate) => candidate.combatantId === name);
+                    const authoredName = person?.literaryName === undefined
+                        ? person?.literaryLabel
+                        : this.levelData?.sdbData[person.literaryName] ?? person.literaryLabel;
+                    this.options.onStatusText?.(authoredName ?? this.runtime.getCombatantLiteraryName(name));
                     return;
                 }
                 if (kind === "door") {
@@ -401,7 +475,12 @@ export class Level {
             },
             () => this.runtime.getHeroAttackDistance(),
             (technicalName, position) => this.runtime.setCombatantPosition(technicalName, position),
+            () => this.runtime.consumeCombatMovementActionPoint("hero"),
+            (technicalName) => this.runtime.getCombatVisualState(technicalName),
+            () => this.runtime.getHeroCombatActionPoints(),
+            () => this.runtime.completeHeroCombatAction(),
         );
+        this.mapRenderer.setPaused(this.paused);
         for (const [technicalName, present] of Object.entries(this.runtime.snapshot().persons)) {
             this.mapRenderer.setPersonPresent(technicalName, present);
         }
@@ -444,13 +523,30 @@ export class Level {
         audio.addEventListener("ended", cleanup, { once: true });
         audio.addEventListener("error", cleanup, { once: true });
         this.oneShotAudio.add(audio);
-        void audio.play().catch(cleanup);
+        if (!this.paused) void audio.play().catch(cleanup);
     }
 
     public draw() {
+        if (this.paused) return;
         this.mapRenderer?.draw();
         this.audioWeather.update(this.mapRenderer?.getCameraCenterWorldPosition());
     }
+
+    public setPaused(paused: boolean): void {
+        if (this.paused === paused) return;
+        this.paused = paused;
+        if (!paused) this.runtime.resetClockTimeBaseline();
+        this.mapRenderer?.setPaused(paused);
+        this.audioWeather.setPaused(paused);
+        for (const audio of this.oneShotAudio) {
+            if (paused) audio.pause();
+            else void audio.play().catch(() => this.oneShotAudio.delete(audio));
+        }
+    }
+    public setDialogueSpeaker(combatantId?: string): void {
+        this.mapRenderer?.setDialogueSpeaker(combatantId);
+    }
+
 
     public getRuntimeSnapshot(): GameRuntimeSnapshot {
         return this.runtime.snapshot();
@@ -503,6 +599,8 @@ export class Level {
 
     public setCombatMode(active: boolean): void {
         this.runtime.setCombatMode(active);
+        this.audioWeather.setCombatMode(active);
+        this.mapRenderer?.setCombatState(active, active ? "hero" : undefined);
         this.mapRenderer?.setCombatMode(active);
         this.mapRenderer?.setMagicTargeting(false);
     }

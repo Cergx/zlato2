@@ -84,6 +84,8 @@ export interface PersonCombatTemplate {
     readonly resourceId?: string;
     readonly level: number;
     readonly attributes: CharacterAttributes;
+    readonly radiusSee: number;
+    readonly radiusHear: number;
     readonly skills: Readonly<Record<string, number>>;
     readonly weaponLevelOffset: number;
     readonly weapons: readonly PersonWeaponReference[];
@@ -542,6 +544,8 @@ export function parsePersonCombatScript(scriptId: string, source: string): Perso
         level,
         attributes,
         skills,
+        radiusSee: readNonNegativeNumber(raw, "radius_see", scriptId),
+        radiusHear: readNonNegativeNumber(raw, "radius_hear", scriptId),
         weaponLevelOffset: weaponBlock.levelOffset,
         weapons: weaponBlock.references,
         spells,

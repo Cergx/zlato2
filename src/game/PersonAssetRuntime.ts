@@ -102,8 +102,11 @@ export const loadPersonCombatAssets = (technicalName: string): Promise<PersonCom
             const sounds = Object.keys(shaders).length > 0
                 ? { shaders, stepFrames: bundledSounds?.stepFrames ?? [] }
                 : undefined;
-            const weapons = template?.weapons.length
-                ? await Promise.all(template.weapons.map(async ({ itemId }) => (await loadShippedItemCatalog()).get(itemId)))
+            const catalog = template?.weapons.length ? await loadShippedItemCatalog() : undefined;
+            const weapons = catalog
+                ? await Promise.all(template!.weapons
+                    .filter(({ itemId }) => catalog.has(itemId))
+                    .map(({ itemId }) => catalog.get(itemId)))
                 : [];
             return {
                 template,

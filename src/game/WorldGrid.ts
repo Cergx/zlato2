@@ -58,6 +58,33 @@ export class WorldGrid {
         return (this.terrainType(position) & NO_WAY_BIT) === 0;
     }
 
+    public blocksSight(position: TilePosition): boolean {
+        return !this.contains(position) || (this.terrainType(position) & NO_WAY_BIT) !== 0;
+    }
+
+    public hasLineOfSight(start: TilePosition, target: TilePosition): boolean {
+        let x = start.x;
+        let y = start.y;
+        const dx = Math.abs(target.x - start.x);
+        const dy = Math.abs(target.y - start.y);
+        const stepX = start.x < target.x ? 1 : -1;
+        const stepY = start.y < target.y ? 1 : -1;
+        let error = dx - dy;
+        while (x !== target.x || y !== target.y) {
+            const doubled = error * 2;
+            if (doubled > -dy) {
+                error -= dy;
+                x += stepX;
+            }
+            if (doubled < dx) {
+                error += dx;
+                y += stepY;
+            }
+            if ((x !== target.x || y !== target.y) && this.blocksSight({ x, y })) return false;
+        }
+        return true;
+    }
+
     public nearestWalkable(position: TilePosition, blocked?: ReadonlySet<number>, maxRadius = 12): TilePosition | undefined {
         const clamped = {
             x: Math.max(0, Math.min(this.width - 1, position.x)),
@@ -86,10 +113,17 @@ export class WorldGrid {
         return undefined;
     }
 
-    public findPath(start: TilePosition, requestedGoal: TilePosition, blocked?: ReadonlySet<number>): TilePosition[] {
+    public findPath(
+        start: TilePosition,
+        requestedGoal: TilePosition,
+        blocked?: ReadonlySet<number>,
+        exactGoal = false,
+    ): TilePosition[] {
         if (!this.contains(start)) return [];
         const startIndex = this.index(start);
-        const goal = this.nearestWalkable(requestedGoal, blocked);
+        const goal = exactGoal
+            ? this.isWalkable(requestedGoal, blocked) ? requestedGoal : undefined
+            : this.nearestWalkable(requestedGoal, blocked);
         if (!goal) return [];
         const goalIndex = this.index(goal);
         if (startIndex === goalIndex) return [{ ...goal }];

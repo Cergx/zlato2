@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { GameStateRuntime } from "../src/game/GameStateRuntime.ts";
+import { createServer } from "vite";
 import { materializeInventory, parseInventoryScript } from "../src/game/parsers/INVParser.ts";
 import { parsePersonResourceDefinition } from "../src/game/parsers/PRSParser.ts";
 import { parsePersonCombatScript } from "../src/game/systems/Combat.ts";
+
+const vite = await createServer({ server: { middlewareMode: true, hmr: { port: 24679 } }, appType: "custom" });
+const { GameStateRuntime } = await vite.ssrLoadModule("/src/game/GameStateRuntime.ts");
 
 const [minerSource, malformedSource, personBytes, resourceSource, heroSource] = await Promise.all([
     readFile("public/assets/scripts/inventory/pgmur_miner.inv", "utf8"),
@@ -59,4 +62,5 @@ assert.deepEqual(statusMessages, [], "Loot transfers must not create status-hist
 runtime.invokeHost("RS_PersonAddItem", ["Hero", "FOD_1_1_1", 1]);
 assert.deepEqual(statusMessages, ["Получен предмет: Проверочный предмет"], "Scripted item grants must create a status-history message");
 
+await vite.close();
 console.log("Verified native INV parsing, RNG short-circuits, second pass, corpse resource binding, silent looting, scripted grant messages, atomic take-all, and retained empty person inventories");

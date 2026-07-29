@@ -49,6 +49,7 @@ export interface BrowserAudio {
     volume: number;
     muted: boolean;
     currentTime: number;
+    readonly paused?: boolean;
     preload?: string;
     play(): Promise<void> | void;
     pause(): void;
@@ -119,6 +120,14 @@ const DEFAULT_VOLUMES: AudioVolumeSettings = {
     music: 0.35,
     ambient: 1,
 };
+
+// Client.dll 0x120C1E98..0x120C1ED8 initializes the three native battle tracks;
+// 0x120C14F0..0x120C152D selects one with a uniform random index in [0, 2].
+const COMBAT_MUSIC_URLS = [
+    `${Paths.MUSIC}/gl04.ogg`,
+    `${Paths.MUSIC}/gl02.ogg`,
+    `${Paths.MUSIC}/gl05.ogg`,
+] as const;
 
 const WEATHER_KINDS: Readonly<Record<number, WeatherKind>> = {
     0: "clear",
@@ -204,6 +213,7 @@ class GaplessBrowserAudio implements BrowserAudio {
         this.trackMuted = value;
         this.updateGain();
     }
+    public get paused(): boolean { return !this.playing; }
     public get currentTime(): number {
         if (!this.playing || !this.buffer) return this.offset;
         const elapsed = GaplessBrowserAudio.getContext().currentTime - this.startedAt + this.offset;
@@ -412,16 +422,20 @@ export class AudioWeatherRuntime {
     private readonly onPlaybackError?: (error: unknown, source: string) => void;
     private readonly tracks = new Set<AudioTrack>();
     private readonly fades = new Map<AudioTrack, Fade>();
+    private readonly pausedTracks = new Set<AudioTrack>();
     private readonly emitters: PlannedEmitter[] = [];
     private volumes: AudioVolumeSettings;
     private muted: boolean;
     private destroyed = false;
+    private paused = false;
     private frameHandle: number | undefined;
     private music: AudioTrack | undefined;
     private ambience: AudioTrack | undefined;
     private weatherAudio: AudioTrack | undefined;
     private dayAmbienceUrl: string | undefined;
     private nightAmbienceUrl: string | undefined;
+    private levelMusicUrl: string | undefined;
+    private combatActive = false;
     private phase: DayPhase = "day";
     private listenerWorldPosition: WorldPosition | undefined;
     private weatherSnapshot: WeatherSnapshot;
@@ -496,6 +510,8 @@ export class AudioWeatherRuntime {
             this.weatherAudio = weatherAudio;
             this.dayAmbienceUrl = plan.dayAmbienceUrl;
             this.nightAmbienceUrl = plan.nightAmbienceUrl;
+            this.levelMusicUrl = plan.musicUrl;
+            this.combatActive = false;
             this.phase = phase;
             this.emitters.splice(0, this.emitters.length, ...plan.emitters);
 
@@ -512,6 +528,42 @@ export class AudioWeatherRuntime {
             throw error;
         }
     }
+    public setCombatMode(active: boolean): void {
+        this.assertAlive();
+        if (this.combatActive === active) return;
+        this.combatActive = active;
+        let source = this.levelMusicUrl;
+        if (active) {
+            const random = this.random();
+            if (!isFiniteNumber(random) || random < 0 || random >= 1) {
+                throw new Error("The audio weather random source must return a number in [0, 1).");
+            }
+            source = COMBAT_MUSIC_URLS[Math.floor(random * COMBAT_MUSIC_URLS.length)];
+        }
+        if (this.music?.source === source) return;
+        const next = source ? this.createTrack(source, "music", 1) : undefined;
+        if (next) this.startTrack(next);
+        this.transitionTrack(this.music, next);
+        this.music = next;
+    }
+    public setPaused(paused: boolean): void {
+        this.assertAlive();
+        if (this.paused === paused) return;
+        this.paused = paused;
+        if (paused) {
+            this.pausedTracks.clear();
+            for (const track of this.tracks) {
+                if (track.audio.paused !== true) this.pausedTracks.add(track);
+                track.audio.pause();
+            }
+            return;
+        }
+        for (const track of this.pausedTracks) {
+            if (this.tracks.has(track)) this.startTrack(track);
+        }
+        this.pausedTracks.clear();
+    }
+
 
     /** Updates day/night ambience and positional volume from the camera-centred listener. */
     public update(listenerWorldPosition?: Readonly<WorldPosition>): WeatherSnapshot {
@@ -707,6 +759,10 @@ export class AudioWeatherRuntime {
     }
 
     private startTrack(track: AudioTrack): void {
+        if (this.paused) {
+            this.pausedTracks.add(track);
+            return;
+        }
         try {
             const playback = track.audio.play();
             if (playback && typeof playback.catch === "function") {
@@ -817,6 +873,7 @@ export class AudioWeatherRuntime {
 
     private disposeTrack(track: AudioTrack): void {
         this.fades.delete(track);
+        this.pausedTracks.delete(track);
         this.tracks.delete(track);
         track.audio.pause();
         try {

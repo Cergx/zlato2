@@ -27,17 +27,31 @@ const tooltipText = (item: ShippedItem, quantity?: number): string => [
     ...item.specialEffects.map((effect) => `Эффект ${effect.specialId}: ${effect.amount}`),
 ].filter((line): line is string => Boolean(line)).join("\n");
 
-export const drawChromaKeyImage = (canvas: HTMLCanvasElement, image: HTMLImageElement): void => {
+const drawItemImage = (
+    canvas: HTMLCanvasElement,
+    image: HTMLImageElement,
+    alphaMask?: HTMLImageElement,
+): void => {
     const context = canvas.getContext("2d", { willReadFrequently: true });
     if (!context) return;
     canvas.width = image.naturalWidth;
     canvas.height = image.naturalHeight;
     context.drawImage(image, 0, 0);
     const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-    for (let index = 0; index < pixels.data.length; index += 4) {
-        if (pixels.data[index] >= 250 && pixels.data[index + 1] <= 5 && pixels.data[index + 2] >= 250) {
-            pixels.data[index + 3] = 0;
+    let maskPixels: Uint8ClampedArray | undefined;
+    if (alphaMask) {
+        const maskCanvas = document.createElement("canvas");
+        maskCanvas.width = canvas.width;
+        maskCanvas.height = canvas.height;
+        const maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
+        if (maskContext) {
+            maskContext.drawImage(alphaMask, 0, 0);
+            maskPixels = maskContext.getImageData(0, 0, canvas.width, canvas.height).data;
         }
+    }
+    for (let index = 0; index < pixels.data.length; index += 4) {
+        const colorKeyed = pixels.data[index] >= 250 && pixels.data[index + 1] <= 5 && pixels.data[index + 2] >= 250;
+        pixels.data[index + 3] = colorKeyed ? 0 : (maskPixels?.[index] ?? pixels.data[index + 3]);
     }
     context.putImageData(pixels, 0, 0);
 };
@@ -58,11 +72,14 @@ export const ItemIcon = ({
         let cancelled = false;
         const canvas = canvasRef.current;
         if (!item.iconUrl || !canvas) return;
-        void loadImage(item.iconUrl).then((image) => {
-            if (!cancelled && canvasRef.current) drawChromaKeyImage(canvasRef.current, image);
+        const mask = item.iconMaskUrl
+            ? loadImage(item.iconMaskUrl)
+            : Promise.resolve<HTMLImageElement | undefined>(undefined);
+        void Promise.all([loadImage(item.iconUrl), mask]).then(([image, alphaMask]) => {
+            if (!cancelled && canvasRef.current) drawItemImage(canvasRef.current, image, alphaMask);
         });
         return () => { cancelled = true; };
-    }, [item.iconUrl]);
+    }, [item.iconMaskUrl, item.iconUrl]);
 
     const clearTooltip = (): void => {
         if (tooltipTimer.current !== null) window.clearTimeout(tooltipTimer.current);

@@ -47,10 +47,11 @@ const MapReferenceTooltip = ({ hint }: { readonly hint: MapReferenceHint | null 
         fixedWidth={MAP_REFERENCE_TOOLTIP_ANCHOR.width} canvasWidth={1024} canvasHeight={768} /> : null;
 };
 
-const WeatherOverlay = ({ getGame }: { getGame: () => Game | null }) => {
+const WeatherOverlay = ({ getGame, paused }: { getGame: () => Game | null; paused: boolean }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
     useEffect(() => {
+        if (paused) return;
         const canvas = canvasRef.current;
         const context = canvas?.getContext("2d");
         if (!canvas || !context) return;
@@ -99,7 +100,7 @@ const WeatherOverlay = ({ getGame }: { getGame: () => Game | null }) => {
         draw(performance.now());
         const interval = window.setInterval(() => draw(performance.now()), 33);
         return () => window.clearInterval(interval);
-    }, [getGame]);
+    }, [getGame, paused]);
 
     return <canvas className={styles.weather} width={1024} height={768} ref={canvasRef} aria-hidden="true" />;
 };
@@ -144,6 +145,13 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
     }, []);
     const closePanel = useCallback(() => setActivePanel(null), []);
     const getGame = useCallback(() => gameRef.current, []);
+    const paused = worldMapLocations !== null
+        || activePanel !== null
+            && activePanel !== "skills"
+            && activePanel !== "relax"
+            && activePanel !== "profession";
+
+    useEffect(() => gameRef.current?.setPaused(paused), [paused]);
 
     useEffect(() => gameRef.current?.applySettings(settings), [settings]);
 
@@ -238,7 +246,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
     return (
         <div className={`${styles.gameWindow} ${cursorClassName}`} style={{ filter: `brightness(${Number(settings[2]) || 100}%)` }}>
             <canvas width={1024} height={768} ref={canvasRef} />
-            <WeatherOverlay getGame={getGame} />
+            <WeatherOverlay getGame={getGame} paused={paused} />
             <MapReferenceTooltip hint={!activePanel && dialogueState?.status !== "active" && !worldMapLocations && !loading ? referenceHint : null} />
 
             <GameHud

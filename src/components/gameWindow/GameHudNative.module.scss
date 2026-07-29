@@ -15,7 +15,8 @@
 .hud[data-hidden="true"] .interfaceIcon,
 .hud[data-hidden="true"] .skillPanel,
 .hud[data-hidden="true"] .status,
-.hud[data-hidden="true"] .statusHistory {
+.hud[data-hidden="true"] .statusHistory,
+.hud[data-hidden="true"] .companions {
     display: none;
 }
 
@@ -75,6 +76,65 @@
 
 .skillEntry:hover {
     color: #0000c0;
+}
+
+.companions {
+    position: absolute;
+    top: 164px;
+    left: 8px;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    pointer-events: none;
+}
+
+.companion {
+    position: relative;
+    width: 48px;
+    height: 54px;
+}
+
+.companionPortrait {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    width: 40px;
+    height: 46px;
+    image-rendering: pixelated;
+}
+
+.companionFrame {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    width: 48px;
+    height: 54px;
+    image-rendering: pixelated;
+}
+
+.companionMeter {
+    position: absolute;
+    bottom: 0;
+    z-index: 2;
+    width: 4px;
+    overflow: hidden;
+}
+
+.companionMeter > img {
+    position: absolute;
+    bottom: 0;
+    width: 4px;
+    height: 54px;
+    image-rendering: pixelated;
+}
+
+.companionLife {
+    left: 0;
+}
+
+.companionMana {
+    right: 0;
 }
 
 .panel {

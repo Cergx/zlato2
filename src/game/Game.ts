@@ -43,6 +43,16 @@ import type { CursorType } from "../enums/CursorTypes.ts";
 import { readGameSettings, type GameSettings } from "./GameSettingsRuntime.ts";
 import { createBrowserAudio, resolveLevelAudioUrl, type BrowserAudio } from "./AudioWeatherRuntime.ts";
 import { DEFAULT_HERO_NAME, parseHeroProfiles, selectHeroProfile, type HeroProfile } from "./HeroProfileRuntime.ts";
+import { loadPersonCombatAssets } from "./PersonAssetRuntime.ts";
+import type { PersonTradeCapabilities } from "./systems/Combat.ts";
+
+const NO_PERSON_TRADE_CAPABILITIES = Object.freeze({
+    change: 0,
+    repair: 0,
+    charging: 0,
+    identification: 0,
+    takeOffCurse: 0,
+}) satisfies PersonTradeCapabilities;
 
 const HERO_CHARACTERISTICS = new Set([
     "strength", "constitution", "dexterity", "perception", "intelligence", "wisdom", "luck",
@@ -116,6 +126,7 @@ export class Game {
     private worldMap: WorldMapRuntime | null = null;
     private gameLoopActive = false;
     private stopped = false;
+    private paused = false;
     private levelChangeGeneration = 0;
     private dialoguePhrasesPromise: Promise<SDBData> | null = null;
     private dialoguePhrases: SDBData | null = null;
@@ -170,11 +181,16 @@ export class Game {
             onFinished: (ending) => this.events.onGameFinished?.(ending),
             onHeroDeath: () => this.events.onHeroDeath?.(),
             onCursorChange: (cursor) => this.events.onCursorChange?.(cursor),
+            onCombatModeChange: (active) => {
+                this.combatMode = active;
+                this.events.onCombatModeChange?.(active);
+            },
             onContainerOpen: (owner, triggerName) => this.events.onContainerOpen?.(owner, triggerName),
             onTrade: () => void this.openCurrentTrade().catch((error) => this.reportError(error)),
             onStatusText: (text) => this.events.onStatusTextChange?.(text),
             onMessage: (message) => this.events.onStatusMessage?.(String(message)),
             resolveItemLiteraryName: (technicalName) => itemCatalog.getLiteraryName(technicalName),
+            resolveHeroName: () => this.options.heroProfile?.name ?? DEFAULT_HERO_NAME,
             onReferenceHint: (hint) => this.events.onReferenceHintChange?.(hint),
             onLoadingProgress: (progress) => this.events.onLoadingStateChange?.(
                 true,
@@ -199,6 +215,7 @@ export class Game {
         await this.level.loadLevel(gameMode, levelName, entranceName);
 
         this.level.setCombatMode(this.combatMode);
+        this.level.setPaused(this.paused);
         await this.initializeHeroInventory();
         if (this.stopped) return;
         this.events.onLevelChanged?.(gameMode, levelName);
@@ -240,6 +257,7 @@ export class Game {
         await this.level.changeLevel(gameMode, levelName, entranceName);
         if (generation !== this.levelChangeGeneration) return;
         this.level.setCombatMode(this.combatMode);
+        this.level.setPaused(this.paused);
         this.rememberWorldMapLocation(levelName);
 
         this.events.onLevelChanged?.(gameMode, levelName);
@@ -274,6 +292,16 @@ export class Game {
         return this.level?.getRuntimeSnapshot() ?? null;
     }
 
+    public setPaused(paused: boolean): void {
+        if (this.paused === paused) return;
+        this.paused = paused;
+        this.level?.setPaused(paused);
+    }
+
+    public isPaused(): boolean {
+        return this.paused;
+    }
+
     public subscribeClock(listener: (elapsedMinutes: number) => void): () => void {
         this.clockListeners.add(listener);
         return () => this.clockListeners.delete(listener);
@@ -306,18 +334,11 @@ export class Game {
         return this.combatMode;
     }
 
-    public toggleCombatMode(): boolean {
-        this.combatMode = !this.combatMode;
-        this.level?.setCombatMode(this.combatMode);
-        this.events.onCombatModeChange?.(this.combatMode);
-        return this.combatMode;
-    }
 
     public endCombatTurn(): boolean {
         if (!this.combatMode) {
             this.combatMode = true;
             this.level?.setCombatMode(true);
-            this.events.onCombatModeChange?.(true);
             return true;
         }
         return this.level?.endCombatTurn() ?? false;
@@ -399,6 +420,11 @@ export class Game {
                 quantity: stack.quantity,
             };
         }));
+    }
+
+    public async getPersonTradeCapabilities(owner: string): Promise<PersonTradeCapabilities> {
+        const technicalName = owner.replace(/^person:/i, "");
+        return (await loadPersonCombatAssets(technicalName)).template?.trade ?? NO_PERSON_TRADE_CAPABILITIES;
     }
 
     public transferInventoryItem(source: string, destination: string, stackKey: string, quantity = 1): boolean {
@@ -535,9 +561,9 @@ export class Game {
         save.scriptVariables = { ...runtime.variables };
         save.inventories = Object.fromEntries(Object.entries(runtime.inventoryStacks).map(([owner, stacks]) => [
             owner,
-            stacks.map(({ stackKey: _stackKey, technicalName, ...stack }) => ({
+            stacks.map((stack) => ({
                 id: stack.id,
-                definitionId: technicalName,
+                definitionId: stack.technicalName,
                 durability: stack.durability,
                 ...(stack.charges === undefined ? {} : { charges: stack.charges }),
                 quantity: stack.quantity,
@@ -645,20 +671,26 @@ export class Game {
         const speaker = arguments_[0];
         const asset = arguments_[1];
         const suppliedSpeakerName = arguments_[2];
+        const suppliedCombatantId = arguments_[3];
         if (typeof speaker !== "string" || !speaker) throw new Error("RS_StartDialog requires a speaker id");
         if (typeof asset !== "string" || !asset) throw new Error("RS_StartDialog requires an AGE asset name");
-        await this.loadDialoguePhrases();
-        const url = await this.resolveDialogueAsset(asset);
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`Не удалось загрузить диалог ${asset}: HTTP ${response.status}`);
-        const speakerName = typeof suppliedSpeakerName === "string" && suppliedSpeakerName.trim()
-            ? suppliedSpeakerName
-            : this.resolveSpeakerName(speaker);
-        this.dialogueSpeakerTechnical = speaker;
+        const combatantId = typeof suppliedCombatantId === "string" && suppliedCombatantId
+            ? suppliedCombatantId
+            : speaker;
+        this.setDialogueSpeaker(combatantId);
         try {
+            await this.loadDialoguePhrases();
+            const url = await this.resolveDialogueAsset(asset);
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`Не удалось загрузить диалог ${asset}: HTTP ${response.status}`);
+            const speakerName = typeof suppliedSpeakerName === "string" && suppliedSpeakerName.trim()
+                ? suppliedSpeakerName
+                : this.resolveSpeakerName(speaker);
+            this.dialogueSpeakerTechnical = speaker;
             this.dialogue.start(new AGEParser(await response.arrayBuffer()).getData(), speakerName);
         } catch (error) {
             this.dialogueSpeakerTechnical = null;
+            this.setDialogueSpeaker(null);
             throw error;
         }
     }
@@ -769,9 +801,14 @@ export class Game {
     }
 
 
+    private setDialogueSpeaker(combatantId: string | null): void {
+        this.level?.setDialogueSpeaker(combatantId ?? undefined);
+    }
+
     private publishDialogueState(state: DialogueState): void {
         if (state.status !== "active" || state.phraseId === null) {
             this.dialogueSpeakerTechnical = null;
+            this.setDialogueSpeaker(null);
             this.stopDialogueVoice();
             this.events.onDialogueStateChange?.(state);
             return;
@@ -843,6 +880,7 @@ export class Game {
     private gameLoop = () => {
         if (!this.gameLoopActive) return;
         requestAnimationFrame(this.gameLoop);
+        if (this.paused) return;
         this.ctx!.clearRect(0, 0, this.canvas.width, this.canvas.height);
         this.level?.draw();
     };

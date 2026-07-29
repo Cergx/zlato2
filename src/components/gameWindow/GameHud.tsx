@@ -62,7 +62,13 @@ interface GameHudProps {
     onRest: () => void;
     onPause: () => void;
     skillsActive: boolean;
-    onCombatModeChange?: (active: boolean) => void;
+}
+
+interface HudCompanion {
+    readonly name: string;
+    readonly portrait: string;
+    readonly lifeRatio: number;
+    readonly energyRatio: number;
 }
 
 interface HudInfo {
@@ -86,6 +92,7 @@ interface HudInfo {
     weaponItemClass?: string;
     weaponNativeFlags: number;
     conditionIconIds: readonly number[];
+    companions: readonly HudCompanion[];
 }
 
 const initialInfo: HudInfo = {
@@ -108,6 +115,7 @@ const initialInfo: HudInfo = {
     weaponItemClass: "mace",
     weaponNativeFlags: HUD_DAMAGE_MODE_FLAGS[1],
     conditionIconIds: [],
+    companions: [],
 };
 
 const readValue = (parameters: Readonly<Record<string, number>>, names: readonly string[]): number | undefined => {
@@ -309,7 +317,7 @@ interface MinimapDragState {
     initialDistance: number | undefined;
 }
 
-export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, needParamsSignal, onSkills, onProfessionSkill, onInventory, onJournal, onMagic, onPause, onRest, skillsActive, onCombatModeChange }: GameHudProps) => {
+export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, needParamsSignal, onSkills, onProfessionSkill, onInventory, onJournal, onMagic, onPause, onRest, skillsActive }: GameHudProps) => {
 
     const frameRef = useRef<HTMLCanvasElement>(null);
     const healthFrameRef = useRef<number | null>(null);
@@ -488,6 +496,17 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
                 ...nativeStatusIconIds(heroParameters, heroEffectIds),
             ];
 
+            const companions = runtime.combat.partyMembers.flatMap((name): HudCompanion[] => {
+                const combatant = runtime.combat.combatants[name];
+                if (!combatant?.portraitResource) return [];
+                return [{
+                    name,
+                    portrait: `/assets/${combatant.portraitResource.replace(/\\/g, "/")}.bmp`,
+                    lifeRatio: combatant.maximumHealth > 0 ? Math.max(0, Math.min(1, combatant.health / combatant.maximumHealth)) : 0,
+                    energyRatio: combatant.maximumEnergy > 0 ? Math.max(0, Math.min(1, combatant.energy / combatant.maximumEnergy)) : 0,
+                }];
+            });
+
             setInfo({
                 lifeValue,
                 lifeMaximum,
@@ -509,6 +528,7 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
                 weaponItemClass: heroCombat?.profile.weapon.itemClass,
                 weaponNativeFlags: heroCombat?.profile.weapon.nativeFlags ?? HUD_DAMAGE_MODE_FLAGS[1],
                 conditionIconIds,
+                companions,
             });
         };
         update();
@@ -794,8 +814,8 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
                     context.restore();
                 }
 
-                context.fillStyle = "#e00000";
                 for (const person of state.persons) {
+                    context.fillStyle = person.relation === "hostile" ? "#e00000" : "#42d94d";
                     context.fillRect(Math.round(projectX(person.x)) - 2, Math.round(projectY(person.y)) - 2, 4, 4);
                 }
                 context.fillStyle = "#8ee1bd";
@@ -876,11 +896,7 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
         else if (id === 5) onJournal();
         else if (id === 7) onMagic();
         else if (id === 8) getGame()?.showWorldMap();
-        else if (id === 14) {
-            const active = getGame()?.toggleCombatMode() ?? false;
-            setInfo((current) => ({ ...current, combatMode: active }));
-            onCombatModeChange?.(active);
-        }
+        else if (id === 14) getGame()?.endCombatTurn();
     };
     const activeInterfaceIcons = HUD_INTERFACE_ICONS.filter(({ index }) =>
         persistentIconIds.has(index) || info.conditionIconIds.includes(index));
@@ -919,6 +935,20 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
                     </button>)}
                 </div>
             </section>}
+            <div className={styles.companions} aria-label="Спутники">
+                {info.companions.map((companion) => <div className={styles.companion} key={companion.name} title={companion.name}>
+                    <ColorKeyImage className={styles.companionPortrait} src={companion.portrait} />
+                    <div className={`${styles.companionMeter} ${styles.companionLife}`}
+                        style={{ height: `${companion.lifeRatio * 54}px` }}>
+                        <ColorKeyImage src="/assets/engineres/interface/ally/life.bmp" />
+                    </div>
+                    <div className={`${styles.companionMeter} ${styles.companionMana}`}
+                        style={{ height: `${companion.energyRatio * 54}px` }}>
+                        <ColorKeyImage src="/assets/engineres/interface/ally/mana.bmp" />
+                    </div>
+                    <ColorKeyImage className={styles.companionFrame} src="/assets/engineres/interface/ally/frame.bmp" />
+                </div>)}
+            </div>
             <div className={styles.panel}>
                 <canvas ref={frameRef} width={1024} height={768} />
             </div>

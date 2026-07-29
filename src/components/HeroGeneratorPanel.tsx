@@ -3,6 +3,8 @@ import { HERO_GENERATOR_NATIVE_LAYOUT, type NativeRect } from "../constants/clie
 import { BUTTON_HEADS_INTERFACE_FONT, HEADS_INTERFACE_FONT } from "../constants/fontsScr.ts";
 import { DEFAULT_HERO_NAME, parseHeroProfiles, type HeroProfile } from "../game/HeroProfileRuntime.ts";
 import { SDBParser, type SDBData } from "../game/parsers/SDBParser.ts";
+import { HeroSkillsBlock } from "./HeroSkillsBlock.tsx";
+import { HeroStatsBlock } from "./HeroStatsBlock.tsx";
 import { OriginalGuiLayer, type GuiControlValue } from "./OriginalGuiLayer.tsx";
 import styles from "./HeroGeneratorPanel.module.scss";
 
@@ -12,11 +14,7 @@ interface CharacterGeneratorPanelProps {
 }
 
 
-const INTERACTIVE_OBJECT_IDS = [
-    1, 2, 3, 4, 5, 6, 7,
-    ...Array.from({ length: 14 }, (_, index) => 16 + index),
-    ...Array.from({ length: 54 }, (_, index) => 30 + index),
-] as const;
+const INTERACTIVE_OBJECT_IDS = [1, 2, 3, 4, 5, 6, 7] as const;
 
 const {
     characteristics: CHARACTERISTICS,
@@ -108,14 +106,6 @@ export const CharacterGeneratorPanel = ({ onClose, onCreate }: CharacterGenerato
     HERO_GENERATOR_NATIVE_LAYOUT.presetCaptions.forEach((caption) => {
         labels[caption.objectId] = strings[caption.stringId] ?? "";
     });
-    CHARACTERISTICS.forEach(({ interfaceStringId }, index) => {
-        labels[16 + index] = `Уменьшить: ${strings[interfaceStringId] ?? interfaceStringId}`;
-        labels[23 + index] = `Увеличить: ${strings[interfaceStringId] ?? interfaceStringId}`;
-    });
-    HERO_SKILLS.forEach(({ interfaceStringId }, index) => {
-        labels[30 + index * 2] = `Уменьшить: ${strings[interfaceStringId] ?? interfaceStringId}`;
-        labels[31 + index * 2] = `Увеличить: ${strings[interfaceStringId] ?? interfaceStringId}`;
-    });
 
     const selectProfile = (index: number): void => {
         const profile = profiles[index];
@@ -124,32 +114,28 @@ export const CharacterGeneratorPanel = ({ onClose, onCreate }: CharacterGenerato
         setParameters(copyParameters(profile));
         setError("");
     };
-    const changeCharacteristic = (index: number, increase: boolean): void => {
-        const characteristic = CHARACTERISTICS[index];
-        if (!characteristic) return;
+    const changeCharacteristic = (parameter: string, direction: -1 | 1): void => {
         setParameters((current) => {
-            const value = current[characteristic.parameter] ?? HERO_GENERATOR_LIMITS.primaryMinimum;
+            const value = current[parameter] ?? HERO_GENERATOR_LIMITS.primaryMinimum;
             const points = current.person_points ?? 0;
-            if (!increase) {
+            if (direction < 0) {
                 if (value <= HERO_GENERATOR_LIMITS.primaryMinimum) return current;
-                return { ...current, [characteristic.parameter]: value - 1, person_points: points + value };
+                return { ...current, [parameter]: value - 1, person_points: points + value };
             }
             if (value >= HERO_GENERATOR_LIMITS.primaryMaximum || value + 1 > points) return current;
-            return { ...current, [characteristic.parameter]: value + 1, person_points: points - value - 1 };
+            return { ...current, [parameter]: value + 1, person_points: points - value - 1 };
         });
     };
-    const changeSkill = (index: number, increase: boolean): void => {
-        const skill = HERO_SKILLS[index];
-        if (!skill) return;
+    const changeSkill = (parameter: string, direction: -1 | 1): void => {
         setParameters((current) => {
-            const value = current[skill.parameter] ?? HERO_GENERATOR_LIMITS.skillMinimum;
+            const value = current[parameter] ?? HERO_GENERATOR_LIMITS.skillMinimum;
             const points = current.skill_points ?? 0;
-            if (!increase) {
+            if (direction < 0) {
                 if (value <= HERO_GENERATOR_LIMITS.skillMinimum) return current;
-                return { ...current, [skill.parameter]: value - 1, skill_points: points + value };
+                return { ...current, [parameter]: value - 1, skill_points: points + value };
             }
             if (value >= HERO_GENERATOR_LIMITS.skillMaximum || value + 1 > points) return current;
-            return { ...current, [skill.parameter]: value + 1, skill_points: points - value - 1 };
+            return { ...current, [parameter]: value + 1, skill_points: points - value - 1 };
         });
     };
     const createHero = (): void => {
@@ -176,62 +162,22 @@ export const CharacterGeneratorPanel = ({ onClose, onCreate }: CharacterGenerato
                 if (object.id >= 1 && object.id <= 4) selectProfile(object.id - 1);
                 else if (object.id === 5) createHero();
                 else if (object.id === 6) onClose();
-                else if (object.id >= 16 && object.id <= 22) changeCharacteristic(object.id - 16, false);
-                else if (object.id >= 23 && object.id <= 29) changeCharacteristic(object.id - 23, true);
-                else if (object.id >= 30 && object.id <= 83) {
-                    const offset = object.id - 30;
-                    changeSkill(Math.floor(offset / 2), offset % 2 === 1);
-                }
             }} />
+
+        <HeroStatsBlock script="hero_generator" parameters={parameters} strings={strings}
+            onAdjust={changeCharacteristic} />
+        <HeroSkillsBlock script="hero_generator" parameters={parameters} strings={strings}
+            onAdjust={changeSkill} />
 
         <div className={styles.nativeText} aria-hidden="true">
             <span className={styles.topTitle} data-interface-string-id={HERO_GENERATOR_NATIVE_LAYOUT.topTitle.stringId}
                 style={topTitleStyle()}>{strings[HERO_GENERATOR_NATIVE_LAYOUT.topTitle.stringId] ?? ""}</span>
-            {HERO_GENERATOR_NATIVE_LAYOUT.sectionTitles.map((draw) => <span key={`heading-${draw.stringId}`}
-                className={styles.sectionHeading} style={{
-                    left: draw.x,
-                    top: draw.y,
-                    width: draw.boxWidth >= 0 ? draw.boxWidth : undefined,
-                    height: draw.boxHeight >= 0 ? draw.boxHeight : undefined,
-                }}>{strings[draw.stringId] ?? ""}</span>)}
             {HERO_GENERATOR_NATIVE_LAYOUT.presetCaptions.map((caption) => <span
                 className={styles.presetCaption}
                 data-interface-string-id={caption.stringId}
                 key={`preset-${caption.objectId}`}
                 style={presetCaptionStyle(caption.rect)}>
                 {strings[caption.stringId] ?? ""}
-            </span>)}
-            {CHARACTERISTICS.map(({ parameter, label }) => <span key={`label-${parameter}`}
-                className={styles.nativeLabel} style={{ left: label.x, top: label.y }}>
-                {strings[label.stringId] ?? parameter}
-            </span>)}
-            {HERO_SKILLS.map(({ parameter, label }) => <span key={`label-${parameter}`}
-                className={styles.nativeLabel} style={{ left: label.x, top: label.y }}>
-                {strings[label.stringId] ?? parameter}
-            </span>)}
-            <span className={styles.nativeLabel} style={{
-                left: HERO_GENERATOR_NATIVE_LAYOUT.primaryPoints.label.x,
-                top: HERO_GENERATOR_NATIVE_LAYOUT.primaryPoints.label.y,
-            }}>{strings[HERO_GENERATOR_NATIVE_LAYOUT.primaryPoints.label.stringId] ?? ""}</span>
-            <span className={styles.nativeLabel} style={{
-                left: HERO_GENERATOR_NATIVE_LAYOUT.skillPoints.label.x,
-                top: HERO_GENERATOR_NATIVE_LAYOUT.skillPoints.label.y,
-            }}>{strings[HERO_GENERATOR_NATIVE_LAYOUT.skillPoints.label.stringId] ?? ""}</span>
-            <span className={styles.primaryPointsValue}
-                style={nativeRectStyle(HERO_GENERATOR_NATIVE_LAYOUT.primaryPoints.valueRect)}>
-                {parameters.person_points ?? 0}
-            </span>
-            <span className={styles.skillPointsValue}
-                style={nativeRectStyle(HERO_GENERATOR_NATIVE_LAYOUT.skillPoints.valueRect)}>
-                {parameters.skill_points ?? 0}
-            </span>
-            {CHARACTERISTICS.map(({ parameter, valueRect }) => <span key={parameter}
-                className={styles.characteristicValue} style={nativeRectStyle(valueRect)}>
-                {parameters[parameter] ?? 0}
-            </span>)}
-            {HERO_SKILLS.map(({ parameter, valueRect }) => <span key={parameter}
-                className={styles.skillValue} style={nativeRectStyle(valueRect)}>
-                {parameters[parameter] ?? 0}
             </span>)}
         </div>
         {error && <output className={styles.error} role="alert">{error}</output>}

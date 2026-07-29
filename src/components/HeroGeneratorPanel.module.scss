@@ -25,20 +25,6 @@
     pointer-events: none;
 }
 
-.nativeLabel,
-.characteristicValue,
-.skillValue,
-.primaryPointsValue,
-.skillPointsValue {
-    position: absolute;
-    box-sizing: border-box;
-    overflow: hidden;
-    color: #21170e;
-    font-size: 15px;
-    line-height: 18px;
-    text-shadow: 0 1px rgb(239 209 145 / 45%);
-    white-space: nowrap;
-}
 
 .topTitle {
     position: absolute;
@@ -61,25 +47,6 @@
     white-space: nowrap;
 }
 
-.sectionHeading {
-    position: absolute;
-    overflow: hidden;
-    color: #21170e;
-    font-size: 15px;
-    line-height: 18px;
-    text-align: center;
-    text-shadow: 0 1px rgb(239 209 145 / 45%);
-    white-space: nowrap;
-}
-
-.characteristicValue,
-.skillValue,
-.primaryPointsValue,
-.skillPointsValue {
-    display: grid;
-    place-items: center;
-    text-align: center;
-}
 
 
 .error {

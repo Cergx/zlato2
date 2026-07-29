@@ -654,6 +654,32 @@ export const HUD_ACTION_POINTS_ANIMATION_ORIGIN = Object.freeze({ left: 201, top
 export const HUD_ACTION_POINTS_MAXIMUM_FRAME = 60;
 export const HUD_ACTION_POINTS_OPACITY_STEP = 0.04;
 
+/**
+ * Native combat-ground hover statuses from `user_interface.sdb`.
+ * Client.dll 0x12034EF7 selects ID 0xBF and supplies the required action-point
+ * count to its `%d` slot. The path-preview rejection branch at 0x12027006
+ * publishes ID 0xC0 when the destination cannot be reached during this turn.
+ */
+export const COMBAT_GROUND_STATUS_STRING_IDS = Object.freeze({
+    requiredActionPoints: 0xBF,
+    unreachableThisTurn: 0xC0,
+});
+
+/** Native combat-history templates from `user_interface.sdb`. */
+export const COMBAT_HISTORY_STRING_IDS = Object.freeze({
+    criticalMiss: 0xB9,
+    criticalHit: 0xBA,
+    reflectedAttack: 0xBD,
+    castMagic: 0xCF,
+    damage: 0xD0,
+    miss: 0xD1,
+    targetTooFar: 0xD2,
+    insufficientActionPoints: 0xD3,
+    gameOver: 0xD4,
+    died: 0xF0,
+    reflectedMagic: 0xFC,
+});
+
 export type HudInterfaceIconAction = "inventory" | "journal" | "none";
 
 export interface HudInterfaceIconDefinition {

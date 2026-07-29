@@ -1,4 +1,5 @@
 import { Paths } from "../constants/paths.ts";
+import { COMBAT_HISTORY_STRING_IDS } from "../constants/clientDll.ts";
 import type { LevelData } from "./Level.ts";
 import {
     ScenarioRuntime,
@@ -29,8 +30,9 @@ import {
     type OriginalAttackResult,
     type OriginalCombatProfile,
     type OriginalWeaponProfile,
+    type PersonCombatTemplate,
 } from "./systems/Combat.ts";
-import { worldToCell, type WorldPosition } from "./WorldCoordinates.ts";
+import { cellToWorld, worldToCell, type WorldPosition } from "./WorldCoordinates.ts";
 import { createItemInstance, type EquipmentSlot, type ItemClass, type ItemDefinition, type ItemInstance } from "./systems/Items.ts";
 import { materializeInventory, parseInventoryScript } from "./parsers/INVParser.ts";
 import { MONEY_ITEM_ID, nativeTradePriceMultiplier, type TradeOffer } from "./systems/Trade.ts";
@@ -51,6 +53,12 @@ import {
     type MagicDefinition,
     type MagicSpecialDefinition,
 } from "./MagicCatalogRuntime.ts";
+import {
+    loadAllyPortraitMappings,
+    loadNativeFactionRelations,
+    loadPersonResourceName,
+    type AllyPortraitMapping,
+} from "./NativeCombatResources.ts";
 
 
 export interface DynamicPersonDefinition extends SEFPerson {
@@ -84,6 +92,10 @@ export interface CombatantRuntimeSnapshot {
     readonly initiative: number;
     readonly dead: boolean;
     readonly profile: OriginalCombatProfile;
+    readonly faction: string;
+    readonly relationToHero: FactionRelation;
+    readonly partyMember: boolean;
+    readonly portraitResource?: string;
 }
 
 export interface CombatRuntimeSnapshot {
@@ -92,6 +104,7 @@ export interface CombatRuntimeSnapshot {
     readonly currentCombatant?: string;
     readonly message: string;
     readonly combatants: Readonly<Record<string, CombatantRuntimeSnapshot>>;
+    readonly partyMembers: readonly string[];
 }
 
 export interface MagicEffectRuntimeSnapshot {
@@ -168,6 +181,8 @@ export interface GameStateRuntimeOptions {
     onContainerOpen?: (owner: string, triggerName: string) => void;
     onMessage?: (message: SCRValue) => void;
     resolveItemLiteraryName?: (technicalName: string) => string;
+    resolveHeroName?: () => string;
+    resolveInterfaceString?: (id: number) => string | undefined;
     onWeather?: (type: number) => void;
     onSound?: (arguments_: readonly SCRValue[]) => void;
     onPersonSound?: (shader: SoundShaderDefinition) => void;
@@ -176,6 +191,11 @@ export interface GameStateRuntimeOptions {
     onWorldMagicEffect?: (technicalName: string, position: Readonly<WorldPosition>) => void;
     onClockChange?: (elapsedMinutes: number) => void;
     onRestChange?: (state: RestRuntimeState) => void;
+    onCombatModeChange?: (active: boolean) => void;
+    onCombatantPositionChange?: (technicalName: string, position: Readonly<WorldPosition>) => void;
+    onCombatantMoveRequest?: (technicalName: string, targetPosition: Readonly<WorldPosition>, away: boolean) => WorldPosition | undefined;
+    onCombatantFace?: (technicalName: string, targetPosition: Readonly<WorldPosition>) => void;
+    onCombatantCanSee?: (technicalName: string, targetPosition: Readonly<WorldPosition>) => boolean;
     random?: () => number;
     now?: () => Date;
     addonMode?: boolean;
@@ -257,7 +277,10 @@ interface CombatProfileSource {
     readonly parameters: Readonly<Record<string, number>>;
     readonly items: readonly ShippedItem[];
     readonly base: Partial<Pick<Parameters<typeof createOriginalCombatProfile>[0], "baseHealth" | "baseEnergy" | "baseHitChance" | "baseActionPoints" | "baseArmorClass">>;
+    readonly technicalName?: string;
     readonly bestiaryName?: string;
+    readonly literaryName?: string;
+    readonly template?: PersonCombatTemplate;
 }
 const EQUIPMENT_SLOTS: readonly EquipmentSlot[] = [
     "mainHand", "offHand", "ammo", "head", "body", "arms", "bracelet", "amulet", "ringLeft", "ringRight",
@@ -381,6 +404,7 @@ const MAGIC_PROFILE_MODIFIERS: Readonly<Record<string, string>> = {
 };
 
 const dynamicPersonLevelKey = (levelData: LevelData): string => `${levelData.gameMode}:${levelData.levelName.toLowerCase()}`;
+const baseCombatantName = (name: string): string => name.replace(/#\d+$/u, "");
 
 export class GameStateRuntime {
     private readonly scr: SCRRuntime;
@@ -407,12 +431,17 @@ export class GameStateRuntime {
     private inventorySerial = 0;
     private readonly combatProfileSources = new Map<string, CombatProfileSource>();
     private readonly combatantPositions = new Map<string, WorldPosition>();
+    private readonly personResources = new Map<string, string>();
+    private allyPortraitMappings: readonly AllyPortraitMapping[] = [];
+    private nativeFactionRelationsLoaded = false;
     private readonly activeMagicEffects: ActiveMagicEffect[] = [];
     private readonly healthRegenerationElapsed = new Map<string, number>();
     private readonly energyRegenerationElapsed = new Map<string, number>();
     private lastPlayerPosition: WorldPosition = { x: 0, y: 0 };
+    private hasPlayerPosition = false;
     private readonly activeEnemies = new Set<string>();
     private readonly magicDefinitions = new Map<number, MagicDefinition>();
+    private readonly magicDefinitionsByName = new Map<string, MagicDefinition>();
     private selectedMagicId: number | undefined;
     private dynamicPersons: DynamicPersonDefinition[] = [];
     private readonly dynamicPersonsByLevel = new Map<string, DynamicPersonDefinition[]>();
@@ -424,6 +453,10 @@ export class GameStateRuntime {
     private currentCombatant: string | undefined;
     private combatMessage = "";
     private remainingActionPoints = new Map<string, number>();
+    private aiTurnQueue: string[] = [];
+    private aiNextActionTimeMs = 0;
+    private aiCycleFoundHostileTarget = false;
+    private heroLastTarget: string | undefined;
     private scenario: ScenarioRuntime | null = null;
     private levelData: LevelData | null = null;
     private coreScript: SCRScript | null = null;
@@ -476,17 +509,34 @@ export class GameStateRuntime {
             .map((person) => ({ ...person, position: { ...person.position } }));
 
         const personDefinitions = [...levelData.sefData.persons, ...this.dynamicPersons];
-        const [personAssets, heroAssets, magicDefinitions] = await Promise.all([
+        const [personAssets, personResources, heroAssets, magicDefinitions, nativeFactionRelations, allyPortraitMappings] = await Promise.all([
             Promise.all(personDefinitions.map(async (person) => [
                 person.name.toLowerCase(),
                 await loadPersonCombatAssets(person.name),
             ] as const)),
+            Promise.all(personDefinitions.map(async (person) => [
+                person.name.toLowerCase(),
+                await loadPersonResourceName(person.name),
+            ] as const)),
             loadPersonCombatAssets("hero"),
             loadMagicCatalog(),
+            this.nativeFactionRelationsLoaded ? Promise.resolve([]) : loadNativeFactionRelations(),
+            this.allyPortraitMappings.length > 0 ? Promise.resolve(this.allyPortraitMappings) : loadAllyPortraitMappings(),
         ]);
         if (generation !== this.generation) return;
+        if (!this.nativeFactionRelationsLoaded) {
+            for (const relation of nativeFactionRelations) this.factions.set(relation.from, relation.to, relation.relation);
+            this.nativeFactionRelationsLoaded = true;
+        }
+        this.allyPortraitMappings = allyPortraitMappings;
+        this.personResources.clear();
+        for (const [name, resource] of personResources) this.personResources.set(name, resource);
         this.magicDefinitions.clear();
-        for (const definition of magicDefinitions) this.magicDefinitions.set(definition.id, definition);
+        this.magicDefinitionsByName.clear();
+        for (const definition of magicDefinitions) {
+            this.magicDefinitions.set(definition.id, definition);
+            this.magicDefinitionsByName.set(definition.technicalName.toLowerCase(), definition);
+        }
         this.scenario = new ScenarioRuntime(levelData.sefData, levelData.lvlData, levelData.triggerCells, {
             random: this.random,
             onScript: (request) => void this.executeTriggerRequest(request, generation),
@@ -519,21 +569,30 @@ export class GameStateRuntime {
         clockTimeMs = simulationTimeMs,
     ): void {
         if (!this.scenario || !this.levelData) return;
+        const playerMoved = this.hasPlayerPosition
+            && Math.hypot(playerPosition.x - this.lastPlayerPosition.x, playerPosition.y - this.lastPlayerPosition.y) > 0.001;
         this.lastPlayerPosition = { ...playerPosition };
+        this.hasPlayerPosition = true;
         this.combatantPositions.set("hero", worldToCell(playerPosition));
         this.scenario.setPlayerWorldPosition(playerPosition);
-        if (this.lastClockTimeMs !== undefined) {
+        if (!this.combatActive && this.lastClockTimeMs !== undefined) {
             const delta = clockTimeMs - this.lastClockTimeMs;
             if (Number.isFinite(delta) && delta >= 0) this.advanceClockTime(delta);
         }
         this.lastClockTimeMs = clockTimeMs;
         this.npcRoutes = this.scenario.advanceRoutes(simulationTimeMs);
+        this.detectAutomaticCombat(playerPosition, playerMoved);
+        this.advanceAiTurns(simulationTimeMs);
         if (this.coreScript && tick - this.lastCoreTick >= 20) {
             this.lastCoreTick = tick;
             const hero = this.combatants.get("hero");
             if (hero && hero.health > 0) this.scr.executeProgram(this.coreScript.program);
         }
     }
+    public resetClockTimeBaseline(): void {
+        this.lastClockTimeMs = undefined;
+    }
+
 
     public getScenario(): ScenarioRuntime | null {
         return this.scenario;
@@ -907,20 +966,45 @@ export class GameStateRuntime {
     }
 
     public setCombatMode(active: boolean): void {
+        const changed = this.combatActive !== active;
         this.combatActive = active;
         this.selectedMagicId = undefined;
         this.activeEnemies.clear();
+        this.aiTurnQueue = [];
+        this.aiCycleFoundHostileTarget = false;
         this.combatRound = active ? 1 : 0;
         this.currentCombatant = active ? "hero" : undefined;
         this.remainingActionPoints.clear();
+        this.combatMessage = "";
         if (active) {
             const profile = this.combatProfiles.get("hero");
             if (profile) this.remainingActionPoints.set("hero", profile.actionPoints);
-            this.combatMessage = "Боевой режим: ход героя";
-        } else {
-            this.combatMessage = "";
         }
+        if (changed) this.options.onCombatModeChange?.(active);
     }
+
+    public consumeCombatMovementActionPoint(technicalName = "hero"): boolean {
+        if (!this.combatActive) return true;
+        const name = this.resolveCombatantName(technicalName);
+        if (!name || this.currentCombatant !== name) return false;
+        const remaining = this.remainingActionPoints.get(name) ?? this.combatProfiles.get(name)?.actionPoints ?? 0;
+        if (remaining < 1) {
+            this.combatMessage = "Недостаточно очков действия";
+            return false;
+        }
+        this.remainingActionPoints.set(name, remaining - 1);
+        this.syncCombatParameters(name);
+        return true;
+    }
+    public getHeroCombatActionPoints(): number {
+        return this.remainingActionPoints.get("hero") ?? this.combatProfiles.get("hero")?.actionPoints ?? 0;
+    }
+
+    public completeHeroCombatAction(): boolean {
+        if (!this.combatActive || this.currentCombatant !== "hero" || this.getHeroCombatActionPoints() > 0) return false;
+        return this.endCombatTurn();
+    }
+
 
     public endCombatTurn(): boolean {
         if (!this.combatActive) {
@@ -931,30 +1015,232 @@ export class GameStateRuntime {
         const hero = this.combatants.get("hero");
         if (!hero || hero.isDead) return false;
 
-        const order = ["hero", ...this.activeEnemies]
-            .filter((name) => !this.combatants.get(name)?.isDead)
+        this.aiTurnQueue = [...this.combatants.keys()]
+            .filter((name) => name !== "hero" && this.isCombatantPresent(name) && !this.combatants.get(name)?.isDead)
             .sort((left, right) => (this.combatProfiles.get(right)?.initiative ?? 0) - (this.combatProfiles.get(left)?.initiative ?? 0));
-        const heroIndex = order.indexOf("hero");
-        const enemyTurns = [...order.slice(heroIndex + 1), ...order.slice(0, heroIndex)];
-        for (const enemy of enemyTurns) {
-            const attacker = this.combatants.get(enemy);
-            const profile = this.combatProfiles.get(enemy);
-            if (!attacker || attacker.isDead || !profile || hero.isDead) continue;
-            this.currentCombatant = enemy;
-            this.remainingActionPoints.set(enemy, profile.actionPoints);
-            while ((this.remainingActionPoints.get(enemy) ?? 0) >= profile.weapon.actionPointCost && !hero.isDead) {
-                if (!this.performCombatAttack(enemy, "hero")) break;
+        this.aiCycleFoundHostileTarget = false;
+        this.aiNextActionTimeMs = 0;
+        if (this.aiTurnQueue.length === 0) {
+            this.finishAiCycle();
+            return true;
+        }
+        this.beginNextAiTurn();
+        return true;
+    }
+
+    private isCombatantPresent(name: string): boolean {
+        return name === "hero" || this.persons.get(name) !== false;
+    }
+
+    private detectAutomaticCombat(heroPosition: Readonly<WorldPosition>, heroMoved: boolean): void {
+        if (this.combatActive || this.combatants.get("hero")?.isDead) return;
+        const heroCell = worldToCell(heroPosition);
+        for (const [name, combatant] of this.combatants) {
+            if (name === "hero" || combatant.isDead || !this.isCombatantPresent(name) || this.isPartyMember(name)) continue;
+            if (!this.factions.isHostile(combatant.factionId, this.combatants.get("hero")?.factionId ?? "hero")) continue;
+            const template = this.combatProfileSources.get(name)?.template;
+            const position = this.combatantPositions.get(name);
+            if (!template || !position) continue;
+            const distance = originalCombatDistance(position, heroCell);
+            const seesHero = template.radiusSee > 0
+                && distance <= template.radiusSee
+                && (this.options.onCombatantCanSee?.(name, heroPosition) ?? true);
+            const hearsHero = heroMoved && template.radiusHear > 0 && distance <= template.radiusHear;
+            if (!seesHero && !hearsHero) continue;
+            this.setCombatMode(true);
+            this.activeEnemies.add(name);
+            return;
+        }
+    }
+
+    private beginNextAiTurn(): void {
+        while (true) {
+            const name = this.aiTurnQueue.shift();
+            if (!name) {
+                this.finishAiCycle();
+                return;
+            }
+            const profile = this.combatProfiles.get(name);
+            const combatant = this.combatants.get(name);
+            if (!profile || !combatant || combatant.isDead || !this.isCombatantPresent(name) || !this.combatTargetFor(name)) continue;
+
+            this.currentCombatant = name;
+            this.remainingActionPoints.set(name, profile.actionPoints);
+            this.combatMessage = "";
+            this.aiNextActionTimeMs = 0;
+            this.syncCombatParameters(name);
+            return;
+        }
+    }
+
+    private finishAiCycle(): void {
+        const hero = this.combatants.get("hero");
+        if (!hero || hero.isDead) {
+            this.currentCombatant = undefined;
+            this.aiTurnQueue = [];
+            return;
+        }
+        if (!this.aiCycleFoundHostileTarget) {
+            this.setCombatMode(false);
+            return;
+        }
+        this.advanceMagicEffects(1);
+        this.combatRound += 1;
+        this.currentCombatant = "hero";
+        const heroProfile = this.combatProfiles.get("hero");
+        if (heroProfile) this.remainingActionPoints.set("hero", heroProfile.actionPoints);
+        this.combatMessage = "";
+        this.syncCombatParameters("hero");
+    }
+
+    private combatTargetFor(actorName: string): string | undefined {
+        const actor = this.combatants.get(actorName);
+        if (!actor) return undefined;
+        let candidates = [...this.combatants.entries()]
+            .filter(([name, combatant]) => name !== actorName && this.isCombatantPresent(name) && !combatant.isDead
+                && this.factions.isHostile(actor.factionId, combatant.factionId))
+            .map(([name]) => name);
+        if (candidates.length === 0) return undefined;
+
+        if (this.isPartyMember(actorName)) {
+            const command = this.getPersonParameter(actorName, "ally_command");
+            if (command === ALLY_COMMANDS.CMD_ALLY_DO_NOT_FIGHT) return undefined;
+            if (command === ALLY_COMMANDS.CMD_ALLY_HERO_TARGET) {
+                return this.heroLastTarget && candidates.includes(this.heroLastTarget) ? this.heroLastTarget : undefined;
+            }
+            if (command === ALLY_COMMANDS.CMD_ALLY_NOT_HERO_TARGET && this.heroLastTarget) {
+                candidates = candidates.filter((name) => name !== this.heroLastTarget);
+            }
+            if (command === ALLY_COMMANDS.CMD_ALLY_HERO_DANGER) {
+                const heroPosition = this.combatantPositions.get("hero");
+                if (!heroPosition) return undefined;
+                candidates = candidates.filter((name) => {
+                    const position = this.combatantPositions.get(name);
+                    return position && originalCombatDistance(heroPosition, position) <= 8;
+                });
+            }
+            if (command === ALLY_COMMANDS.CMD_ALLY_WEAK_TARGET) {
+                return candidates.sort((left, right) =>
+                    (this.combatants.get(left)?.health ?? 0) - (this.combatants.get(right)?.health ?? 0))[0];
             }
         }
 
-        this.advanceMagicEffects(1);
-        this.combatRound += 1;
-        this.currentCombatant = hero.isDead ? undefined : "hero";
-        const heroProfile = this.combatProfiles.get("hero");
-        if (heroProfile && !hero.isDead) this.remainingActionPoints.set("hero", heroProfile.actionPoints);
-        this.combatMessage = hero.isDead ? "Игра окончена." : `Раунд ${this.combatRound}: ход героя`;
-        this.syncCombatParameters("hero");
-        return !hero.isDead;
+        const actorPosition = this.combatantPositions.get(actorName);
+        return candidates.sort((left, right) => {
+            if (!actorPosition) return left.localeCompare(right);
+            const leftPosition = this.combatantPositions.get(left);
+            const rightPosition = this.combatantPositions.get(right);
+            const leftDistance = leftPosition ? originalCombatDistance(actorPosition, leftPosition) : Number.POSITIVE_INFINITY;
+            const rightDistance = rightPosition ? originalCombatDistance(actorPosition, rightPosition) : Number.POSITIVE_INFINITY;
+            return leftDistance - rightDistance;
+        })[0];
+    }
+
+    private aiFriendlyTargets(actorName: string): readonly string[] {
+        const actor = this.combatants.get(actorName);
+        if (!actor) return [];
+        return [...this.combatants]
+            .filter(([name, combatant]) => !combatant.isDead && this.persons.get(name) !== false)
+            .filter(([, combatant]) => this.factions.get(actor.factionId, combatant.factionId) !== "hostile")
+            .map(([name]) => name);
+    }
+
+    private aiMagicChoice(actorName: string, enemyTargetName: string): Readonly<{ magic: MagicDefinition; targetName: string }> | undefined {
+        const actor = this.combatants.get(actorName);
+        const template = this.combatProfileSources.get(actorName)?.template;
+        if (!actor || !template || template.spells.length === 0 || template.battleMagicUse <= 0) return undefined;
+        if (this.activeMagicEffects.some((effect) => effect.targetName === actorName && effect.specialId === "IDSPEC_SILENCE")) return undefined;
+        if (this.random() * 100 >= template.battleMagicUse) return undefined;
+
+        const actionPoints = this.remainingActionPoints.get(actorName) ?? 0;
+        const available = template.spells
+            .map((spell) => this.magicDefinitionsByName.get(spell.spellId.toLowerCase()))
+            .filter((magic): magic is MagicDefinition => magic !== undefined && magic.executable)
+            .filter((magic) => magicActionPointCost(magic) <= actionPoints && magicEnergyCost(magic) <= actor.mana);
+        if (available.length === 0) return undefined;
+
+        const healingTarget = this.aiFriendlyTargets(actorName)
+            .map((name) => ({ name, combatant: this.combatants.get(name)!, profile: this.combatProfiles.get(name)! }))
+            .filter(({ combatant, profile }) => profile && combatant.health < profile.maxHealth)
+            .sort((left, right) => left.combatant.health / left.profile.maxHealth - right.combatant.health / right.profile.maxHealth)[0];
+        if (healingTarget && healingTarget.combatant.health * 100 / healingTarget.profile.maxHealth <= template.lifeHealing) {
+            const healing = available.filter((magic) => magic.target === "ally" && magic.healing);
+            if (healing.length > 0) {
+                return { magic: healing[Math.floor(this.random() * healing.length)], targetName: healingTarget.name };
+            }
+        }
+
+        const offensive = available.filter((magic) => magic.target === "enemy");
+        const support = available.filter((magic) => magic.target === "ally" && !magic.healing)
+            .filter((magic) => !magic.specials.some((special) =>
+                this.activeMagicEffects.some((effect) => effect.targetName === actorName && effect.specialId === special.id)));
+        const candidates = [...offensive, ...support];
+        if (candidates.length === 0) return undefined;
+        const magic = candidates[Math.floor(this.random() * candidates.length)];
+        return { magic, targetName: magic.target === "enemy" ? enemyTargetName : actorName };
+    }
+
+    private moveAiCombatant(actorName: string, targetName: string, away: boolean): boolean {
+        const targetPosition = this.combatantPositions.get(targetName);
+        const remaining = this.remainingActionPoints.get(actorName) ?? 0;
+        if (!targetPosition || remaining <= 0) return false;
+        const moved = this.options.onCombatantMoveRequest?.(actorName, cellToWorld(targetPosition), away);
+        if (!moved) return false;
+        this.combatantPositions.set(actorName, worldToCell(moved));
+        this.remainingActionPoints.set(actorName, remaining - 1);
+        return true;
+    }
+
+    private advanceAiTurns(simulationTimeMs: number): void {
+        if (!this.combatActive || !this.currentCombatant || this.currentCombatant === "hero") return;
+        if (this.aiNextActionTimeMs === 0) {
+            this.aiNextActionTimeMs = simulationTimeMs + 350;
+            return;
+        }
+        if (simulationTimeMs < this.aiNextActionTimeMs) return;
+        const actorName = this.currentCombatant;
+        const actor = this.combatants.get(actorName);
+        const profile = this.combatProfiles.get(actorName);
+        const template = this.combatProfileSources.get(actorName)?.template;
+        if (!actor || actor.isDead || !profile) {
+            this.beginNextAiTurn();
+            return;
+        }
+        const targetName = this.combatTargetFor(actorName);
+        if (!targetName) {
+            this.beginNextAiTurn();
+            return;
+        }
+        this.aiCycleFoundHostileTarget = true;
+
+        const magicChoice = this.aiMagicChoice(actorName, targetName);
+        if (magicChoice && this.performCombatantMagic(actorName, magicChoice.magic, magicChoice.targetName)) {
+            if ((this.remainingActionPoints.get(actorName) ?? 0) <= 0) this.beginNextAiTurn();
+            else this.aiNextActionTimeMs = simulationTimeMs + 350;
+            return;
+        }
+
+        const healthPercent = actor.health * 100 / Math.max(1, profile.maxHealth);
+        if (template && template.lifeEscape > 0 && healthPercent <= template.lifeEscape) {
+            if (this.moveAiCombatant(actorName, targetName, true) && (this.remainingActionPoints.get(actorName) ?? 0) > 0) {
+                this.aiNextActionTimeMs = simulationTimeMs + 350;
+            } else this.beginNextAiTurn();
+            return;
+        }
+
+        const actorPosition = this.combatantPositions.get(actorName);
+        const targetPosition = this.combatantPositions.get(targetName);
+        if (actorPosition && targetPosition && originalCombatDistance(actorPosition, targetPosition) > profile.weapon.attackDistance) {
+            if (this.moveAiCombatant(actorName, targetName, false) && (this.remainingActionPoints.get(actorName) ?? 0) > 0) {
+                this.aiNextActionTimeMs = simulationTimeMs + 350;
+            } else this.beginNextAiTurn();
+            return;
+        }
+
+        const result = this.performCombatAttack(actorName, targetName);
+        const remaining = this.remainingActionPoints.get(actorName) ?? 0;
+        if (!result || remaining < profile.weapon.actionPointCost) this.beginNextAiTurn();
+        else this.aiNextActionTimeMs = simulationTimeMs + 350;
     }
 
     public invokeHost(name: string, arguments_: readonly SCRValue[]): SCRValue | undefined {
@@ -974,6 +1260,8 @@ export class GameStateRuntime {
         if (!this.combatActive) this.setCombatMode(true);
         if (this.currentCombatant !== "hero") return undefined;
         this.activeEnemies.add(targetName);
+        this.factions.set("hero", target.factionId, "hostile");
+        this.heroLastTarget = targetName;
         const result = this.performCombatAttack("hero", targetName);
         if (target.isDead) this.activeEnemies.delete(targetName);
         return result;
@@ -1376,14 +1664,19 @@ export class GameStateRuntime {
             case "rs_clearevent":
                 this.questFlags.set(`event:${stringArgument(arguments_, 0, name)}`, false);
                 return 1;
-            case "rs_addtoheropartyname":
-                this.questFlags.set(`party:${stringArgument(arguments_, 0, name)}`, true);
+            case "rs_addtoheropartyname": {
+                const member = stringArgument(arguments_, 0, name).toLowerCase();
+                this.questFlags.set(`party:${member}`, true);
+                const combatantName = this.resolveCombatantName(member);
+                const combatant = combatantName ? this.combatants.get(combatantName) : undefined;
+                if (combatant) this.factions.set("hero", combatant.factionId, "friendly");
                 return 1;
+            }
             case "rs_removefromheropartyname":
-                this.questFlags.set(`party:${stringArgument(arguments_, 0, name)}`, false);
+                this.questFlags.set(`party:${stringArgument(arguments_, 0, name).toLowerCase()}`, false);
                 return 1;
             case "rs_testherohaspartyname":
-                return this.questFlags.get(`party:${stringArgument(arguments_, 0, name)}`) === true ? 1 : 0;
+                return this.questFlags.get(`party:${stringArgument(arguments_, 0, name).toLowerCase()}`) === true ? 1 : 0;
             case "rs_setspecialperk": {
                 const perk = integerArgument(arguments_, 0, name);
                 if (perk < 0 || (this.options.addonMode && perk > 31)) {
@@ -1520,16 +1813,18 @@ export class GameStateRuntime {
 
         this.refreshHeroCombatProfile();
         if (heroAssets.sounds) this.personSounds.set("hero", heroAssets.sounds);
-        for (const person of levelData.sefData.persons) this.registerPersonCombatant(person, assets.get(person.name.toLowerCase()));
+        for (const person of levelData.levelPersons) {
+            this.registerPersonCombatant(person, assets.get(person.name.toLowerCase()), person.combatantId);
+        }
     }
 
-    private registerPersonCombatant(person: SEFPerson, personAssets?: PersonCombatAssets): void {
-        this.persons.set(person.name, true);
-        this.combatantPositions.set(person.name, { ...person.position });
-        if (personAssets?.sounds) this.personSounds.set(person.name.toLowerCase(), personAssets.sounds);
-        const normalizedName = person.name.toLowerCase();
-        if (person.scriptInventory) this.corpseInventorySources.set(normalizedName, person.scriptInventory);
-        if (personAssets?.resource?.containerAfterDie) this.lootableCorpses.add(normalizedName);
+    private registerPersonCombatant(person: SEFPerson, personAssets?: PersonCombatAssets, combatantId = person.name): void {
+        this.persons.set(combatantId, true);
+        this.combatantPositions.set(combatantId, { ...person.position });
+        if (personAssets?.sounds) this.personSounds.set(combatantId.toLowerCase(), personAssets.sounds);
+        const normalizedId = combatantId.toLowerCase();
+        if (person.scriptInventory) this.corpseInventorySources.set(normalizedId, person.scriptInventory);
+        if (personAssets?.resource?.containerAfterDie) this.lootableCorpses.add(normalizedId);
         const template = personAssets?.template;
         const parameters: Record<string, number> = template
             ? { ...template.attributes, ...template.skills }
@@ -1542,23 +1837,28 @@ export class GameStateRuntime {
             baseActionPoints: personAssets?.monster?.actionPoints,
             baseArmorClass: personAssets?.monster?.armorClass,
         };
-        this.combatItems.set(person.name, items);
-        this.combatProfileSources.set(person.name, {
+        this.combatItems.set(combatantId, items);
+        this.combatProfileSources.set(combatantId, {
             parameters,
             items,
             base,
+            technicalName: person.name,
+            literaryName: person.literaryName === undefined
+                ? person.literaryLabel
+                : this.levelData?.sdbData[person.literaryName] ?? person.literaryLabel,
             bestiaryName: (template?.resourceId ?? person.name).toLowerCase(),
+            template,
         });
-        const profile = this.createProfile(parameters, items, base, person.name);
-        this.combatProfiles.set(person.name, profile);
-        this.combatants.set(person.name, createCombatant({
-            id: person.name,
+        const profile = this.createProfile(parameters, items, base, combatantId);
+        this.combatProfiles.set(combatantId, profile);
+        this.combatants.set(combatantId, createCombatant({
+            id: combatantId,
             factionId: person.tribe ?? person.name,
             maxHealth: profile.maxHealth,
             maxMana: profile.maxEnergy,
         }));
-        for (const [name, value] of Object.entries(parameters)) this.setPersonParameter(person.name, name, value);
-        this.syncCombatParameters(person.name);
+        for (const [name, value] of Object.entries(parameters)) this.setPersonParameter(combatantId, name, value);
+        this.syncCombatParameters(combatantId);
     }
 
     private refreshHeroCombatProfile(): void {
@@ -1569,7 +1869,12 @@ export class GameStateRuntime {
             .map((name) => name && this.registeredItems.get(name.toLowerCase()))
             .filter((item): item is ShippedItem => item !== undefined);
         this.combatItems.set("hero", items);
-        this.combatProfileSources.set("hero", { parameters, items, base: {} });
+        this.combatProfileSources.set("hero", {
+            parameters,
+            items,
+            base: {},
+            literaryName: this.options.resolveHeroName?.() ?? "Герой",
+        });
         const profile = this.createProfile(parameters, items, {}, "hero");
         const existing = this.combatants.get("hero");
         const health = Math.min(profile.maxHealth, Math.max(1, existing?.health ?? parameters.health ?? profile.maxHealth));
@@ -1651,7 +1956,22 @@ export class GameStateRuntime {
         if (!reference) return [];
         const weapon = assets.weapons.find(({ technicalName }) =>
             technicalName.toLowerCase() === reference.itemId.toLowerCase());
-        return weapon ? [weapon] : [];
+        if (!weapon) throw new Error(`Unknown selected shipped item ${reference.itemId}`);
+        return [weapon];
+    }
+
+    public getCombatantLiteraryName(name: string): string {
+        return this.combatProfileSources.get(name)?.literaryName
+            ?? this.combatProfileSources.get(name)?.technicalName
+            ?? baseCombatantName(name);
+    }
+
+    private publishNativeCombatMessage(id: number, ...values: readonly (string | number)[]): void {
+        const template = this.options.resolveInterfaceString?.(id);
+        if (!template) return;
+        let valueIndex = 0;
+        const message = template.replace(/%[sd]/g, () => String(values[valueIndex++] ?? ""));
+        this.options.onMessage?.(message);
     }
 
     private performCombatAttack(attackerName: string, targetName: string): OriginalAttackResult | undefined {
@@ -1672,6 +1992,7 @@ export class GameStateRuntime {
             this.combatMessage = "Слишком большая дистанция для атаки";
             return undefined;
         }
+        if (targetPosition) this.options.onCombatantFace?.(attackerName, cellToWorld(targetPosition));
         if (!this.consumeAttackResource(attackerName, attackerProfile.weapon.itemId)) return undefined;
 
 
@@ -1692,13 +2013,26 @@ export class GameStateRuntime {
             const reactionSound = this.findPersonSound(targetName, result.killed ? ["die", "suffer"] : ["suffer"]);
             if (reactionSound) this.options.onPersonSound?.(reactionSound);
         }
-        this.combatMessage = heroKilled
-            ? "Игра окончена."
-            : result.critical
-                ? `Критический удар: ${result.appliedDamage}`
-                : result.hit
-                    ? `Урон: ${result.appliedDamage}`
-                    : result.criticalMiss ? "Критический промах" : "Промах";
+        this.combatMessage = "";
+        const attackerLiteraryName = this.getCombatantLiteraryName(attackerName);
+        const targetLiteraryName = this.getCombatantLiteraryName(targetName);
+        if (result.hit) {
+            if (result.critical) {
+                this.publishNativeCombatMessage(COMBAT_HISTORY_STRING_IDS.criticalHit, attackerLiteraryName);
+            }
+            this.publishNativeCombatMessage(
+                COMBAT_HISTORY_STRING_IDS.damage,
+                attackerLiteraryName,
+                targetLiteraryName,
+                result.appliedDamage,
+            );
+            if (result.killed) this.publishNativeCombatMessage(COMBAT_HISTORY_STRING_IDS.died, targetLiteraryName);
+        } else {
+            this.publishNativeCombatMessage(
+                result.criticalMiss ? COMBAT_HISTORY_STRING_IDS.criticalMiss : COMBAT_HISTORY_STRING_IDS.miss,
+                attackerLiteraryName,
+            );
+        }
         this.syncCombatParameters(attackerName);
         this.syncCombatParameters(targetName);
         return result;
@@ -1779,19 +2113,26 @@ export class GameStateRuntime {
         const magic = this.magicDefinitions.get(magicId);
         if (!magic?.executable) return undefined;
         if (this.getPersonParameter("Hero", magicSpellParameter(magicId)) === 0) return undefined;
-        if (this.activeMagicEffects.some((effect) => effect.targetName === "hero" && effect.specialId === "IDSPEC_SILENCE")) {
-            this.combatMessage = `${magic.literaryName}: герой не может колдовать`;
+        const primaryTargetName = magic.target === "ally" ? "hero" : this.resolveCombatantName(technicalName);
+        if (!primaryTargetName || (magic.target === "enemy" && primaryTargetName === "hero")) return undefined;
+        if (!this.combatActive && (!magic.realtime || magic.target === "enemy")) this.setCombatMode(true);
+        return this.performCombatantMagic("hero", magic, primaryTargetName);
+    }
+
+    private performCombatantMagic(casterName: string, magic: MagicDefinition, primaryTargetName: string): MagicCastResult | undefined {
+        const caster = this.combatants.get(casterName);
+        const casterProfile = this.combatProfiles.get(casterName);
+        const primaryTarget = this.combatants.get(primaryTargetName);
+        if (!caster || !casterProfile || !primaryTarget || caster.isDead || primaryTarget.isDead) return undefined;
+        if (this.activeMagicEffects.some((effect) => effect.targetName === casterName && effect.specialId === "IDSPEC_SILENCE")) {
+            this.combatMessage = `${magic.literaryName}: ${this.getCombatantLiteraryName(casterName)} не может колдовать`;
             return undefined;
         }
-        const primaryTargetName = magic.target === "ally" ? "hero" : this.resolveCombatantName(technicalName);
-        if (!primaryTargetName || (magic.target === "enemy" && primaryTargetName.toLowerCase() === "hero")) return undefined;
-        const caster = this.combatants.get("hero");
-        const primaryTarget = this.combatants.get(primaryTargetName);
-        if (!caster || !primaryTarget || caster.isDead || primaryTarget.isDead) return undefined;
+        if (this.combatActive && this.currentCombatant !== casterName) return undefined;
+        const targetRelation = this.factions.get(caster.factionId, primaryTarget.factionId);
+        if (magic.target === "enemy" ? targetRelation !== "hostile" : targetRelation === "hostile") return undefined;
 
-        if (!this.combatActive && (!magic.realtime || magic.target === "enemy")) this.setCombatMode(true);
-        if (this.combatActive && this.currentCombatant !== "hero") return undefined;
-        const actionPointsBefore = this.remainingActionPoints.get("hero") ?? this.combatProfiles.get("hero")?.actionPoints ?? 0;
+        const actionPointsBefore = this.remainingActionPoints.get(casterName) ?? casterProfile.actionPoints;
         const actionPointCost = this.combatActive ? magicActionPointCost(magic) : 0;
         const energyCost = magicEnergyCost(magic);
         if (actionPointsBefore < actionPointCost) {
@@ -1805,27 +2146,30 @@ export class GameStateRuntime {
 
         const energyBefore = caster.mana;
         caster.mana -= energyCost;
-        if (this.combatActive) this.remainingActionPoints.set("hero", actionPointsBefore - actionPointCost);
-        const targetNames = this.magicTargetNames(magic, primaryTargetName);
+        if (this.combatActive) this.remainingActionPoints.set(casterName, actionPointsBefore - actionPointCost);
+        const targetNames = this.magicTargetNames(casterName, magic, primaryTargetName);
         let primaryResisted = false;
         let damage = 0;
         let healing = 0;
         let energyChange = 0;
         let actionPointChange = 0;
         let effectsApplied = 0;
+        const casterLiteraryName = this.getCombatantLiteraryName(casterName);
+        this.combatMessage = "";
+        this.publishNativeCombatMessage(COMBAT_HISTORY_STRING_IDS.castMagic, casterLiteraryName, magic.literaryName);
 
         for (const targetName of targetNames) {
             const target = this.combatants.get(targetName);
             const targetProfile = this.combatProfiles.get(targetName);
             if (!target || !targetProfile || target.isDead) continue;
-            if (magic.target === "enemy") this.activeEnemies.add(targetName);
+            if (magic.target === "enemy" && casterName === "hero") this.activeEnemies.add(targetName);
             const damageBeforeTarget = damage;
             const immunity = magic.target === "enemy" ? Math.max(0, Math.min(100, targetProfile.magicImmunity[magic.school])) : 0;
             const resisted = immunity > 0 && this.random() * 100 < immunity;
             if (targetName === primaryTargetName) primaryResisted = resisted;
             if (!resisted) {
                 for (const special of magic.specials) {
-                    const applied = this.applyMagicSpecial(magic, special, targetName);
+                    const applied = this.applyMagicSpecial(casterName, magic, special, targetName);
                     damage += applied.damage;
                     healing += applied.healing;
                     energyChange += applied.energyChange;
@@ -1833,22 +2177,32 @@ export class GameStateRuntime {
                     effectsApplied += applied.effectsApplied;
                 }
             }
+            const targetDamage = damage - damageBeforeTarget;
+            const targetLiteraryName = this.getCombatantLiteraryName(targetName);
+            if (!resisted && targetDamage > 0) {
+                this.publishNativeCombatMessage(
+                    COMBAT_HISTORY_STRING_IDS.damage,
+                    casterLiteraryName,
+                    targetLiteraryName,
+                    targetDamage,
+                );
+            }
             target.isDead = target.health === 0;
-            if (target.isDead && targetName.toLowerCase() === "hero") this.options.onHeroDeath?.();
-            if (target.isDead && targetName.toLowerCase() !== "hero") this.recordBestiaryKill(targetName);
+            if (target.isDead && targetName === "hero") this.options.onHeroDeath?.();
+            if (target.isDead && casterName === "hero" && targetName !== "hero") this.recordBestiaryKill(targetName);
             this.options.onMagicEffect?.(magic.technicalName, targetName);
             if (damage > damageBeforeTarget) this.options.onCombatAnimation?.(targetName, target.isDead ? "die" : "suffer");
             if (target.isDead) this.activeEnemies.delete(targetName);
+            if (target.isDead) this.publishNativeCombatMessage(COMBAT_HISTORY_STRING_IDS.died, targetLiteraryName);
             this.syncCombatParameters(targetName);
         }
 
         if (magic.healing && magic.target === "enemy" && damage > 0) {
             const before = caster.health;
-            const heroMaximum = this.combatProfiles.get("hero")?.maxHealth ?? caster.maxHealth;
-            caster.health = Math.min(heroMaximum, caster.health + damage);
+            caster.health = Math.min(casterProfile.maxHealth, caster.health + damage);
             healing += caster.health - before;
         }
-        this.options.onCombatAnimation?.("hero", "attack");
+        this.options.onCombatAnimation?.(casterName, "attack");
         const result: MagicCastResult = {
             spellId: magic.id,
             technicalName: magic.technicalName,
@@ -1857,7 +2211,7 @@ export class GameStateRuntime {
             energyBefore,
             energyAfter: caster.mana,
             actionPointsBefore,
-            actionPointsAfter: this.remainingActionPoints.get("hero") ?? actionPointsBefore,
+            actionPointsAfter: this.remainingActionPoints.get(casterName) ?? actionPointsBefore,
             damage,
             healing,
             energyChange,
@@ -1865,12 +2219,7 @@ export class GameStateRuntime {
             killed: primaryTarget.isDead,
             effectsApplied,
         };
-        this.combatMessage = primaryResisted
-            ? `${magic.literaryName}: цель сопротивляется`
-            : damage > 0 ? `${magic.literaryName}: урон ${damage}`
-                : healing > 0 ? `${magic.literaryName}: восстановлено ${healing}`
-                    : `${magic.literaryName}: эффект применён`;
-        this.syncCombatParameters("hero");
+        this.syncCombatParameters(casterName);
         return result;
     }
 
@@ -1880,12 +2229,14 @@ export class GameStateRuntime {
         return profile.magicResistance[channel];
     }
 
-    private magicTargetNames(magic: MagicDefinition, primaryTargetName: string): readonly string[] {
+    private magicTargetNames(casterName: string, magic: MagicDefinition, primaryTargetName: string): readonly string[] {
         if (magic.target !== "enemy" || magic.radius <= 0) return [primaryTargetName];
+        const caster = this.combatants.get(casterName);
         const center = this.combatantPositions.get(primaryTargetName);
-        if (!center) return [primaryTargetName];
+        if (!caster || !center) return [primaryTargetName];
         return [...this.combatants]
-            .filter(([name, combatant]) => name !== "hero" && !combatant.isDead && this.persons.get(name) !== false)
+            .filter(([, combatant]) => !combatant.isDead && this.persons.get(combatant.id) !== false)
+            .filter(([, combatant]) => this.factions.get(caster.factionId, combatant.factionId) === "hostile")
             .filter(([name]) => {
                 const position = this.combatantPositions.get(name);
                 return position ? originalCombatDistance(position, center) <= magic.radius : name === primaryTargetName;
@@ -1893,7 +2244,7 @@ export class GameStateRuntime {
             .map(([name]) => name);
     }
 
-    private applyMagicSpecial(magic: MagicDefinition, special: MagicSpecialDefinition, targetName: string): {
+    private applyMagicSpecial(casterName: string, magic: MagicDefinition, special: MagicSpecialDefinition, targetName: string): {
         damage: number; healing: number; energyChange: number; actionPointChange: number; effectsApplied: number;
     } {
         const target = this.combatants.get(targetName)!;
@@ -1931,7 +2282,7 @@ export class GameStateRuntime {
         const summonResource = SUMMON_SPECIALS[special.id];
         if (summonResource) {
             const duration = Math.max(1, magicDuration(special));
-            this.summonMagicPerson(summonResource, magic.id, duration);
+            this.summonMagicPerson(summonResource, magic.id, duration, casterName);
             return { damage: 0, healing: 0, energyChange: 0, actionPointChange: 0, effectsApplied: 1 };
         }
         const duration = magicDuration(special);
@@ -2052,9 +2403,10 @@ export class GameStateRuntime {
         this.syncCombatParameters(targetName);
     }
 
-    private summonMagicPerson(resource: string, spellId: number, duration: number): void {
+    private summonMagicPerson(resource: string, spellId: number, duration: number, casterName = "hero"): void {
         const name = resource;
-        const position = worldToCell(this.lastPlayerPosition);
+        const position = { ...(this.combatantPositions.get(casterName) ?? worldToCell(this.lastPlayerPosition)) };
+        const factionId = this.combatants.get(casterName)?.factionId ?? "hero";
         const existing = this.dynamicPersons.find((person) => person.name === name);
         if (existing) {
             this.setPersonPresence(name, true);
@@ -2064,7 +2416,7 @@ export class GameStateRuntime {
                 position,
                 direction: "DOWN",
                 literaryLabel: resource,
-                tribe: "hero",
+                tribe: factionId,
                 routeType: "STAY",
             };
             this.dynamicPersons.push(person);
@@ -2134,7 +2486,8 @@ export class GameStateRuntime {
     }
 
     private findPersonSound(technicalName: string, candidates: readonly string[]): SoundShaderDefinition | undefined {
-        const shaders = this.personSounds.get(technicalName.toLowerCase())?.shaders;
+        const normalized = technicalName.toLowerCase();
+        const shaders = (this.personSounds.get(normalized) ?? this.personSounds.get(baseCombatantName(normalized)))?.shaders;
         if (!shaders) return undefined;
         for (const candidate of candidates) {
             const exact = shaders[candidate];
@@ -2161,8 +2514,38 @@ export class GameStateRuntime {
         this.setPersonParameter(owner, "action_points", this.remainingActionPoints.get(name) ?? profile.actionPoints);
         this.setPersonParameter(owner, "max_action_points", profile.actionPoints);
     }
+    public getCombatVisualState(name: string): Readonly<{ relation: FactionRelation; current: boolean; active: boolean }> {
+        const resolved = this.resolveCombatantName(name);
+        return {
+            relation: resolved ? this.getCombatantRelationToHero(resolved) : "friendly",
+            current: resolved !== undefined && resolved === this.currentCombatant,
+            active: this.combatActive && resolved !== undefined && this.isCombatantPresent(resolved),
+        };
+    }
+
+
+    public getCombatantRelationToHero(name: string): FactionRelation {
+        const resolved = this.resolveCombatantName(name);
+        const faction = resolved ? this.combatants.get(resolved)?.factionId : undefined;
+        return faction ? this.factions.get("hero", faction) : "friendly";
+    }
+
+    public isPartyMember(name: string): boolean {
+        const normalized = name.toLowerCase();
+        return this.questFlags.get(`party:${normalized}`) === true
+            || this.questFlags.get(`party:${baseCombatantName(normalized)}`) === true;
+    }
+
+    private portraitResourceFor(name: string): string | undefined {
+        const technicalName = this.combatProfileSources.get(name)?.technicalName ?? baseCombatantName(name);
+        const personResource = this.personResources.get(technicalName.toLowerCase());
+        return personResource
+            ? this.allyPortraitMappings.find((mapping) => mapping.personResource === personResource)?.portraitResource
+            : undefined;
+    }
 
     private combatSnapshot(): CombatRuntimeSnapshot {
+        const partyMembers = [...this.combatants.keys()].filter((name) => name !== "hero" && this.isPartyMember(name));
         return {
             active: this.combatActive,
             round: this.combatRound,
@@ -2180,14 +2563,21 @@ export class GameStateRuntime {
                     initiative: profile.initiative,
                     dead: combatant.isDead,
                     profile,
+                    faction: combatant.factionId,
+                    relationToHero: this.factions.get("hero", combatant.factionId),
+                    partyMember: this.isPartyMember(name),
+                    portraitResource: this.portraitResourceFor(name),
                 }];
             })),
+            partyMembers,
         };
     }
 
     private resolveCombatantName(name: string): string | undefined {
         const normalized = name.toLowerCase();
-        return [...this.combatants.keys()].find((candidate) => candidate.toLowerCase() === normalized);
+        const candidates = [...this.combatants.keys()];
+        return candidates.find((candidate) => candidate.toLowerCase() === normalized)
+            ?? candidates.find((candidate) => baseCombatantName(candidate.toLowerCase()) === normalized);
     }
 
     private resolveParameterOwner(name: string): string | undefined {
@@ -2213,13 +2603,19 @@ export class GameStateRuntime {
     }
 
     private setPersonPresence(name: string, present: boolean): number {
-        this.persons.set(name, present);
+        const normalized = name.toLowerCase();
+        const matches = [...this.persons.keys()].filter((candidate) => {
+            const candidateName = candidate.toLowerCase();
+            return candidateName === normalized || baseCombatantName(candidateName) === normalized;
+        });
+        const affected = matches.length > 0 ? matches : [name];
+        for (const combatantId of affected) this.persons.set(combatantId, present);
         if (this.currentDynamicPersonLevel) {
             const level = this.personStatesByLevel.get(this.currentDynamicPersonLevel) ?? new Map<string, boolean>();
-            level.set(name.toLowerCase(), present);
+            for (const combatantId of affected) level.set(combatantId.toLowerCase(), present);
             this.personStatesByLevel.set(this.currentDynamicPersonLevel, level);
         }
-        this.options.onPersonPresence?.(name, present);
+        this.options.onPersonPresence?.(baseCombatantName(name), present);
         return 1;
     }
 

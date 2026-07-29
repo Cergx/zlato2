@@ -1,4 +1,5 @@
 import { Paths } from "../constants/paths.ts";
+import itemMaskUrlsByIconUrl from "virtual:item-mask-manifest";
 import { SDBParser } from "./parsers/SDBParser.ts";
 import {
     createItemDefinitionFromAsset,
@@ -28,6 +29,7 @@ export interface ShippedItem {
     readonly definition: ItemDefinition;
     readonly iconUrl?: string;
     readonly puppetUrl?: string;
+    readonly iconMaskUrl?: string;
     readonly specialEffects: readonly ItemSpecialEffect[];
     readonly specialPriceContributions: readonly number[];
     readonly weaponProfile?: OriginalWeaponProfile;
@@ -62,6 +64,9 @@ const normalizeResourcePath = (path: string): string | undefined => {
     if (!normalized) return undefined;
     return normalized.startsWith("items/") ? `/assets/${normalized}` : `${Paths.ITEMS}/res/${normalized}`;
 };
+
+const itemMaskUrl = (iconUrl: string | undefined): string | undefined =>
+    iconUrl ? itemMaskUrlsByIconUrl[iconUrl.toLowerCase()] : undefined;
 
 const parseSpecialEffects = (properties: readonly number[], offset: number): readonly ItemSpecialEffect[] => {
     const count = properties[offset] ?? 0;
@@ -139,6 +144,10 @@ export class ShippedItemCatalog {
         );
     }
 
+    public has(technicalName: string): boolean {
+        return this.technicalToNumeric.has(technicalName.toLowerCase());
+    }
+
     public getLiteraryName(technicalName: string): string {
         const numericId = this.technicalToNumeric.get(technicalName.toLowerCase());
         return numericId === undefined ? technicalName : this.literaryNames[numericId] || technicalName;
@@ -162,6 +171,7 @@ export class ShippedItemCatalog {
                 min: Object.values(weaponProfile.damage).reduce((sum, range) => sum + range.min, 0),
                 max: Object.values(weaponProfile.damage).reduce((sum, range) => sum + range.max, 0),
             };
+            const iconUrl = normalizeResourcePath(parsed.iconPath);
             return {
                 technicalName,
                 literaryName: this.literaryNames[numericId] || technicalName,
@@ -170,7 +180,8 @@ export class ShippedItemCatalog {
                     id: technicalName,
                     weapon: physicalDamage ? { damage: physicalDamage, damageKind: "physical" } : undefined,
                 }),
-                iconUrl: normalizeResourcePath(parsed.iconPath),
+                iconUrl,
+                iconMaskUrl: itemMaskUrl(iconUrl),
                 puppetUrl: normalizeResourcePath(parsed.worldImagePath),
                 specialEffects,
                 specialPriceContributions: specialEffects.map((effect) => itemSpecialPriceContribution(effect, this.specialPriceTable)),

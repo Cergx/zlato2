@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import type { Game } from "../game/Game";
+import type { GameRuntimeSnapshot } from "../game/GameStateRuntime.ts";
 import type { HeroInventoryItemView } from "../game/ItemCatalogRuntime";
-import { SDBParser } from "../game/parsers/SDBParser.ts";
+import { SDBParser, type SDBData } from "../game/parsers/SDBParser.ts";
+import { HeroStatsBlock } from "./HeroStatsBlock.tsx";
+import { InventoryBlock } from "./InventoryBlock.tsx";
 import { OriginalGuiLayer } from "./OriginalGuiLayer.tsx";
 import { ItemContainer } from "./ItemContainer.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
@@ -9,6 +12,7 @@ import { StackQuantityDialog } from "./StackQuantityDialog.tsx";
 import styles from "./ItemTransferPanel.module.scss";
 import { MONEY_ITEM_ID, quoteTrade, type TradeOffer } from "../game/systems/Trade.ts";
 import { INVENTORY_CHARACTER_NAME_DRAW, LOOT_EXCHANGE_BACKGROUND_RECT } from "../constants/clientDll.ts";
+import type { PersonTradeCapabilities } from "../game/systems/Combat.ts";
 
 interface ItemTransferPanelProps {
     readonly game: Game;
@@ -27,24 +31,26 @@ const TRADE_SERVICE_STRING_IDS: Readonly<Record<number, number>> = {
     46: 100,
     47: 103,
 };
-let tradeServiceLabelsPromise: Promise<Readonly<Record<number, string>>> | null = null;
-const loadTradeServiceLabels = (): Promise<Readonly<Record<number, string>>> => {
-    tradeServiceLabelsPromise ??= fetch("/assets/sdb/user_interface.sdb").then(async (response) => {
+const TRADE_SERVICE_CAPABILITY_BY_OBJECT_ID = {
+    43: "repair",
+    45: "identification",
+    46: "charging",
+    47: "takeOffCurse",
+} as const satisfies Readonly<Record<number, keyof PersonTradeCapabilities>>;
+let tradeStringsPromise: Promise<SDBData> | null = null;
+const loadTradeStrings = (): Promise<SDBData> => {
+    tradeStringsPromise ??= fetch("/assets/sdb/user_interface.sdb").then(async (response) => {
         if (!response.ok) throw new Error(`Trade captions failed: HTTP ${response.status}`);
-        const strings = new SDBParser(await response.arrayBuffer()).getData();
-        return Object.fromEntries(Object.entries(TRADE_SERVICE_STRING_IDS).map(([objectId, stringId]) => {
-            const caption = strings[stringId];
-            if (!caption) throw new Error(`Trade caption ${stringId} is missing`);
-            return [Number(objectId), caption];
-        }));
+        return new SDBParser(await response.arrayBuffer()).getData();
     });
-    return tradeServiceLabelsPromise;
+    return tradeStringsPromise;
 };
 
 
 interface SelectedStack {
     readonly owner: string;
     readonly item: HeroInventoryItemView;
+    readonly quantity: number;
 }
 type QuantityAction = "loot" | "trade-add" | "trade-remove";
 
@@ -55,6 +61,7 @@ interface ItemStripProps {
     readonly columns: number;
     readonly offset?: number;
     readonly offer?: TradeOffer;
+    readonly subtractOffer?: boolean;
     readonly onActivate?: (stack: SelectedStack, amount: number) => void;
     readonly onDoubleActivate: (stack: SelectedStack, shiftKey: boolean) => void;
 }
@@ -86,19 +93,26 @@ const ItemButton = ({ stack, onActivate, onDoubleActivate }: ItemButtonProps) =>
         onDoubleActivate(stack, event.shiftKey);
     };
     return <button type="button" className={styles.itemButton}
-        aria-label={`${stack.item.literaryName}, ${stack.item.quantity}`}
+        aria-label={`${stack.item.literaryName}, ${stack.quantity}`}
         onClick={handleClick} onDoubleClick={handleDoubleClick}>
-        <ItemIcon item={stack.item} quantity={stack.item.quantity} />
+        <ItemIcon item={stack.item} quantity={stack.quantity} />
     </button>;
 };
 
-const ItemStrip = ({ items, owner, columns, offset = 0, offer, onActivate, onDoubleActivate }: ItemStripProps) => {
+const ItemStrip = ({ items, owner, columns, offset = 0, offer, subtractOffer = false, onActivate, onDoubleActivate }: ItemStripProps) => {
     const visible = items
-        .map((item) => offer ? { ...item, quantity: offer[item.stackKey] ?? 0 } : item)
-        .filter((item) => item.quantity > 0)
+        .map((item) => ({
+            item,
+            quantity: offer
+                ? subtractOffer
+                    ? Math.max(0, item.quantity - (offer[item.stackKey] ?? 0))
+                    : Math.min(item.quantity, offer[item.stackKey] ?? 0)
+                : item.quantity,
+        }))
+        .filter((stack) => stack.quantity > 0)
         .slice(offset, offset + columns);
     return <ItemContainer className={styles.itemStrip} columns={columns} rows={1} ariaLabel="Предметы">
-        {visible.map((item) => <ItemButton key={item.stackKey} stack={{ owner, item }}
+        {visible.map(({ item, quantity }) => <ItemButton key={item.stackKey} stack={{ owner, item, quantity }}
             onActivate={onActivate} onDoubleActivate={onDoubleActivate} />)}
     </ItemContainer>;
 };
@@ -121,8 +135,15 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
     const [heroOffset, setHeroOffset] = useState(0);
     const [otherOffset, setOtherOffset] = useState(0);
     const [error, setError] = useState("");
+    const [heroOfferOffset, setHeroOfferOffset] = useState(0);
+    const [otherOfferOffset, setOtherOfferOffset] = useState(0);
+    const [heroFilterId, setHeroFilterId] = useState<number | null>(9);
+    const [otherFilterId, setOtherFilterId] = useState<number | null>(30);
+    const [snapshot, setSnapshot] = useState<GameRuntimeSnapshot | null>(() => game.getRuntimeSnapshot());
+    const initialParameters = useRef<Readonly<Record<string, number>> | null>(null);
     const [heroName, setHeroName] = useState("");
-    const [tradeServiceLabels, setTradeServiceLabels] = useState<Readonly<Record<number, string>>>({});
+    const [interfaceStrings, setInterfaceStrings] = useState<SDBData>({});
+    const [tradeCapabilities, setTradeCapabilities] = useState<PersonTradeCapabilities | null>(null);
     const tradeMultiplier = game.getTradePriceMultiplier();
     const tradeQuote = useMemo(
         () => quoteTrade(heroOffer, otherOffer, heroItems, otherItems, tradeMultiplier),
@@ -132,33 +153,72 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
     const traderMoney = otherItems.find((item) => item.technicalName.toLowerCase() === MONEY_ITEM_ID.toLowerCase())?.quantity ?? 0;
     const tradeHeroItems = useMemo(() => heroItems.filter((item) => item.definition.itemClass !== "money"), [heroItems]);
     const tradeOtherItems = useMemo(() => otherItems.filter((item) => item.definition.itemClass !== "money"), [otherItems]);
+    const heroAvailableCount = tradeHeroItems.filter((item) => item.quantity - (heroOffer[item.stackKey] ?? 0) > 0).length;
+    const otherAvailableCount = tradeOtherItems.filter((item) => item.quantity - (otherOffer[item.stackKey] ?? 0) > 0).length;
+    const heroMaximumOffset = Math.max(0, heroAvailableCount - 12);
+    const otherMaximumOffset = Math.max(0, otherAvailableCount - 10);
+    const heroOfferCount = tradeHeroItems.filter((item) => (heroOffer[item.stackKey] ?? 0) > 0).length;
+    const otherOfferCount = tradeOtherItems.filter((item) => (otherOffer[item.stackKey] ?? 0) > 0).length;
+    const heroOfferMaximumOffset = Math.max(0, heroOfferCount - 10);
+    const otherOfferMaximumOffset = Math.max(0, otherOfferCount - 10);
 
     const refresh = useCallback(async () => {
         try {
-            const [hero, other, nextHeroName] = await Promise.all([
+            const [hero, other, nextHeroName, nextTradeCapabilities] = await Promise.all([
                 game.getInventoryItems("Hero"),
                 game.getInventoryItems(owner),
                 game.getHeroName(),
+                mode === "trade" ? game.getPersonTradeCapabilities(owner) : Promise.resolve(null),
             ]);
+            const nextSnapshot = game.getRuntimeSnapshot();
             setHeroItems(hero);
             setOtherItems(other);
             setHeroName(nextHeroName);
+            setTradeCapabilities(nextTradeCapabilities);
+            setSnapshot(nextSnapshot);
+            if (!initialParameters.current && nextSnapshot) {
+                const parameters = Object.entries(nextSnapshot.personParameters)
+                    .find(([name]) => name.toLowerCase() === "hero")?.[1] ?? {};
+                initialParameters.current = Object.fromEntries(
+                    Object.entries(parameters).map(([name, value]) => [name.toLowerCase(), value]),
+                );
+            }
             setError("");
         } catch (caught) {
             setError(caught instanceof Error ? caught.message : String(caught));
         }
-    }, [game, owner]);
+    }, [game, mode, owner]);
 
     useEffect(() => { void refresh(); }, [refresh]);
     useEffect(() => {
         if (mode !== "trade") return;
         let cancelled = false;
-        void loadTradeServiceLabels().then(
-            (labels) => { if (!cancelled) setTradeServiceLabels(labels); },
+        void loadTradeStrings().then(
+            (strings) => { if (!cancelled) setInterfaceStrings(strings); },
             (reason: unknown) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); },
         );
         return () => { cancelled = true; };
     }, [mode]);
+    const heroParameters = Object.entries(snapshot?.personParameters ?? {})
+        .find(([name]) => name.toLowerCase() === "hero")?.[1] ?? {};
+    const normalizedHeroParameters = Object.fromEntries(
+        Object.entries(heroParameters).map(([name, value]) => [name.toLowerCase(), value]),
+    );
+    const tradeServiceLabels = Object.fromEntries(Object.entries(TRADE_SERVICE_STRING_IDS).flatMap(([objectId, stringId]) => {
+        const caption = interfaceStrings[stringId];
+        return caption ? [[Number(objectId), caption] as const] : [];
+    }));
+    const adjustProgression = async (parameter: string, direction: -1 | 1): Promise<void> => {
+        const minimum = initialParameters.current?.[parameter] ?? normalizedHeroParameters[parameter] ?? 0;
+        if (game.adjustHeroProgression(parameter, "characteristic", direction, minimum)) await refresh();
+    };
+    useEffect(() => { setHeroOffset((current) => Math.min(current, heroMaximumOffset)); }, [heroMaximumOffset]);
+    useEffect(() => { setOtherOffset((current) => Math.min(current, otherMaximumOffset)); }, [otherMaximumOffset]);
+    useEffect(() => { setHeroOfferOffset((current) => Math.min(current, heroOfferMaximumOffset)); }, [heroOfferMaximumOffset]);
+    useEffect(() => { setOtherOfferOffset((current) => Math.min(current, otherOfferMaximumOffset)); }, [otherOfferMaximumOffset]);
+    const disabledTradeServiceIds = Object.entries(TRADE_SERVICE_CAPABILITY_BY_OBJECT_ID).flatMap(([objectId, capability]) =>
+        (tradeCapabilities?.[capability] ?? 0) > 0 ? [] : [Number(objectId)],
+    );
     useEffect(() => {
         const close = (event: KeyboardEvent) => {
             if (event.key !== "Escape") return;
@@ -172,7 +232,7 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
 
     const transfer = async (stack: SelectedStack, requested: number): Promise<void> => {
         const destination = stack.owner.toLowerCase() === "hero" ? owner : "Hero";
-        const amount = Math.max(1, Math.min(stack.item.quantity, requested));
+        const amount = Math.max(1, Math.min(stack.quantity, requested));
         if (!game.transferInventoryItem(stack.owner, destination, stack.item.stackKey, amount)) return;
         setSelected(null);
         await refresh();
@@ -204,7 +264,7 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
 
     const activateLootStack = (stack: SelectedStack, shiftKey: boolean): void => {
         if (shiftKey) openQuantityDialog(stack, "loot");
-        else void transfer(stack, stack.item.quantity);
+        else void transfer(stack, stack.quantity);
     };
 
     const selectTradeSource = (stack: SelectedStack, amount: number): void => {
@@ -228,7 +288,7 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
         setSelected(null);
     };
 
-    const stackDialog = selected && <StackQuantityDialog item={selected.item} maximum={selected.item.quantity}
+    const stackDialog = selected && <StackQuantityDialog item={selected.item} maximum={selected.quantity}
         onConfirm={applySelectedQuantity} onCancel={() => setSelected(null)} />;
 
     if (mode === "loot") {
@@ -270,33 +330,60 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
                 height: INVENTORY_CHARACTER_NAME_DRAW.boxHeight,
             }}>{heroName}</div>
             <OriginalGuiLayer className={styles.authoredControls} script="trade"
+                objectIds={[2, 7, 43, 44, 45, 46, 47, 84, 85, 98, 99, 101, 102, 103]}
                 labels={tradeServiceLabels}
                 values={tradeServiceLabels}
+                disabledObjectIds={disabledTradeServiceIds}
                 objectContents={{
                     101: <output className={styles.tradeValue} aria-label="Деньги торговца">{traderMoney}</output>,
                     102: <output className={styles.tradeValue} aria-label="Баланс сделки">{tradeQuote.balance}</output>,
                     103: <output className={styles.tradeValue} aria-label="Деньги героя">{heroMoney}</output>,
-                    1: <ItemStrip items={tradeHeroItems} owner="Hero" columns={12} offset={heroOffset}
-                        onActivate={selectTradeSource}
-                        onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-add") : selectTradeSource(stack, stack.item.quantity)} />,
-                    48: <ItemStrip items={tradeOtherItems} owner={owner} columns={10} offset={otherOffset}
-                        onActivate={selectTradeSource}
-                        onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-add") : selectTradeSource(stack, stack.item.quantity)} />,
-                    50: <ItemStrip items={tradeHeroItems} owner="Hero" columns={10} offer={heroOffer}
-                        onActivate={removeTradeOffer}
-                        onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-remove") : removeTradeOffer(stack, stack.item.quantity)} />,
-                    49: <ItemStrip items={tradeOtherItems} owner={owner} columns={10} offer={otherOffer}
-                        onActivate={removeTradeOffer}
-                        onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-remove") : removeTradeOffer(stack, stack.item.quantity)} />,
                 }}
                 onAction={(object) => {
-                    if (object.id === 3) setHeroOffset(Math.max(0, heroOffset - 12));
-                    if (object.id === 4) setHeroOffset(Math.min(Math.max(0, tradeHeroItems.length - 12), heroOffset + 12));
-                    if (object.id === 41) setOtherOffset(Math.max(0, otherOffset - 10));
-                    if (object.id === 42) setOtherOffset(Math.min(Math.max(0, tradeOtherItems.length - 10), otherOffset + 10));
                     if (object.id === 44) void exchange();
                     if (object.id === 7) onClose();
                 }} />
+
+            <HeroStatsBlock script="trade" parameters={normalizedHeroParameters} strings={interfaceStrings}
+                extraObjectIds={Array.from({ length: 8 }, (_, index) => 90 + index)}
+                onAdjust={(parameter, direction) => void adjustProgression(parameter, direction)} />
+
+            <InventoryBlock script="trade" containerObjectId={1} previousObjectId={3} nextObjectId={4}
+                dropObjectId={8} filterObjectIds={Array.from({ length: 7 }, (_, index) => 9 + index)}
+                activeFilterId={heroFilterId} canGoPrevious={heroOffset > 0}
+                canGoNext={heroOffset < heroMaximumOffset} canDrop={false}
+                onPrevious={() => setHeroOffset((current) => Math.max(0, current - 12))}
+                onNext={() => setHeroOffset((current) => Math.min(heroMaximumOffset, current + 12))}
+                onFilterChange={(objectId) => { setHeroFilterId(objectId); setHeroOffset(0); }}
+                content={<ItemStrip items={tradeHeroItems} owner="Hero" columns={12} offset={heroOffset}
+                    offer={heroOffer} subtractOffer onActivate={selectTradeSource}
+                    onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-add") : selectTradeSource(stack, stack.quantity)} />} />
+
+            <InventoryBlock script="trade" containerObjectId={48} previousObjectId={37} nextObjectId={38}
+                filterObjectIds={Array.from({ length: 7 }, (_, index) => 30 + index)} activeFilterId={otherFilterId}
+                canGoPrevious={otherOffset > 0} canGoNext={otherOffset < otherMaximumOffset}
+                onPrevious={() => setOtherOffset((current) => Math.max(0, current - 10))}
+                onNext={() => setOtherOffset((current) => Math.min(otherMaximumOffset, current + 10))}
+                onFilterChange={(objectId) => { setOtherFilterId(objectId); setOtherOffset(0); }}
+                content={<ItemStrip items={tradeOtherItems} owner={owner} columns={10} offset={otherOffset}
+                    offer={otherOffer} subtractOffer onActivate={selectTradeSource}
+                    onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-add") : selectTradeSource(stack, stack.quantity)} />} />
+
+            <InventoryBlock script="trade" containerObjectId={49} previousObjectId={39} nextObjectId={40}
+                canGoPrevious={otherOfferOffset > 0} canGoNext={otherOfferOffset < otherOfferMaximumOffset}
+                onPrevious={() => setOtherOfferOffset((current) => Math.max(0, current - 10))}
+                onNext={() => setOtherOfferOffset((current) => Math.min(otherOfferMaximumOffset, current + 10))}
+                content={<ItemStrip items={tradeOtherItems} owner={owner} columns={10} offer={otherOffer} offset={otherOfferOffset}
+                    onActivate={removeTradeOffer}
+                    onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-remove") : removeTradeOffer(stack, stack.quantity)} />} />
+
+            <InventoryBlock script="trade" containerObjectId={50} previousObjectId={41} nextObjectId={42}
+                canGoPrevious={heroOfferOffset > 0} canGoNext={heroOfferOffset < heroOfferMaximumOffset}
+                onPrevious={() => setHeroOfferOffset((current) => Math.max(0, current - 10))}
+                onNext={() => setHeroOfferOffset((current) => Math.min(heroOfferMaximumOffset, current + 10))}
+                content={<ItemStrip items={tradeHeroItems} owner="Hero" columns={10} offer={heroOffer} offset={heroOfferOffset}
+                    onActivate={removeTradeOffer}
+                    onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-remove") : removeTradeOffer(stack, stack.quantity)} />} />
             {stackDialog}
             {error && <output className={styles.error}>{error}</output>}
         </section>
