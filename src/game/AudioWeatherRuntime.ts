@@ -439,6 +439,10 @@ export class AudioWeatherRuntime {
     private phase: DayPhase = "day";
     private listenerWorldPosition: WorldPosition | undefined;
     private weatherSnapshot: WeatherSnapshot;
+    private weatherEnabled = true;
+    private dayNightEnabled = true;
+    private configuredWeather: LVLData["weather"] = { type: 0, intensity: 0 };
+    private configuredWeatherUrl: string | undefined;
 
     public constructor(options: AudioWeatherRuntimeOptions = {}) {
         this.createAudio = options.createAudio ?? defaultAudioFactory;
@@ -479,9 +483,9 @@ export class AudioWeatherRuntime {
         this.assertAlive();
         const plan = this.createPlan(level);
         const date = this.clock();
-        const phase: DayPhase = isDayAt(date) ? "day" : "night";
+        const phase: DayPhase = this.dayNightEnabled && !isDayAt(date) ? "night" : "day";
         const ambienceUrl = phase === "day" ? plan.dayAmbienceUrl : plan.nightAmbienceUrl;
-        const weatherSnapshot = this.makeWeatherSnapshot(plan.weather, date);
+        const weatherSnapshot = this.effectiveWeatherSnapshot(plan.weather, date, phase);
         const created: AudioTrack[] = [];
 
         try {
@@ -489,8 +493,9 @@ export class AudioWeatherRuntime {
             if (music) created.push(music);
             const ambience = ambienceUrl ? this.createTrack(ambienceUrl, "ambient", 1) : undefined;
             if (ambience) created.push(ambience);
-            const weatherAudio = plan.weatherUrl ? this.createTrack(plan.weatherUrl, "ambient", 1) : undefined;
-            if (weatherAudio) created.push(weatherAudio);
+            const weatherAudio = this.weatherEnabled && plan.weatherUrl
+                ? this.createTrack(plan.weatherUrl, "ambient", 1)
+                : undefined;
             const emitters = plan.emitters.map((emitter) => {
                 const track = this.createTrack(emitter.url, "ambient", emitter.volume, emitter);
                 created.push(track);
@@ -511,6 +516,8 @@ export class AudioWeatherRuntime {
             this.dayAmbienceUrl = plan.dayAmbienceUrl;
             this.nightAmbienceUrl = plan.nightAmbienceUrl;
             this.levelMusicUrl = plan.musicUrl;
+            this.configuredWeather = { ...plan.weather };
+            this.configuredWeatherUrl = plan.weatherUrl;
             this.combatActive = false;
             this.phase = phase;
             this.emitters.splice(0, this.emitters.length, ...plan.emitters);
@@ -575,7 +582,7 @@ export class AudioWeatherRuntime {
             this.listenerWorldPosition = { ...listenerWorldPosition };
         }
         const date = this.clock();
-        const phase: DayPhase = isDayAt(date) ? "day" : "night";
+        const phase: DayPhase = this.dayNightEnabled && !isDayAt(date) ? "night" : "day";
         if (phase !== this.phase) {
             const source = phase === "day" ? this.dayAmbienceUrl : this.nightAmbienceUrl;
             this.replaceAmbience(source);
@@ -584,6 +591,40 @@ export class AudioWeatherRuntime {
         }
         this.updateTrackVolumes();
         return this.getWeatherSnapshot();
+    }
+
+    public setEnvironmentEnabled(weatherEnabled: boolean, dayNightEnabled: boolean): void {
+        this.assertAlive();
+        if (typeof weatherEnabled !== "boolean" || typeof dayNightEnabled !== "boolean") {
+            throw new Error("Environment settings must be boolean values.");
+        }
+
+        const date = this.clock();
+        if (this.dayNightEnabled !== dayNightEnabled) {
+            this.dayNightEnabled = dayNightEnabled;
+            const phase: DayPhase = dayNightEnabled && !isDayAt(date) ? "night" : "day";
+            if (phase !== this.phase) {
+                this.replaceAmbience(phase === "day" ? this.dayAmbienceUrl : this.nightAmbienceUrl);
+                this.phase = phase;
+            }
+        }
+
+        if (this.weatherEnabled !== weatherEnabled) {
+            this.weatherEnabled = weatherEnabled;
+            const next = weatherEnabled && this.configuredWeatherUrl
+                ? this.createTrack(this.configuredWeatherUrl, "ambient", 1)
+                : undefined;
+            try {
+                if (next) this.startTrack(next);
+                this.transitionTrack(this.weatherAudio, next);
+                this.weatherAudio = next;
+            } catch (error) {
+                if (next) this.disposeTrack(next);
+                throw error;
+            }
+        }
+        this.weatherSnapshot = this.effectiveWeatherSnapshot(this.configuredWeather, date, this.phase);
+        this.updateTrackVolumes();
     }
 
     public setVolumes(volumes: Partial<AudioVolumeSettings>): void {
@@ -636,12 +677,15 @@ export class AudioWeatherRuntime {
         const weather = { type, intensity: type === 0 ? 0 : 1 };
         const kind = WEATHER_KINDS[type] ?? "unknown";
         const source = weather.intensity > 0 ? WEATHER_AUDIO[kind] : undefined;
-        const next = source ? this.createTrack(validateBrowserUrl(source), "ambient", 1) : undefined;
+        const resolvedSource = source ? validateBrowserUrl(source) : undefined;
+        const next = this.weatherEnabled && resolvedSource ? this.createTrack(resolvedSource, "ambient", 1) : undefined;
         try {
             if (next) this.startTrack(next);
             this.transitionTrack(this.weatherAudio, next);
             this.weatherAudio = next;
-            this.weatherSnapshot = this.makeWeatherSnapshot(weather, this.clock());
+            this.configuredWeather = weather;
+            this.configuredWeatherUrl = resolvedSource;
+            this.weatherSnapshot = this.effectiveWeatherSnapshot(weather, this.clock(), this.phase);
             return this.getWeatherSnapshot();
         } catch (error) {
             if (next) this.disposeTrack(next);
@@ -685,6 +729,8 @@ export class AudioWeatherRuntime {
         this.weatherAudio = undefined;
         this.dayAmbienceUrl = undefined;
         this.nightAmbienceUrl = undefined;
+        this.configuredWeather = { type: 0, intensity: 0 };
+        this.configuredWeatherUrl = undefined;
         this.emitters.splice(0, this.emitters.length);
         this.listenerWorldPosition = undefined;
     }
@@ -904,6 +950,13 @@ export class AudioWeatherRuntime {
             seed: Math.floor(random * 0x1_0000_0000),
             updatedAt: timestamp,
         };
+    }
+
+    private effectiveWeatherSnapshot(weather: LVLData["weather"], date: Date, phase: DayPhase): WeatherSnapshot {
+        const snapshot = this.makeWeatherSnapshot(weather, date);
+        return this.weatherEnabled
+            ? { ...snapshot, phase }
+            : { ...snapshot, active: false, strength: 0, phase };
     }
 
     private getClockTime(): number {

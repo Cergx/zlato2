@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NEW_GAME_START, type GameMode } from "../constants/levels";
-import { readGameSettings, type GameSettings } from "../game/GameSettingsRuntime";
+import { gameGamma, readGameSettings, type GameSettings } from "../game/GameSettingsRuntime";
 import { loadCSX } from "../game/Assets";
 import type { GameSaveData } from "../game/PersistenceRuntime";
 import type { HeroProfile } from "../game/HeroProfileRuntime.ts";
@@ -107,7 +107,7 @@ export const MainMenu = ({ onLaunch, skipSplash = false }: MainMenuProps) => {
     const openOptions = (): void => setPanel("options");
 
     return (
-        <main className={styles.viewport} style={{ filter: `brightness(${Number(options[2]) || 100}%)` }}>
+        <main className={styles.viewport} style={{ filter: `brightness(${gameGamma(options)})` }}>
             {panel === "main" && (
                 <>
                     <MainMenuAnimationLayer />

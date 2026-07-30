@@ -11,13 +11,13 @@ import type { WorldMapLocationState } from "../../game/WorldMapRuntime.ts";
 import InventoryPanel from "../InventoryPanel.tsx";
 import { RecoveredGameMenuPanel, type GameMenuPanelKind } from "./GameMenuPanel.tsx";
 import { PauseMenu } from "../PauseMenu.tsx";
-import { readGameSettings, type GameSettings } from "../../game/GameSettingsRuntime.ts";
+import { gameGamma, gameHintDelayMs, readGameSettings, type GameSettings } from "../../game/GameSettingsRuntime.ts";
 import { LoadingScreen } from "./LoadingScreen";
 import { ItemTransferPanel } from "../TradeLootPanel";
 import { RelaxPanel } from "./RelaxPanel.tsx";
 import type { HeroProfile } from "../../game/HeroProfileRuntime.ts";
 import { ProfessionSkillsPanel } from "./ProfessionSkillsPanel.tsx";
-import { GUI_TOOLTIP_DELAY_MS, type ProfessionSkillDefinition } from "../../constants/clientDll.ts";
+import { type ProfessionSkillDefinition } from "../../constants/clientDll.ts";
 import { GuiTooltip } from "../gui/GuiTooltip.tsx";
 import type { MapReferenceHint } from "../../game/Level.ts";
 
@@ -35,26 +35,27 @@ interface GameWindowProps {
 
 const MAP_REFERENCE_TOOLTIP_ANCHOR = Object.freeze({ left: 200, top: 699, width: 624, height: 17 });
 
-const MapReferenceTooltip = ({ hint }: { readonly hint: MapReferenceHint | null }) => {
+const MapReferenceTooltip = ({ hint, delayMs }: { readonly hint: MapReferenceHint | null; readonly delayMs: number }) => {
     const [visible, setVisible] = useState<MapReferenceHint | null>(null);
     useEffect(() => {
         setVisible(null);
         if (!hint) return;
-        const timer = window.setTimeout(() => setVisible(hint), GUI_TOOLTIP_DELAY_MS);
+        const timer = window.setTimeout(() => setVisible(hint), delayMs);
         return () => window.clearTimeout(timer);
-    }, [hint]);
+    }, [delayMs, hint]);
     return visible ? <GuiTooltip text={visible.text} anchor={MAP_REFERENCE_TOOLTIP_ANCHOR}
         fixedWidth={MAP_REFERENCE_TOOLTIP_ANCHOR.width} canvasWidth={1024} canvasHeight={768} /> : null;
 };
 
-const WeatherOverlay = ({ getGame, paused }: { getGame: () => Game | null; paused: boolean }) => {
+const WeatherOverlay = ({ getGame, paused, enabled }: { getGame: () => Game | null; paused: boolean; enabled: boolean }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
     useEffect(() => {
-        if (paused) return;
         const canvas = canvasRef.current;
         const context = canvas?.getContext("2d");
         if (!canvas || !context) return;
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        if (paused || !enabled) return;
         const startedAt = performance.now();
         const draw = (now: number) => {
             context.clearRect(0, 0, canvas.width, canvas.height);
@@ -100,7 +101,7 @@ const WeatherOverlay = ({ getGame, paused }: { getGame: () => Game | null; pause
         draw(performance.now());
         const interval = window.setInterval(() => draw(performance.now()), 33);
         return () => window.clearInterval(interval);
-    }, [getGame, paused]);
+    }, [enabled, getGame, paused]);
 
     return <canvas className={styles.weather} width={1024} height={768} ref={canvasRef} aria-hidden="true" />;
 };
@@ -244,10 +245,11 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
     }, [activePanel]);
 
     return (
-        <div className={`${styles.gameWindow} ${cursorClassName}`} style={{ filter: `brightness(${Number(settings[2]) || 100}%)` }}>
+        <div className={`${styles.gameWindow} ${cursorClassName}`} style={{ filter: `brightness(${gameGamma(settings)})` }}>
             <canvas width={1024} height={768} ref={canvasRef} />
-            <WeatherOverlay getGame={getGame} paused={paused} />
-            <MapReferenceTooltip hint={!activePanel && dialogueState?.status !== "active" && !worldMapLocations && !loading ? referenceHint : null} />
+            <WeatherOverlay getGame={getGame} paused={paused} enabled={settings[3] === true} />
+            <MapReferenceTooltip hint={!activePanel && dialogueState?.status !== "active" && !worldMapLocations && !loading ? referenceHint : null}
+                delayMs={gameHintDelayMs(settings)} />
 
             <GameHud
                 getGame={getGame}
@@ -268,7 +270,8 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
                 onRest={() => togglePanel("relax")}
                 skillsActive={activePanel === "skills"}
             />
-            {(activePanel === "inventory" || activePanel === "characteristics") && gameRef.current && <InventoryPanel game={gameRef.current} initialView={activePanel} onClose={closePanel} />}
+            {(activePanel === "inventory" || activePanel === "characteristics") && gameRef.current && <InventoryPanel game={gameRef.current}
+                initialView={activePanel} onClose={closePanel} tooltipDelayMs={gameHintDelayMs(settings)} />}
             {activePanel && activePanel !== "inventory" && activePanel !== "skills" && activePanel !== "characteristics" && activePanel !== "pause" && activePanel !== "relax" && activePanel !== "profession" && gameRef.current && <RecoveredGameMenuPanel game={gameRef.current} kind={activePanel} onClose={closePanel} />}
             {activePanel === "pause" && (
                 <PauseMenu getGame={getGame} onClose={closePanel} onMainMenu={onMainMenu} onApplySettings={setSettings} />
@@ -279,7 +282,8 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
             )}
 
             {transferPanel && gameRef.current && (
-                <ItemTransferPanel game={gameRef.current} {...transferPanel} onClose={() => setTransferPanel(null)} />
+                <ItemTransferPanel game={gameRef.current} {...transferPanel} selectStackQuantity={settings[17] === true}
+                    onClose={() => setTransferPanel(null)} />
             )}
             {dialogueState && (
                 <DialoguePanel

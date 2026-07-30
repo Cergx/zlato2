@@ -584,6 +584,7 @@ export class Level {
             music: Math.max(0, Math.min(1, Number(settings[6]) / 100)),
             ambient: this.soundVolume,
         });
+        this.audioWeather.setEnvironmentEnabled(settings[3] === true, settings[4] === true);
         this.mapRenderer?.applySettings(settings);
     }
 

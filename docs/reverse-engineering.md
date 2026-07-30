@@ -34,7 +34,7 @@ Validated: all 16 archives. The ten base archives reproduce the extracted tree e
 | `src/game/parsers/SEFParser.ts` | Parses textual CP1251 scenario metadata. |
 | `src/game/parsers/SDBParser.ts` | Parses string databases. |
 | `src/game/parsers/CSXParser.ts` | Decodes palette/RLE-like bitmap resources. |
-| `src/game/parsers/PADParser.ts` | Parses person animation atlas metadata from `.pad`. |
+| `src/game/parsers/PersonAnimationParser.ts` | Parses person animation atlas metadata from `.pad`. |
 | `src/game/parsers/HADParser.ts` | Parses the dedicated composited hero animation metadata from `.had`. |
 | `src/game/parsers/LAOParser.ts` | Parses animation metadata. |
 | `src/game/parsers/engineObjectParser.ts` | Generic parser for SEF-style named blocks. Repeated `name` blocks are retained as arrays. |
@@ -153,7 +153,7 @@ uint32 unknownHeaderWord
 repeat until recordEndOffset:
     uint32 actionFlag
     uint32 recordSize        // measured from this field
-    uint32 resourceId
+    uint32 frameDurationMs
     uint32 frameCount
     uint32 frameWidth
     uint32 frameHeight
@@ -161,12 +161,14 @@ repeat until recordEndOffset:
     uint32 anchorY
     float32 movementX
     float32 movementY
-    uint32 durationMs
+    uint32 unknownTimingValue
     byte[recordSize - 40] action-specific frame data
 byte[76] unknownTail
 ```
 
 The atlas width is exactly `frameCount * frameWidth`. Walking atlases use the server direction enum as rows `UP, UP_LEFT, LEFT, DOWN_LEFT, DOWN, DOWN_RIGHT, RIGHT, UP_RIGHT`, followed by a repeated `UP` row. Idle atlases store the first five rows through `DOWN`; the three right-facing directions mirror rows `3, 2, 1`. Verified action/file pairs are `0x1 = rt_stay`, `0x4 = tb_stay`, `0x10 = tb_go`, and `0x20 = rt_go`.
+
+`frameDurationMs` is the authored delay for one sprite frame, not a resource identifier. `Client.dll` copies it into the active person-animation slot at `0x1207dc15..0x1207dc3e`; the ticker at `0x1207ddad..0x1207ddc5` compares elapsed client time directly against that value before advancing one frame. The trailing `unknownTimingValue` is not used by this native frame-advance path. Shipped 12-frame NPC idle clips use `85..90` ms per frame and the base hero idle uses `88` ms per frame, yielding cycles around one second. The animation-speed option does not multiply PAD/HAD person timing.
 
 SEF technical person names are not sprite resources. The original client loads `scripts/persons/<technical-name>.scr`, reads its `res_name`, and then opens `persons/<res_name>/<res_name>.pad`. The web runtime now follows that exact chain and selects the complete real-time idle/walk pair when present, otherwise the turn-based pair; no archetype-name sprite substitution remains.
 
@@ -179,7 +181,7 @@ uint32 unknownHeaderWord
 repeat until recordEndOffset:
     uint32 actionFlag
     uint32 recordSize                 // measured from this field
-    uint32 resourceId
+    uint32 frameDurationMs
     uint32 frameCount
     uint32 compositeWidth
     uint32 compositeHeight
@@ -189,7 +191,7 @@ repeat until recordEndOffset:
     uint32 anchorY
     float32 movementX
     float32 movementY
-    uint32 durationMs
+    uint32 unknownTimingValue
     byte[recordSize - 48] frame composition data
 byte[76] unknownTail
 ```
@@ -497,7 +499,9 @@ Exact LVL trigger images are masks, not extra painted sprites. The Alt-highlight
 
 [INFERENCE] Exact trigger masks are also the strongest available evidence for pointer-hover feedback: they provide the native hit-test shape, while Alt is the global interactive-object reveal. Hovered transition highlights now use a steady blend rather than the Alt pulse; the live `L1_1_T14_GM` path produced `hoveredTargetKey=trigger:L1_1_T14_GM`, cursor `another_location.ani`, `48,335` changed mask-rectangle pixels, and one steady highlight draw with zero pulsing draws. A transition click no longer runs the generic six-cell trigger interaction and stops: it plans a route to the nearest reachable authored transition cell, allowing `ScenarioRuntime.setPlayerCell` to emit the transition on entry. The same live click produced a `110`-step route whose endpoint `(1992,1935)` belongs to `L1_1_T14_GM`; its projected center remains present in minimap transitions and the HUD loop draws `trigger_glow_map.bmp` at the native scaled rectangles.
 
-The browser combat runtime now uses the recovered Server formulas directly. Maximum health is `50 + 14 * constitution`; maximum energy is `10 + 2 * wisdom + 2 * intelligence`; action points are `20 + 1.5 * dexterity + 1.9375 * skill_athletic`; armor class is `0.6 * dexterity + 1.775 * skill_athletic`; initiative is `5 + 0.9 * dexterity + 0.15 * perception + 1.14 * skill_tactic`. With nonzero `skill_athletic`, the native health-regeneration interval is `clamp((6 - 0.1 * (constitution + skill_athletic)) * (skill_athletic > 9 ? 0.5 : 1), 1, 20)` minutes. With nonzero `skill_smith`, the energy interval is `clamp((6 - 0.1 * (effectiveWisdom + skill_smith)) * (skill_smith > 9 ? 0.5 : 1), 1, 20)`, where `effectiveWisdom = wisdom + (skill_speech > 4 ? 1 : 0)`. The Server advances each resource by `floor(elapsedMinutes / interval)` up to its maximum; the browser runtime preserves the fractional remainder and timed magic can alter either interval while active. Hit chance, critical chance/damage, critical miss, the separate crushing/hacking/pricking channels, item modifiers, weapon AP cost, monster `.inf` overrides, selected person weapons, and resistances are applied before health is synchronized back into scenario parameters. The HUD exposes rounds and remaining AP; the combat button or an attack click starts combat, Shift-click forces an attack, and Space ends the hero turn. Enemy turns use recovered initiative/AP profiles. Attacks drive the shipped PAD `attack`/`suffer`/`die` animations and the attack, miss, suffer, and death shaders referenced by PSSH/PRS resources.
+The earlier Server-stat interpretation was disproved by 57 original-game character-generator captures in `stats.json`. The clean-room profile now reproduces all 627 captured derived-stat values exactly. [INFERENCE] The simplest formulas consistent with every sample are: maximum health `round((49 * (floor(strength / 2) + constitution) - 1) / 16)`; maximum energy `round((49 * (wisdom + floor(intelligence / 2)) - 9) / 16)`; action points `round(4.5 + dexterity + perception / 2)`; base hit chance `round(49.8 + perception / 2 + luck / 5)` while unarmed; armor class `round(dexterity / 3)`; crushing, pricking, and hacking resistance `round(constitution / 3)`, `round(dexterity / 3)`, and `round(perception / 3)`; carry limit `(20 * strength + 20 * constitution + level) / 10`; and unarmed crushing damage `1..(8 + floor((strength + 3) / 10))`. Luck does not grant baseline critical chance: every captured build, including luck `24`, reports `0%` without critical-hit skill or equipment. Character creation starts all seven attributes at `5` with `300` points; raising a value from `n-1` to `n` costs `n`, so remaining points are `300 - Σ((attribute * (attribute + 1) - 30) / 2)`. This matches every captured point total, including one attribute at `24` leaving `15`, and all attributes at `10` leaving `20`. The already traced skill, equipment-special, regeneration, initiative, and combat-resolution additions remain layered on these corrected attribute bases.
+
+The shipped `sdb/perks/perks_lit.sdb` and `perks_desc.sdb` contain exactly `108` aligned records: four perks for each of the `27` authored skills. They are distinct from `sdb/diary/role_perks*.sdb`, whose `14` records are quest/biography roles such as `Почтальон` and `Ассасин`. The skill-perk groups follow the native skill families, and their four unlock ranks are `1`, `5`, `10`, and `15`: level one grants the skill's defining ability, while the descriptions and already recovered runtime branches place subsequent effects at `>4`, `>9`, and the maximum skill rank `15`. For `skill_critical_hit` / `Искусство боя`, IDs `96..99` are `Обученный воин`, `Ветеран`, `Контроль ситуации`, and `Смертельный удар`. Original-game observations at otherwise untouched starting attributes establish levels `1..4` as accuracy `54,55,55,56%` and critical chance `1,2,2,2%`; the matching clean-room additions are `[INFERENCE]` `2 * skill_critical_hit / 3` before final accuracy rounding and a critical-chance contribution capped at `2`. The level-five `Ветеран` description explicitly removes critical misses, so the profile sets critical-miss chance to zero from rank `5`. All `108` names and descriptions are now loaded from the shipped databases and appended to the corresponding skill hover tooltip as each threshold is reached.
 
 Physical attacks now also consume the already recovered fire/cold/poison bonus ranges and target elemental resistances. Each successful attack rolls the three elemental channels independently, subtracts the matching nonnegative resistance, and adds the result to the crushing/hacking/pricking total before health/death synchronization. A deterministic combat probe with zero physical damage produced `{fire:3,cold:0,poison:0}` and applied exactly `3`; the live level runtime then started combat against `L0.P741_priest1`, spent `10` AP (`40 -> 30`), applied damage, and published the round-one combat snapshot.
 

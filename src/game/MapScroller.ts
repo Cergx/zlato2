@@ -10,6 +10,7 @@ export class MapScroller {
     private readonly offset: WorldPosition = { x: 0, y: 0 };
     private scrollStep = 7;
     private readonly edgeThreshold = 10;
+    private static readonly BASE_SCROLL_STEP = 7;
     private mouseX = 0;
     private mouseY = 0;
     private pointerInside = false;
@@ -67,8 +68,9 @@ export class MapScroller {
         this.reset();
     }
 
-    public setScrollSpeed(value: number): void {
-        this.scrollStep = Math.max(1, Math.min(13, 1 + Math.round(value) * 2));
+    public setScrollSpeed(multiplier: number): void {
+        const normalized = Number.isFinite(multiplier) ? multiplier : 1;
+        this.scrollStep = Math.max(1, Math.round(MapScroller.BASE_SCROLL_STEP * normalized));
     }
 
     public reset() {

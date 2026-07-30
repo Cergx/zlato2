@@ -1,4 +1,4 @@
-import type { PADAnimation } from "./PADParser.ts";
+import type { PADAnimation } from "./PersonAnimationParser.ts";
 
 export interface HADAnimation extends PADAnimation {
     compositeWidth: number;
@@ -31,7 +31,7 @@ export class HADParser {
 
             this.animations.set(action, {
                 action,
-                resourceId: view.getUint32(recordOffset + 4, true),
+                frameDuration: view.getUint32(recordOffset + 4, true),
                 frameCount: view.getUint32(recordOffset + 8, true),
                 compositeWidth: view.getUint32(recordOffset + 12, true),
                 compositeHeight: view.getUint32(recordOffset + 16, true),
@@ -41,7 +41,6 @@ export class HADParser {
                 anchorY: view.getUint32(recordOffset + 32, true),
                 movementX: view.getFloat32(recordOffset + 36, true),
                 movementY: view.getFloat32(recordOffset + 40, true),
-                duration: view.getUint32(recordOffset + 44, true),
             });
             offset = recordOffset + recordSize;
         }

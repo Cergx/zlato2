@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { singleLevels, multiplayerLevels } from "../src/constants/levels.ts";
 import { Paths } from "../src/constants/paths.ts";
 import { LVLParser } from "../src/game/parsers/LVLParser.ts";
-import { PADParser } from "../src/game/parsers/PADParser.ts";
+import { PADParser } from "../src/game/parsers/PersonAnimationParser.ts";
 import { SEFParser } from "../src/game/parsers/SEFParser.ts";
 
 const publicRoot = resolve("public");

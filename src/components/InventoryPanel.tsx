@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import {
     INVENTORY_CHARACTER_NAME_DRAW,
     INVENTORY_NATIVE_TEXT_DRAWS,
-    GUI_TOOLTIP_DELAY_MS,
     INVENTORY_CHARACTERISTIC_UPGRADE_OBJECT_IDS,
     INVENTORY_DYNAMIC_HINT_STRING_IDS,
     INVENTORY_SKILL_UPGRADE_BINDINGS,
@@ -41,6 +40,7 @@ interface InventoryPanelProps {
     readonly game: Game;
     readonly onClose: () => void;
     readonly initialView?: "inventory" | "skills" | "characteristics";
+    readonly tooltipDelayMs: number;
 }
 
 const SLOT_LABELS: Readonly<Record<EquipmentSlot, string>> = {
@@ -141,7 +141,7 @@ const nativeRoleStateIds = (snapshot: GameRuntimeSnapshot | null): readonly numb
 
 
 
-export default function InventoryPanel({ game, onClose, initialView = "inventory" }: InventoryPanelProps) {
+export default function InventoryPanel({ game, onClose, tooltipDelayMs, initialView = "inventory" }: InventoryPanelProps) {
     const [inventory, setInventory] = useState<HeroInventoryView | null>(null);
     const [snapshot, setSnapshot] = useState<GameRuntimeSnapshot | null>(() => game.getRuntimeSnapshot());
     const [view, setView] = useState<"skills" | "characteristics">(
@@ -155,6 +155,8 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
     const [heroStateStrings, setHeroStateStrings] = useState<SDBData>({});
     const [interfaceStrings, setInterfaceStrings] = useState<SDBData>({});
     const [hintStrings, setHintStrings] = useState<SDBData>({});
+    const [perkNames, setPerkNames] = useState<SDBData>({});
+    const [perkDescriptions, setPerkDescriptions] = useState<SDBData>({});
     const [inventoryOffset, setInventoryOffset] = useState(0);
     const [activeFilterId, setActiveFilterId] = useState<number | null>(9);
 
@@ -193,12 +195,22 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
                 if (!response.ok) throw new Error(`Hero state strings failed: HTTP ${response.status}`);
                 return new SDBParser(await response.arrayBuffer()).getData();
             }),
+            fetch("/assets/sdb/perks/perks_lit.sdb").then(async (response) => {
+                if (!response.ok) throw new Error(`Perk names failed: HTTP ${response.status}`);
+                return new SDBParser(await response.arrayBuffer()).getData();
+            }),
+            fetch("/assets/sdb/perks/perks_desc.sdb").then(async (response) => {
+                if (!response.ok) throw new Error(`Perk descriptions failed: HTTP ${response.status}`);
+                return new SDBParser(await response.arrayBuffer()).getData();
+            }),
         ]).then(
-            ([loadedStrings, loadedHints, loadedHeroStates]) => {
+            ([loadedStrings, loadedHints, loadedHeroStates, loadedPerkNames, loadedPerkDescriptions]) => {
                 if (cancelled) return;
                 setInterfaceStrings(loadedStrings);
                 setHintStrings(loadedHints);
                 setHeroStateStrings(loadedHeroStates);
+                setPerkNames(loadedPerkNames);
+                setPerkDescriptions(loadedPerkDescriptions);
             },
             (caught: unknown) => { if (!cancelled) setError(caught instanceof Error ? caught.message : String(caught)); },
         );
@@ -212,13 +224,13 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
         return () => window.removeEventListener("keydown", onKeyDown);
     }, [onClose]);
 
-    const heroParameters = Object.entries(snapshot?.personParameters ?? {})
-        .find(([name]) => name.toLowerCase() === "hero")?.[1] ?? {};
+    const heroParameters = useMemo(() => Object.entries(snapshot?.personParameters ?? {})
+        .find(([name]) => name.toLowerCase() === "hero")?.[1] ?? {}, [snapshot?.personParameters]);
     const normalizedHeroParameters = Object.fromEntries(
         Object.entries(heroParameters).map(([name, value]) => [name.toLowerCase(), value]),
     );
-    const parameterValue = (name: string): number => Object.entries(heroParameters)
-        .find(([candidate]) => candidate.toLowerCase() === name)?.[1] ?? 0;
+    const parameterValue = useCallback((name: string): number => Object.entries(heroParameters)
+        .find(([candidate]) => candidate.toLowerCase() === name)?.[1] ?? 0, [heroParameters]);
     const minimumValue = (name: string): number => initialParameters.current?.[name] ?? parameterValue(name);
     const draggedItem = dragged && (inventory?.items.find((item) => item.stackKey === dragged.stackKey
         || (!dragged.stackKey && item.technicalName === dragged.technicalName))
@@ -388,7 +400,7 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
             if (text) result[INVENTORY_ROLE_STATE_OBJECT_IDS[slot]] = text;
         }
         return result;
-    }, [activeRoleStates, heroParameters, heroStateStrings, hintStrings]);
+    }, [activeRoleStates, heroStateStrings, hintStrings, parameterValue]);
 
 
     return <div className="inventory-panel" role="dialog" aria-label="Инвентарь и характеристики" data-item-tooltip-root>
@@ -402,7 +414,7 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
             values={authoredValues}
             labels={authoredLabels}
             tooltips={authoredTooltips}
-            tooltipDelayMs={GUI_TOOLTIP_DELAY_MS}
+            tooltipDelayMs={tooltipDelayMs}
             onAction={(object) => handleGuiAction(object.id)}
             objectContents={{
                 99: <ItemContainer columns={INVENTORY_QUICK_ACCESS_SLOTS} rows={1}
@@ -425,7 +437,7 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
             containerObjectId={1} previousObjectId={3} nextObjectId={4} dropObjectId={8}
             filterObjectIds={INVENTORY_FILTER_IDS} activeFilterId={activeFilterId}
             canGoPrevious={inventoryOffset > 0} canGoNext={inventoryOffset < maximumOffset}
-            canDrop={Boolean(draggedItem?.canDrop)} tooltips={authoredTooltips} tooltipDelayMs={GUI_TOOLTIP_DELAY_MS}
+            canDrop={Boolean(draggedItem?.canDrop)} tooltips={authoredTooltips} tooltipDelayMs={tooltipDelayMs}
             onPrevious={() => setInventoryOffset((current) => Math.max(0, current - INVENTORY_PAGE_SIZE))}
             onNext={() => setInventoryOffset((current) => Math.min(maximumOffset, current + INVENTORY_PAGE_SIZE))}
             onFilterChange={(objectId) => { setActiveFilterId(objectId); setInventoryOffset(0); }}
@@ -453,17 +465,19 @@ export default function InventoryPanel({ game, onClose, initialView = "inventory
 
         <HeroStatsBlock script={INVENTORY_NATIVE_RESOURCES.script}
             parameters={normalizedHeroParameters} strings={interfaceStrings}
-            extraObjectIds={STATS_EXTRA_GUI_IDS} tooltips={authoredTooltips} tooltipDelayMs={GUI_TOOLTIP_DELAY_MS}
+            extraObjectIds={STATS_EXTRA_GUI_IDS} tooltips={authoredTooltips} tooltipDelayMs={tooltipDelayMs}
             onAdjust={(parameter, direction) => void adjustProgression(parameter, "characteristic", direction)} />
 
         {view === "skills"
             ? <HeroSkillsBlock script={INVENTORY_NATIVE_RESOURCES.script}
                 parameters={normalizedHeroParameters} strings={interfaceStrings}
-                extraObjectIds={SKILLS_EXTRA_GUI_IDS} tooltips={authoredTooltips} tooltipDelayMs={GUI_TOOLTIP_DELAY_MS}
+                perkNames={perkNames} perkDescriptions={perkDescriptions}
+                derivedValues={{ initiative: profile?.initiative, effectiveIntelligence: profile?.effectiveAttributes.intelligence }}
+                extraObjectIds={SKILLS_EXTRA_GUI_IDS} tooltips={authoredTooltips} tooltipDelayMs={tooltipDelayMs}
                 onAdjust={(parameter, direction) => void adjustProgression(parameter, "skill", direction)} />
             : <HeroCharacteristicsBlock script={INVENTORY_NATIVE_RESOURCES.script}
                 strings={interfaceStrings} values={secondaryValues} roleStates={activeRoleStates}
-                tooltips={authoredTooltips} tooltipDelayMs={GUI_TOOLTIP_DELAY_MS} />}
+                tooltips={authoredTooltips} tooltipDelayMs={tooltipDelayMs} />}
 
         {INVENTORY_NATIVE_TEXT_DRAWS.common.slice(0, 2).map((draw) => (
             <span className="inventory-native-text" data-interface-string-id={draw.stringId}

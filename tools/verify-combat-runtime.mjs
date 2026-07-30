@@ -105,11 +105,22 @@ audio.setCombatMode(false);
 assert.equal(createdAudio.at(-1).src, explorationMusic);
 audio.destroy();
 const combatModeChanges = [];
+const baselineHeroParameters = Object.freeze({
+    strength: 5,
+    constitution: 5,
+    dexterity: 5,
+    perception: 5,
+    wisdom: 5,
+    intelligence: 5,
+    luck: 5,
+});
+
 const runtime = new GameStateRuntime({
     onLoadArea() {},
     onCombatModeChange: (active) => combatModeChanges.push(active),
     random: () => 0,
 });
+runtime.initializeHeroProfile(baselineHeroParameters, 0);
 await runtime.loadLevel({
     gameMode: "single",
     levelName: level,
@@ -185,6 +196,7 @@ assert.equal(runtime.invokeHost("rs_testherohaspartyname", [ally.name]), 0);
 
 const loadAiRuntime = async (person, options = {}) => {
     const aiRuntime = new GameStateRuntime({ onLoadArea() {}, random: () => 0, ...options });
+    aiRuntime.initializeHeroProfile(baselineHeroParameters, 0);
     await aiRuntime.loadLevel({
         gameMode: "single",
         levelName: level,
@@ -230,6 +242,8 @@ assert.equal(hitResult?.hit, true, "The deterministic history probe must land a 
 assert.ok(historyMessages.includes(`Вертас наносит Стражник ${hitResult.appliedDamage} пунктов повреждений`),
     "Physical hits must publish the native attacker/target/damage history template");
 
+historyRuntime.setCombatMode(false);
+historyRuntime.setCombatMode(true);
 attackRolls = [0.99, 0.99];
 const missResult = historyRuntime.attackPerson(historyTarget.name);
 assert.equal(missResult?.hit, false, "The deterministic history probe must miss");
@@ -331,6 +345,7 @@ detectingRuntime.update(0, 0, { x: moverWorld.x - 12, y: moverWorld.y - 9 }, 0);
 assert.equal(detectingRuntime.snapshot().combat.active, true, "Hostile actor must start combat inside radius_see");
 
 const duplicateRuntime = new GameStateRuntime({ onLoadArea() {}, random: () => 0 });
+duplicateRuntime.initializeHeroProfile(baselineHeroParameters, 0);
 const duplicatePeople = [
     { ...mover, position: { x: 20, y: 20 } },
     { ...mover, position: { x: 40, y: 40 } },

@@ -26,6 +26,7 @@ dist-ssr
 .tmp-*.png
 tmp-*.png
 /.tmp/
+/tmp/
 /tmp-ghidra/
 /tmp-ghidra-client/
 

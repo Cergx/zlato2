@@ -1,6 +1,6 @@
 import { Paths } from "../constants/paths.ts";
 import { loadCSX, loadOptionalCSX } from "./Assets.ts";
-import { PADAnimation, PADParser } from "./parsers/PADParser.ts";
+import { PADAnimation, PADParser } from "./parsers/PersonAnimationParser.ts";
 import type { SEFPerson } from "./parsers/SEFParser.ts";
 import { loadCompositedHeroSprites } from "./HeroWear.ts";
 import { cellToWorld, type WorldPosition } from "./WorldCoordinates.ts";

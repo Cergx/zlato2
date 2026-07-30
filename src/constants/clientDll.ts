@@ -734,6 +734,53 @@ export interface NativeRect {
     readonly height: number;
 }
 
+export interface OptionsMenuTextDraw {
+    readonly stringId: number;
+    readonly rect: NativeRect;
+}
+
+/**
+ * Client.dll options renderer 0x12084118..0x120844cf. The string tables at
+ * 0x120f8a58/0x120f8a70 and RECT table at 0x120f8a80 are paired by index.
+ */
+export const OPTIONS_MENU_TITLE_DRAW: OptionsMenuTextDraw = Object.freeze({
+    stringId: 145,
+    rect: Object.freeze({ left: 374, top: 37, width: 261, height: 42 }),
+});
+
+export const OPTIONS_MENU_HEADING_DRAWS: readonly OptionsMenuTextDraw[] = Object.freeze([
+    { stringId: 146, rect: Object.freeze({ left: 36, top: 142, width: 260, height: 32 }) },
+    { stringId: 147, rect: Object.freeze({ left: 379, top: 142, width: 261, height: 32 }) },
+    { stringId: 148, rect: Object.freeze({ left: 720, top: 142, width: 263, height: 32 }) },
+]);
+
+export const OPTIONS_MENU_LABEL_DRAWS: readonly OptionsMenuTextDraw[] = Object.freeze([
+    { stringId: 149, rect: Object.freeze({ left: 27, top: 227, width: 195, height: 23 }) },
+    { stringId: 150, rect: Object.freeze({ left: 27, top: 325, width: 203, height: 23 }) },
+    { stringId: 151, rect: Object.freeze({ left: 27, top: 389, width: 203, height: 25 }) },
+    { stringId: 152, rect: Object.freeze({ left: 369, top: 227, width: 196, height: 23 }) },
+    { stringId: 153, rect: Object.freeze({ left: 369, top: 324, width: 196, height: 24 }) },
+    { stringId: 154, rect: Object.freeze({ left: 369, top: 420, width: 196, height: 24 }) },
+    { stringId: 155, rect: Object.freeze({ left: 369, top: 517, width: 205, height: 24 }) },
+    { stringId: 156, rect: Object.freeze({ left: 710, top: 227, width: 196, height: 23 }) },
+    { stringId: 157, rect: Object.freeze({ left: 710, top: 324, width: 196, height: 24 }) },
+    { stringId: 158, rect: Object.freeze({ left: 710, top: 421, width: 196, height: 23 }) },
+    { stringId: 159, rect: Object.freeze({ left: 710, top: 517, width: 205, height: 24 }) },
+    { stringId: 160, rect: Object.freeze({ left: 710, top: 587, width: 205, height: 22 }) },
+    { stringId: 161, rect: Object.freeze({ left: 27, top: 456, width: 203, height: 25 }) },
+    { stringId: 294, rect: Object.freeze({ left: 710, top: 655, width: 205, height: 21 }) },
+]);
+
+export const OPTIONS_MENU_VALUE_RECTS: Readonly<Record<number, NativeRect>> = Object.freeze({
+    2: Object.freeze({ left: 276, top: 226, width: 40, height: 24 }),
+    5: Object.freeze({ left: 619, top: 226, width: 40, height: 24 }),
+    6: Object.freeze({ left: 619, top: 323, width: 40, height: 25 }),
+    7: Object.freeze({ left: 619, top: 420, width: 40, height: 25 }),
+    9: Object.freeze({ left: 960, top: 226, width: 40, height: 24 }),
+    10: Object.freeze({ left: 960, top: 323, width: 40, height: 25 }),
+    11: Object.freeze({ left: 960, top: 420, width: 40, height: 25 }),
+});
+
 /**
  * Client.dll HUD exchange composition. Resource-table entry 7
  * (`0x120f825c`, `engineres\\gpanel\\exchange`) is stored at HUD field

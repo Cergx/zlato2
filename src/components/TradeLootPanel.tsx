@@ -19,6 +19,7 @@ interface ItemTransferPanelProps {
     readonly owner: string;
     readonly title: string;
     readonly mode: "loot" | "trade";
+    readonly selectStackQuantity: boolean;
     readonly onClose: () => void;
 }
 
@@ -125,7 +126,7 @@ const changeOffer = (offer: TradeOffer, item: HeroInventoryItemView, delta: numb
     return next;
 };
 
-export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTransferPanelProps) => {
+export const ItemTransferPanel = ({ game, owner, title, mode, selectStackQuantity, onClose }: ItemTransferPanelProps) => {
     const [heroItems, setHeroItems] = useState<readonly HeroInventoryItemView[]>([]);
     const [otherItems, setOtherItems] = useState<readonly HeroInventoryItemView[]>([]);
     const [selected, setSelected] = useState<SelectedStack | null>(null);
@@ -263,7 +264,7 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
     };
 
     const activateLootStack = (stack: SelectedStack, shiftKey: boolean): void => {
-        if (shiftKey) openQuantityDialog(stack, "loot");
+        if (shiftKey || selectStackQuantity && stack.quantity > 1) openQuantityDialog(stack, "loot");
         else void transfer(stack, stack.quantity);
     };
 
@@ -357,7 +358,7 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
                 onFilterChange={(objectId) => { setHeroFilterId(objectId); setHeroOffset(0); }}
                 content={<ItemStrip items={tradeHeroItems} owner="Hero" columns={12} offset={heroOffset}
                     offer={heroOffer} subtractOffer onActivate={selectTradeSource}
-                    onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-add") : selectTradeSource(stack, stack.quantity)} />} />
+                    onDoubleActivate={(stack, shiftKey) => shiftKey || selectStackQuantity && stack.quantity > 1 ? openQuantityDialog(stack, "trade-add") : selectTradeSource(stack, stack.quantity)} />} />
 
             <InventoryBlock script="trade" containerObjectId={48} previousObjectId={37} nextObjectId={38}
                 filterObjectIds={Array.from({ length: 7 }, (_, index) => 30 + index)} activeFilterId={otherFilterId}
@@ -367,7 +368,7 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
                 onFilterChange={(objectId) => { setOtherFilterId(objectId); setOtherOffset(0); }}
                 content={<ItemStrip items={tradeOtherItems} owner={owner} columns={10} offset={otherOffset}
                     offer={otherOffer} subtractOffer onActivate={selectTradeSource}
-                    onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-add") : selectTradeSource(stack, stack.quantity)} />} />
+                    onDoubleActivate={(stack, shiftKey) => shiftKey || selectStackQuantity && stack.quantity > 1 ? openQuantityDialog(stack, "trade-add") : selectTradeSource(stack, stack.quantity)} />} />
 
             <InventoryBlock script="trade" containerObjectId={49} previousObjectId={39} nextObjectId={40}
                 canGoPrevious={otherOfferOffset > 0} canGoNext={otherOfferOffset < otherOfferMaximumOffset}
@@ -375,7 +376,7 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
                 onNext={() => setOtherOfferOffset((current) => Math.min(otherOfferMaximumOffset, current + 10))}
                 content={<ItemStrip items={tradeOtherItems} owner={owner} columns={10} offer={otherOffer} offset={otherOfferOffset}
                     onActivate={removeTradeOffer}
-                    onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-remove") : removeTradeOffer(stack, stack.quantity)} />} />
+                    onDoubleActivate={(stack, shiftKey) => shiftKey || selectStackQuantity && stack.quantity > 1 ? openQuantityDialog(stack, "trade-remove") : removeTradeOffer(stack, stack.quantity)} />} />
 
             <InventoryBlock script="trade" containerObjectId={50} previousObjectId={41} nextObjectId={42}
                 canGoPrevious={heroOfferOffset > 0} canGoNext={heroOfferOffset < heroOfferMaximumOffset}
@@ -383,7 +384,7 @@ export const ItemTransferPanel = ({ game, owner, title, mode, onClose }: ItemTra
                 onNext={() => setHeroOfferOffset((current) => Math.min(heroOfferMaximumOffset, current + 10))}
                 content={<ItemStrip items={tradeHeroItems} owner="Hero" columns={10} offer={heroOffer} offset={heroOfferOffset}
                     onActivate={removeTradeOffer}
-                    onDoubleActivate={(stack, shiftKey) => shiftKey ? openQuantityDialog(stack, "trade-remove") : removeTradeOffer(stack, stack.quantity)} />} />
+                    onDoubleActivate={(stack, shiftKey) => shiftKey || selectStackQuantity && stack.quantity > 1 ? openQuantityDialog(stack, "trade-remove") : removeTradeOffer(stack, stack.quantity)} />} />
             {stackDialog}
             {error && <output className={styles.error}>{error}</output>}
         </section>

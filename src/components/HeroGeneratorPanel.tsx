@@ -42,17 +42,29 @@ const topTitleStyle = (): CSSProperties => ({
 const loadGeneratorData = async (): Promise<{
     readonly profiles: readonly HeroProfile[];
     readonly strings: SDBData;
+    readonly hints: SDBData;
+    readonly perkNames: SDBData;
+    readonly perkDescriptions: SDBData;
 }> => {
-    const [profileResponse, stringsResponse] = await Promise.all([
+    const [profileResponse, stringsResponse, hintsResponse, perkNamesResponse, perkDescriptionsResponse] = await Promise.all([
         fetch("/assets/scripts/hero.scr"),
         fetch("/assets/sdb/user_interface.sdb"),
+        fetch("/assets/sdb/hints.sdb"),
+        fetch("/assets/sdb/perks/perks_lit.sdb"),
+        fetch("/assets/sdb/perks/perks_desc.sdb"),
     ]);
     if (!profileResponse.ok) throw new Error(`Не удалось загрузить профили героя: HTTP ${profileResponse.status}`);
     if (!stringsResponse.ok) throw new Error(`Не удалось загрузить подписи генератора: HTTP ${stringsResponse.status}`);
+    if (!hintsResponse.ok) throw new Error(`Не удалось загрузить подсказки навыков: HTTP ${hintsResponse.status}`);
+    if (!perkNamesResponse.ok) throw new Error(`Не удалось загрузить названия перков: HTTP ${perkNamesResponse.status}`);
+    if (!perkDescriptionsResponse.ok) throw new Error(`Не удалось загрузить описания перков: HTTP ${perkDescriptionsResponse.status}`);
     const profileSource = new TextDecoder("windows-1251").decode(await profileResponse.arrayBuffer());
     return {
         profiles: parseHeroProfiles(profileSource),
         strings: new SDBParser(await stringsResponse.arrayBuffer()).getData(),
+        hints: new SDBParser(await hintsResponse.arrayBuffer()).getData(),
+        perkNames: new SDBParser(await perkNamesResponse.arrayBuffer()).getData(),
+        perkDescriptions: new SDBParser(await perkDescriptionsResponse.arrayBuffer()).getData(),
     };
 };
 
@@ -73,6 +85,9 @@ const copyParameters = (profile: HeroProfile): Record<string, number> => {
 export const CharacterGeneratorPanel = ({ onClose, onCreate }: CharacterGeneratorPanelProps) => {
     const [profiles, setProfiles] = useState<readonly HeroProfile[]>([]);
     const [strings, setStrings] = useState<SDBData>({});
+    const [hints, setHints] = useState<SDBData>({});
+    const [perkNames, setPerkNames] = useState<SDBData>({});
+    const [perkDescriptions, setPerkDescriptions] = useState<SDBData>({});
     const [selectedProfile, setSelectedProfile] = useState(0);
     const [parameters, setParameters] = useState<Record<string, number>>({});
     const [heroName, setHeroName] = useState(DEFAULT_HERO_NAME);
@@ -80,11 +95,14 @@ export const CharacterGeneratorPanel = ({ onClose, onCreate }: CharacterGenerato
 
     useEffect(() => {
         let cancelled = false;
-        void loadGeneratorData().then(({ profiles: loadedProfiles, strings: loadedStrings }) => {
+        void loadGeneratorData().then((loaded) => {
             if (cancelled) return;
-            setProfiles(loadedProfiles);
-            setStrings(loadedStrings);
-            setParameters(copyParameters(loadedProfiles[0]));
+            setProfiles(loaded.profiles);
+            setStrings(loaded.strings);
+            setHints(loaded.hints);
+            setPerkNames(loaded.perkNames);
+            setPerkDescriptions(loaded.perkDescriptions);
+            setParameters(copyParameters(loaded.profiles[0]));
         }).catch((reason: unknown) => {
             if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
         });
@@ -147,6 +165,10 @@ export const CharacterGeneratorPanel = ({ onClose, onCreate }: CharacterGenerato
         onCreate({ name, parameters: { ...parameters }, experience: profiles[selectedProfile]?.experience ?? 0 });
     };
 
+    const skillTooltips = Object.fromEntries(HERO_SKILLS.flatMap((_, index) => {
+        const text = hints[99 + index];
+        return text ? [[100 + index, text] as const] : [];
+    }));
 
     return <section className={styles.panel} aria-label="Создание героя">
         <img className={styles.backdrop} src="/assets/engineres/hero_generator/main.bmp" alt="" draggable={false} />
@@ -167,6 +189,7 @@ export const CharacterGeneratorPanel = ({ onClose, onCreate }: CharacterGenerato
         <HeroStatsBlock script="hero_generator" parameters={parameters} strings={strings}
             onAdjust={changeCharacteristic} />
         <HeroSkillsBlock script="hero_generator" parameters={parameters} strings={strings}
+            perkNames={perkNames} perkDescriptions={perkDescriptions} tooltips={skillTooltips}
             onAdjust={changeSkill} />
 
         <div className={styles.nativeText} aria-hidden="true">

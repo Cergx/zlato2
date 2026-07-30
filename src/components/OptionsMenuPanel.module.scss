@@ -1,6 +1,6 @@
 .panel,
 .background,
-.labels {
+.text {
     position: absolute;
     inset: 0;
     width: 100%;
@@ -16,17 +16,20 @@
     object-fit: fill;
 }
 
-.labels {
+.text {
     z-index: 1;
     pointer-events: none;
 }
 
-.labels span {
+.title,
+.heading,
+.label,
+.value {
     position: absolute;
-    width: 29%;
+    display: grid;
+    place-items: center;
+    box-sizing: border-box;
     color: #322d25;
-    font: 14px/1 "GoldenLand", Georgia, serif;
+    line-height: 1;
     text-align: center;
-    text-shadow: 0 1px rgb(255 255 255 / 45%);
-    transform: translate(-50%, -50%);
 }

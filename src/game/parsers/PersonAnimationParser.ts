@@ -1,6 +1,6 @@
 export interface PADAnimation {
     action: number;
-    resourceId: number;
+    frameDuration: number;
     frameCount: number;
     frameWidth: number;
     frameHeight: number;
@@ -8,7 +8,6 @@ export interface PADAnimation {
     anchorY: number;
     movementX: number;
     movementY: number;
-    duration: number;
 }
 
 export class PADParser {
@@ -46,7 +45,7 @@ export class PADParser {
 
             this.animations.set(action, {
                 action,
-                resourceId: view.getUint32(recordOffset + 4, true),
+                frameDuration: view.getUint32(recordOffset + 4, true),
                 frameCount: view.getUint32(recordOffset + 8, true),
                 frameWidth: view.getUint32(recordOffset + 12, true),
                 frameHeight: view.getUint32(recordOffset + 16, true),
@@ -54,7 +53,6 @@ export class PADParser {
                 anchorY: view.getUint32(recordOffset + 24, true),
                 movementX: view.getFloat32(recordOffset + 28, true),
                 movementY: view.getFloat32(recordOffset + 32, true),
-                duration: view.getUint32(recordOffset + 36, true),
             });
 
             offset = recordOffset + recordSize;

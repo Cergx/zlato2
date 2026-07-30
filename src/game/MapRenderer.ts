@@ -2,7 +2,7 @@ import { MapScroller } from "./MapScroller";
 import type { LevelAnimation, LevelData, LevelDoor, LevelStatic, LevelTriggerMask } from "./Level.ts";
 import { loadHeroSprites, type LevelPerson } from "./PersonSprite.ts";
 import type { Direction, TilePosition } from "./parsers/SEFParser.ts";
-import type { PADAnimation } from "./parsers/PADParser.ts";
+import type { PADAnimation } from "./parsers/PersonAnimationParser.ts";
 import { WorldGrid } from "./WorldGrid.ts";
 import {
     cellToWorld,
@@ -21,6 +21,7 @@ import {
     findNativeOccluders,
     type NativeOccluderSelection,
 } from "./MaskCompositorRuntime.ts";
+import { gameAnimationSpeed, gameScrollSpeed } from "./GameSettingsRuntime.ts";
 
 interface PersonRuntime {
     person: LevelPerson;
@@ -67,6 +68,12 @@ interface PersonRenderFrame {
     readonly anchorY: number;
     readonly mirrored: boolean;
 }
+
+const personAnimationFrameDuration = (metadata: PADAnimation, playbackRate = 1): number =>
+    Math.max(1, metadata.frameDuration / playbackRate);
+
+const personAnimationClipDuration = (metadata: PADAnimation, playbackRate = 1): number =>
+    personAnimationFrameDuration(metadata, playbackRate) * metadata.frameCount;
 
 type PendingInteraction =
     | { readonly kind: "person"; readonly runtime: PersonRuntime; readonly attack: boolean }
@@ -336,16 +343,13 @@ export class MapRenderer {
     }
 
     public applySettings(settings: Readonly<Record<number, boolean | number | string>>): void {
-        const animation = Number(settings[9]);
-        this.animationSpeed = Number.isFinite(animation) ? Math.max(0.25, Math.min(2, 0.5 + animation / 100)) : 1;
-        const speed = Number(settings[9]);
-        const movementFactor = Number.isFinite(speed) ? Math.max(0.5, Math.min(1.5, 0.5 + speed / 100)) : 1;
-        this.walkingSpeed = 48 * movementFactor;
-        this.runningSpeed = 96 * movementFactor;
-        this.scroller.setScrollSpeed(Number(settings[10]) || 0);
+        this.animationSpeed = gameAnimationSpeed(settings);
+        this.walkingSpeed = 48;
+        this.runningSpeed = 96;
+        this.scroller.setScrollSpeed(gameScrollSpeed(settings));
         this.alwaysRun = settings[12] === true;
         this.showHints = settings[13] !== false;
-        this.transparentOccluders = settings[14] !== false;
+        this.transparentOccluders = settings[14] === true;
         if (!this.showHints) this.setHoveredTarget();
     }
 
@@ -1327,12 +1331,14 @@ export class MapRenderer {
                     : { metadata: sprites.die, image: sprites.dieImage };
             if (clip.metadata && clip.image) {
                 const elapsed = Math.max(0, now - combat.startedAt);
-                if (combat.kind === "die" || elapsed < clip.metadata.duration) {
+                const frameDuration = personAnimationFrameDuration(clip.metadata);
+                const clipDuration = personAnimationClipDuration(clip.metadata);
+                if (combat.kind === "die" || elapsed < clipDuration) {
                     metadata = clip.metadata;
                     image = clip.image;
-                    frame = combat.kind === "die" && elapsed >= clip.metadata.duration
+                    frame = combat.kind === "die" && elapsed >= clipDuration
                         ? clip.metadata.frameCount - 1
-                        : Math.min(clip.metadata.frameCount - 1, Math.floor(elapsed * clip.metadata.frameCount / Math.max(1, clip.metadata.duration)));
+                        : Math.min(clip.metadata.frameCount - 1, Math.floor(elapsed / frameDuration));
                 } else this.finishCombatAnimation(runtime);
             } else if (combat.kind !== "die") this.finishCombatAnimation(runtime);
         }
@@ -1344,8 +1350,8 @@ export class MapRenderer {
             metadata = useTurnWalk ? sprites.turnWalk! : useTurnIdle ? sprites.turnIdle! : hasRunAnimation ? sprites.run! : runtime.moving ? sprites.walk : sprites.idle;
             image = useTurnWalk ? sprites.turnWalkImage! : useTurnIdle ? sprites.turnIdleImage! : hasRunAnimation ? sprites.runImage! : runtime.moving ? sprites.walkImage : sprites.idleImage;
             const fallbackPlaybackRate = runtime.running && !hasRunAnimation ? 2 : 1;
-            const duration = Math.max(1, metadata.duration / fallbackPlaybackRate);
-            frame = Math.floor((now % duration) * metadata.frameCount / duration);
+            const frameDuration = personAnimationFrameDuration(metadata, fallbackPlaybackRate);
+            frame = Math.floor(now / frameDuration) % metadata.frameCount;
         }
 
         const directionFrame = runtime.moving

@@ -124,6 +124,7 @@ export interface OriginalCombatProfileInput {
 }
 
 export interface OriginalCombatProfile {
+    readonly effectiveAttributes: CharacterAttributes;
     readonly maxHealth: number;
     readonly maxEnergy: number;
     readonly hitChance: number;
@@ -164,9 +165,9 @@ export const UNARMED_WEAPON_PROFILE: OriginalWeaponProfile = {
     itemClass: "mace",
     actionPointCost: 10,
     attackDistance: 6,
-    baseHitChance: 90,
+    baseHitChance: 50,
     damage: {
-        crushing: { min: 1, max: 4 },
+        crushing: { min: 1, max: 8 },
         hacking: { min: 0, max: 0 },
         pricking: { min: 0, max: 0 },
     },
@@ -313,24 +314,66 @@ export function createCombatantFromPersonTemplate(
     return createCombatant({ ...options, id: template.scriptId, stats: inputStats });
 }
 
+export const originalScoutCaution = (skill: number): number => {
+    const level = Math.trunc(skill);
+    if (level < 5) return 0;
+    if (level >= 15) return 90;
+    return 5 * level;
+};
+
+export const originalTalkativeness = (skill: number, effectiveIntelligence: number): number => {
+    const level = Math.trunc(skill);
+    if (level <= 0) return 0;
+    if (level >= 15) return 100;
+    return 10 + 4 * level + effectiveIntelligence;
+};
+
+export const originalInitiative = (
+    attributes: Readonly<Pick<CharacterAttributes, "strength" | "constitution" | "dexterity" | "perception" | "intelligence" | "wisdom" | "luck">>,
+    criticalSkill: number,
+): number => {
+    const physical = Math.floor((attributes.strength + attributes.constitution + attributes.dexterity + attributes.perception) / 4);
+    const mental = Math.floor((attributes.intelligence + attributes.wisdom + attributes.luck) / 3);
+    return Math.trunc((physical + 0.9 * mental) * (criticalSkill >= 10 ? 2 : 1));
+};
+
 /** AGE's shipped character formulas, recovered from Server.dll's stat accessors. */
 export function createOriginalCombatProfile(input: OriginalCombatProfileInput): OriginalCombatProfile {
     const parameter = (name: string): number => input.parameters[name.toLowerCase()] ?? 0;
     const modifier = (name: string): number => input.modifiers?.[name] ?? 0;
-    const dexterity = parameter("dexterity");
-    const perception = parameter("perception");
-    const constitution = parameter("constitution");
-    const intelligence = parameter("intelligence");
-    const wisdom = parameter("wisdom");
-    const luck = parameter("luck");
-    const athletics = parameter("skill_athletic");
-    const tactic = parameter("skill_tactic");
-    const criticalSkill = parameter("skill_critical_hit");
-    const magicUse = parameter("skill_magicuse");
-    const speech = parameter("skill_speech");
-    const smith = parameter("skill_smith");
-    const weapon = input.weapon ?? UNARMED_WEAPON_PROFILE;
-    const weaponSkill = parameter(weaponSkillParameter(weapon.itemId));
+    const speech = Math.trunc(parameter("skill_speech"));
+    const effectiveAttribute = (name: string): number => {
+        const perkBonus = name === "wisdom" && speech >= 5 ? 1 : name === "intelligence" && speech >= 10 ? 2 : 0;
+        return Math.max(1, parameter(name) + perkBonus);
+    };
+    const strength = effectiveAttribute("strength");
+    const constitution = effectiveAttribute("constitution");
+    const dexterity = effectiveAttribute("dexterity");
+    const perception = effectiveAttribute("perception");
+    const intelligence = effectiveAttribute("intelligence");
+    const wisdom = effectiveAttribute("wisdom");
+    const luck = effectiveAttribute("luck");
+    const athletics = Math.trunc(parameter("skill_athletic"));
+    const tactic = Math.trunc(parameter("skill_tactic"));
+    const criticalSkill = Math.trunc(parameter("skill_critical_hit"));
+    const magicUse = Math.trunc(parameter("skill_magicuse"));
+    const smith = Math.trunc(parameter("skill_smith"));
+    const level = originalLevelForExperience(parameter("experience"));
+    const sourceWeapon = input.weapon ?? UNARMED_WEAPON_PROFILE;
+    const unarmed = sourceWeapon.itemId === UNARMED_WEAPON_PROFILE.itemId;
+    const weapon = unarmed
+        ? {
+            ...sourceWeapon,
+            damage: {
+                ...sourceWeapon.damage,
+                crushing: {
+                    ...sourceWeapon.damage.crushing,
+                    max: sourceWeapon.damage.crushing.max + Math.floor((strength + 3) / 10),
+                },
+            },
+        }
+        : sourceWeapon;
+    const weaponSkill = Math.trunc(parameter(weaponSkillParameter(weapon.itemId)));
     const magicResistance = (school: string, modifierName: string): number => nonNegativeStat(
         wisdom + parameter(`skill_${school}`) + magicUse + modifier(modifierName),
     );
@@ -347,32 +390,52 @@ export function createOriginalCombatProfile(input: OriginalCombatProfileInput): 
         + (parameter("skill_elemmag") > 4 ? 10 : 0)
         + (parameter("skill_healing") > 4 ? 10 : 0),
     );
-    const level = originalLevelForExperience(parameter("experience"));
-    const maxWeightBase = 20 * parameter("strength") + 20 * constitution + level + modifier("maxWeight");
-
+    const maxWeightDeci = nativeRound((20 * strength + 20 * constitution + level + modifier("maxWeight"))
+        * (athletics >= 5 ? 1.5 : 1));
     const healthRegenerationTime = athletics === 0 ? 0 : Math.max(1, Math.min(20,
-        (6 - 0.1 * (constitution + athletics)) * (athletics > 9 ? 0.5 : 1) + modifier("healthRegenerationTime"),
+        (6 - 0.1 * (constitution + athletics)) * (athletics >= 10 ? 0.5 : 1) + modifier("healthRegenerationTime"),
     ));
-    const effectiveWisdom = wisdom + (speech > 4 ? 1 : 0);
     const energyRegenerationTime = smith === 0 ? 0 : Math.max(1, Math.min(20,
-        (6 - 0.1 * (effectiveWisdom + smith)) * (smith > 9 ? 0.5 : 1) + modifier("energyRegenerationTime"),
+        (6 - 0.1 * (wisdom + smith)) * (smith >= 10 ? 0.5 : 1) + modifier("energyRegenerationTime"),
     ));
+    const nativeUnarmedHitChance = 50 + 0.334 * (2 * criticalSkill + 1.5 * dexterity + Math.floor(luck / 2))
+        + (parameter("skill_hand") >= 10 ? 20 : 0);
+    const hitChance = input.baseHitChance ?? (unarmed
+        ? nativeUnarmedHitChance
+        : weapon.baseHitChance - 0.2 + perception / 2 + luck / 5 + 5 * weaponSkill + 2 * criticalSkill / 3);
+    const initiativeBase = originalInitiative({ strength, constitution, dexterity, perception, intelligence, wisdom, luck }, criticalSkill);
     return {
-        maxHealth: positiveStat((input.baseHealth ?? 50 + 14 * constitution) + modifier("maxHealth")),
-        maxEnergy: nonNegativeStat((input.baseEnergy ?? 10 + 2 * wisdom + 2 * intelligence) + modifier("maxEnergy")),
-        hitChance: boundedStat((input.baseHitChance ?? weapon.baseHitChance + 1.5 * perception + 5 * weaponSkill) + modifier("hitChance"), 0, 999),
-        actionPoints: positiveStat((input.baseActionPoints ?? 20 + 1.5 * dexterity + 1.9375 * athletics) + modifier("actionPoints")),
-        armorClass: nonNegativeStat((input.baseArmorClass ?? 0.6 * dexterity + 1.775 * athletics) + modifier("armorClass")),
-        initiative: nonNegativeStat(5 + 0.9 * dexterity + 0.15 * perception + 1.14 * tactic + modifier("initiative")),
+        effectiveAttributes: { strength, constitution, dexterity, perception, intelligence, wisdom, luck },
+        maxHealth: input.baseHealth === undefined
+            ? clampStat(nativeRound(3 * (Math.floor(strength / 2) + constitution) * (1 + 0.02 * level)
+                + modifier("maxHealth")), 1, 999)
+            : positiveStat(input.baseHealth + modifier("maxHealth")),
+        maxEnergy: input.baseEnergy === undefined
+            ? clampStat(nativeRound(3 * (Math.floor(intelligence / 2) + wisdom) * (1 + 0.01 * level)
+                + modifier("maxEnergy")), 0, 999)
+            : nonNegativeStat(input.baseEnergy + modifier("maxEnergy")),
+        hitChance: clampStat(nativeRound(hitChance + modifier("hitChance")), 0, unarmed ? 90 : 999),
+        actionPoints: input.baseActionPoints === undefined
+            ? clampStat(nativeRound(5 + perception + Math.floor(dexterity / 2) + 2 * tactic / 3
+                + (athletics >= 15 ? 5 : 0) + modifier("actionPoints")), 5, 60)
+            : positiveStat(input.baseActionPoints + modifier("actionPoints")),
+        armorClass: input.baseArmorClass === undefined
+            ? clampStat(nativeRound(0.334 * (perception + athletics) + modifier("armorClass")), 0, 50)
+            : nonNegativeStat(input.baseArmorClass + modifier("armorClass")),
+        initiative: Math.max(0, Math.trunc(initiativeBase + modifier("initiative"))),
         healthRegenerationTime,
         energyRegenerationTime,
-        criticalChance: boundedStat(3 * luck + 3 * criticalSkill + modifier("criticalChance"), 0, 100),
-        criticalDamage: nonNegativeStat(15 + 0.334 * parameter("strength") + 1.5 * criticalSkill + modifier("criticalDamage")),
-        criticalMissChance: boundedStat((10 - 0.167 * dexterity - 0.334 * weaponSkill) * 0.5 + modifier("criticalMissChance"), 0, 10),
+        criticalChance: criticalSkill === 0 ? 0 : clampStat(nativeRound(
+            0.5 * (0.667 * criticalSkill + 0.334 * luck) + modifier("criticalChance"),
+        ), 0, 10),
+        criticalDamage: nonNegativeStat(15 + 0.334 * strength + 1.5 * criticalSkill + modifier("criticalDamage")),
+        criticalMissChance: criticalSkill >= 5 ? 0 : clampStat(nativeRound(
+            0.5 * (10 - 0.334 * criticalSkill - 0.167 * luck) + modifier("criticalMissChance"),
+        ), 0, 10),
         damageResistance: {
-            crushing: modifier("crushingResistance"),
-            hacking: modifier("hackingResistance"),
-            pricking: modifier("prickingResistance"),
+            crushing: clampStat(nativeRound(athletics + 0.334 * constitution + modifier("crushingResistance")), 0, 90),
+            hacking: clampStat(nativeRound(athletics + 0.334 * perception + modifier("hackingResistance")), 0, 90),
+            pricking: clampStat(nativeRound(athletics + 0.334 * dexterity + modifier("prickingResistance")), 0, 90),
         },
         elementalDamage: {
             fire: elementalDamage("fireDamage", "skill_godsmag"),
@@ -400,7 +463,7 @@ export function createOriginalCombatProfile(input: OriginalCombatProfileInput): 
             light: magicImmunity("lghtmag", "lightMagicImmunity"),
             dark: magicImmunity("darkmag", "darkMagicImmunity"),
         },
-        maxWeight: nonNegativeStat(maxWeightBase * (athletics > 4 ? 1.5 : 1)),
+        maxWeight: Math.max(0.1, Math.min(999.9, maxWeightDeci / 10)),
         weapon,
     };
 }
@@ -689,6 +752,9 @@ function createCombatStats(input: CombatStatsInput | undefined): CombatStats {
     }
     return stats;
 }
+
+const nativeRound = (value: number): number => Math.trunc(value + (value > 0 ? 0.5 : -0.5));
+const clampStat = (value: number, minimum: number, maximum: number): number => Math.max(minimum, Math.min(maximum, value));
 
 const ORIGINAL_DAMAGE_KINDS: readonly OriginalDamageKind[] = ["crushing", "hacking", "pricking"];
 const ORIGINAL_ELEMENTAL_DAMAGE_KINDS: readonly OriginalElementalDamageKind[] = ["fire", "cold", "poison"];

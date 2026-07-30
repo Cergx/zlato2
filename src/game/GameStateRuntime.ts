@@ -1902,7 +1902,7 @@ export class GameStateRuntime {
         const modifiers: Record<string, number> = {};
         const add = (name: string, amount: number): void => { modifiers[name] = (modifiers[name] ?? 0) + amount; };
         const attributeBySpecial: Readonly<Record<number, string>> = {
-            6: "strength", 7: "constitution", 8: "perception", 9: "dexterity", 10: "intelligence", 11: "wisdom", 12: "luck",
+            6: "strength", 7: "constitution", 8: "dexterity", 9: "perception", 10: "intelligence", 11: "wisdom", 12: "luck",
         };
         for (const item of items) {
             for (const effect of item.specialEffects) {
@@ -2813,12 +2813,12 @@ export class GameStateRuntime {
         if (speech <= 0) return 0;
         if (speech >= 15) return 1;
 
-        const effectiveReputation = Math.max(1, Math.min(30, Math.round(
-            this.getPersonParameter("Hero", "reputation")
+        const effectiveIntelligence = Math.max(1, Math.min(30, Math.round(
+            this.getPersonParameter("Hero", "intelligence")
             + this.getPersonParameter("Hero", "item_special_10")
             + (speech >= 10 ? 2 : 0),
         )));
-        let chance = effectiveReputation
+        let chance = effectiveIntelligence
             + Math.trunc(speech) * 4
             + 10
             + this.getPersonParameter("Hero", "item_special_54");
