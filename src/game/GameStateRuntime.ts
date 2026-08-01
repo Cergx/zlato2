@@ -16,7 +16,7 @@ import {
     type SCRHandlerSources,
     type SCRValue,
 } from "./scripts/SCRRuntime.ts";
-import type { GameSaveData } from "./PersistenceRuntime.ts";
+import { GOLDENLAND_START_MINUTE_OF_DAY, type GameSaveData } from "./PersistenceRuntime.ts";
 import {
     FactionRelations,
     createCombatant,
@@ -481,7 +481,7 @@ export class GameStateRuntime {
     private readonly triggerScriptSources = new Map<string, SCRHandlerSources>();
     private generation = 0;
     private experience = 0;
-    private elapsedMinutes = 0;
+    private elapsedMinutes = GOLDENLAND_START_MINUTE_OF_DAY;
     private lastCoreTick = 0;
     private lastClockTimeMs: number | undefined;
     private clockAccumulatorMs = 0;

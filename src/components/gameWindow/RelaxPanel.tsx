@@ -8,6 +8,12 @@ import {
 } from "../../constants/clientDll.ts";
 import { MAIN_INTERFACE_FONT, type ShippedFontDefinition } from "../../constants/fontsScr.ts";
 import type { Game } from "../../game/Game.ts";
+import {
+    GOLDENLAND_START_DAY,
+    GOLDENLAND_START_MINUTE_OF_DAY,
+    GOLDENLAND_START_MONTH,
+    GOLDENLAND_START_YEAR,
+} from "../../game/PersistenceRuntime.ts";
 import { ColorKeyImage } from "../ColorKeyImage.tsx";
 import { OriginalGuiLayer } from "../OriginalGuiLayer.tsx";
 import styles from "./RelaxPanel.module.scss";
@@ -30,21 +36,24 @@ const shippedFontStyle = (font: ShippedFontDefinition): CSSProperties => ({
     fontWeight: font.weight,
 });
 
+const MONTH_NAMES = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+
 const clockText = (elapsedMinutes: number): string => {
-    const day = Math.floor(elapsedMinutes / (24 * 60)) + 1;
+    const day = Math.floor(elapsedMinutes / (24 * 60));
     const minuteOfDay = elapsedMinutes % (24 * 60);
+    const date = new Date(Date.UTC(GOLDENLAND_START_YEAR, GOLDENLAND_START_MONTH - 1, GOLDENLAND_START_DAY + day));
     const hours = Math.floor(minuteOfDay / 60);
     const minutes = minuteOfDay % 60;
-    return `День ${day} ${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+    return `${date.getUTCDate()} ${MONTH_NAMES[date.getUTCMonth()]} ${date.getUTCFullYear()} ${hours}:${String(minutes).padStart(2, "0")}`;
 };
 
 export const RelaxPanel = ({ game, onClose }: RelaxPanelProps) => {
     const [periodIndex, setPeriodIndex] = useState(0);
-    const [currentClock, setCurrentClock] = useState(() => clockText(game.getRuntimeSnapshot()?.elapsedMinutes ?? 0));
+    const [currentClock, setCurrentClock] = useState(() => clockText(game.getRuntimeSnapshot()?.elapsedMinutes ?? GOLDENLAND_START_MINUTE_OF_DAY));
     const [resting, setResting] = useState(() => game.getRestState().active);
     useEffect(() => {
         const updateClock = (elapsedMinutes: number): void => setCurrentClock(clockText(elapsedMinutes));
-        updateClock(game.getRuntimeSnapshot()?.elapsedMinutes ?? 0);
+        updateClock(game.getRuntimeSnapshot()?.elapsedMinutes ?? GOLDENLAND_START_MINUTE_OF_DAY);
         return game.subscribeClock(updateClock);
     }, [game]);
     useEffect(() => game.subscribeRest((state) => {

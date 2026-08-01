@@ -80,6 +80,22 @@
     height: 20px;
 }
 
+.slotNameInput {
+    position: absolute;
+    z-index: 8;
+    box-sizing: border-box;
+    border: 0;
+    outline: 0;
+    padding: 0;
+    overflow: hidden;
+    color: #241508;
+    background: transparent;
+    text-align: center;
+    text-shadow: 0 1px rgb(238 209 144 / 45%);
+    user-select: text;
+    pointer-events: auto;
+}
+
 .authoredControls {
     z-index: 6;
 }

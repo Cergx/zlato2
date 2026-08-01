@@ -20,6 +20,9 @@ import { ProfessionSkillsPanel } from "./ProfessionSkillsPanel.tsx";
 import { type ProfessionSkillDefinition } from "../../constants/clientDll.ts";
 import { GuiTooltip } from "../gui/GuiTooltip.tsx";
 import type { MapReferenceHint } from "../../game/Level.ts";
+import { NativeMessageBox } from "../gui/NativeMessageBox.tsx";
+import { SDBParser } from "../../game/parsers/SDBParser.ts";
+import { COMBAT_HISTORY_STRING_IDS } from "../../constants/clientDll.ts";
 
 interface GameWindowProps {
     gameMode: "single" | "multiplayer";
@@ -110,11 +113,16 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
 
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const gameRef = useRef<Game | null>(null);
+    const gameOverTimerRef = useRef<number | null>(null);
+    const gameOverClosingRef = useRef(false);
     const { setCursor, cursorClassName } = useCursor();
     const [dialogueState, setDialogueState] = useState<DialogueState | null>(null);
     const [worldMapLocations, setWorldMapLocations] = useState<readonly WorldMapLocationState[] | null>(null);
     const [finishedEnding, setFinishedEnding] = useState<number | null>(null);
     const [runtimeError, setRuntimeError] = useState<string | null>(null);
+    const [gameOverVisible, setGameOverVisible] = useState(false);
+    const [gameOverClosing, setGameOverClosing] = useState(false);
+    const [gameOverText, setGameOverText] = useState("Игра окончена.");
     const [statusText, setStatusText] = useState("");
     const [statusMessages, setStatusMessages] = useState<readonly Readonly<{ id: number; text: string }>[]>([]);
     const [referenceHint, setReferenceHint] = useState<MapReferenceHint | null>(null);
@@ -146,7 +154,15 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
     }, []);
     const closePanel = useCallback(() => setActivePanel(null), []);
     const getGame = useCallback(() => gameRef.current, []);
-    const paused = worldMapLocations !== null
+    const confirmGameOver = useCallback(() => {
+        if (gameOverClosingRef.current) return;
+        gameOverClosingRef.current = true;
+        setGameOverVisible(false);
+        setGameOverClosing(true);
+        gameOverTimerRef.current = window.setTimeout(onMainMenu, 700);
+    }, [onMainMenu]);
+    const paused = gameOverVisible || gameOverClosing
+        || worldMapLocations !== null
         || activePanel !== null
             && activePanel !== "skills"
             && activePanel !== "relax"
@@ -155,6 +171,19 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
     useEffect(() => gameRef.current?.setPaused(paused), [paused]);
 
     useEffect(() => gameRef.current?.applySettings(settings), [settings]);
+    useEffect(() => {
+        let cancelled = false;
+        void fetch("/assets/sdb/user_interface.sdb")
+            .then(async (response) => {
+                if (!response.ok) throw new Error(`user_interface.sdb: HTTP ${response.status}`);
+                return new SDBParser(await response.arrayBuffer()).getData();
+            })
+            .then((strings) => {
+                if (!cancelled) setGameOverText(strings[COMBAT_HISTORY_STRING_IDS.gameOver] ?? "Игра окончена.");
+            })
+            .catch(() => undefined);
+        return () => { cancelled = true; };
+    }, []);
 
 
     useEffect(() => {
@@ -164,6 +193,13 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
         setFinishedEnding(null);
         setRuntimeError(null);
         setActivePanel(null);
+        if (gameOverTimerRef.current !== null) {
+            window.clearTimeout(gameOverTimerRef.current);
+            gameOverTimerRef.current = null;
+        }
+        gameOverClosingRef.current = false;
+        setGameOverVisible(false);
+        setGameOverClosing(false);
         if (!gameRef.current) {
             gameRef.current = new Game(canvasRef.current, {
                 onDialogueStateChange: setDialogueState,
@@ -175,6 +211,9 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
                     setDialogueState(null);
                     setWorldMapLocations(null);
                     setReferenceHint(null);
+                    gameOverClosingRef.current = false;
+                    setGameOverClosing(false);
+                    setGameOverVisible(true);
                 },
                 onCursorChange: setCursor,
                 onError: (error) => setRuntimeError(error instanceof Error ? error.message : String(error)),
@@ -210,6 +249,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
     }, [entrance, gameMode, heroProfile, level, saveSlot, setCursor, strictScriptAbi]);
 
     useEffect(() => () => {
+        if (gameOverTimerRef.current !== null) window.clearTimeout(gameOverTimerRef.current);
         gameRef.current?.stop();
         gameRef.current = null;
     }, []);
@@ -237,12 +277,16 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
         const handleEscape = (event: KeyboardEvent): void => {
             if (event.key !== "Escape") return;
             event.preventDefault();
+            if (gameOverVisible) {
+                confirmGameOver();
+                return;
+            }
             if (activePanel === "relax") gameRef.current?.cancelRest();
             setActivePanel((current) => current === "pause" ? null : "pause");
         };
         window.addEventListener("keydown", handleEscape);
         return () => window.removeEventListener("keydown", handleEscape);
-    }, [activePanel]);
+    }, [activePanel, confirmGameOver, gameOverVisible]);
 
     return (
         <div className={`${styles.gameWindow} ${cursorClassName}`} style={{ filter: `brightness(${gameGamma(settings)})` }}>
@@ -301,6 +345,8 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
                     onClose={closeWorldMap}
                 />
             )}
+            {gameOverVisible && <NativeMessageBox text={gameOverText} onConfirm={confirmGameOver} />}
+            {gameOverClosing && <div className={styles.gameOverFade} aria-hidden="true" />}
             {loading && <LoadingScreen level={loadingLevel} stage={loadingStage} progress={loadingProgress} />}
             {finishedEnding !== null && (
                 <section className={styles.finished} role="status">

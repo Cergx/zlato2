@@ -529,14 +529,14 @@ export class Game {
     }
 
 
-    public save(slot: string): GameSaveData {
-        const save = this.captureSave();
+    public save(slot: string, name?: string): GameSaveData {
+        const save = this.captureSave(name);
         this.persistence.save(slot, save);
         return save;
     }
 
     public quickSave(): GameSaveData {
-        const save = this.captureSave();
+        const save = this.captureSave("Quick save");
         this.persistence.quickSave(save);
         return save;
     }
@@ -549,13 +549,20 @@ export class Game {
         return this.restoreSave(this.persistence.quickLoad());
     }
 
-    private captureSave(): GameSaveData {
+    private captureSave(name?: string): GameSaveData {
         const level = this.level;
         const data = level?.getData();
         const player = level?.getPlayerState();
         if (!level || !data || !player) throw new Error("Нельзя сохранить игру до загрузки уровня");
         const runtime = level.getRuntimeSnapshot();
         const save = createSaveData({ gameMode: data.gameMode, level: data.levelName, entrance: null });
+        const locationTitle = data.sdbData[0] ?? data.levelName;
+        save.metadata = {
+            name: (name === undefined ? locationTitle : name).slice(0, 63),
+            savedAt: new Date().toISOString(),
+            locationTitle,
+            preview: this.captureSavePreview(),
+        };
         save.player.position = player.position;
         save.player.direction = player.direction;
         save.scriptVariables = { ...runtime.variables };
@@ -608,6 +615,16 @@ export class Game {
         }
         return save;
     }
+    private captureSavePreview(): string {
+        const preview = document.createElement("canvas");
+        preview.width = 500;
+        preview.height = 375;
+        const context = preview.getContext("2d");
+        if (!context) throw new Error("Не удалось создать скриншот сохранения");
+        context.drawImage(this.canvas, 0, 0, this.canvas.width, this.canvas.height, 0, 0, preview.width, preview.height);
+        return preview.toDataURL("image/jpeg", 0.72);
+    }
+
 
     private async restoreSave(save: GameSaveData | null): Promise<GameSaveData | null> {
         if (!save) return null;

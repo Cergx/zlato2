@@ -18,8 +18,12 @@ import {
 } from "../constants/fontsScr.ts";
 import type { Game } from "../game/Game.ts";
 import {
+    GOLDENLAND_START_DAY,
+    GOLDENLAND_START_MONTH,
+    GOLDENLAND_START_YEAR,
     LocalStorageAdapter,
     PersistenceRuntime,
+    type GameClock,
     type GameSaveData,
 } from "../game/PersistenceRuntime.ts";
 import { loadCSX } from "../game/Assets.ts";
@@ -29,7 +33,7 @@ import styles from "./SaveLoadMenuPanel.module.scss";
 
 const slotsForPage = (page: number): string[] => Array.from(
     { length: SAVE_LOAD_SLOTS_PER_PAGE },
-    (_, index) => `slot-${String(page * SAVE_LOAD_SLOTS_PER_PAGE + index + 1).padStart(2, "0")}`,
+    (_, index) => `slot${page * SAVE_LOAD_SLOTS_PER_PAGE + index}`,
 );
 
 const nativeRectStyle = ({ left, top, width, height }: NativeRect): CSSProperties => ({
@@ -72,15 +76,21 @@ interface SaveDescription {
     readonly details: string;
 }
 
-const describeSave = (save: GameSaveData | null, slotNumber: number): SaveDescription => {
-    if (!save) return { title: `${slotNumber}. Пусто`, metadata: "", details: "" };
-    const hours = Math.floor(save.clock.minuteOfDay / 60).toString().padStart(2, "0");
-    const minute = Math.floor(save.clock.minuteOfDay % 60).toString().padStart(2, "0");
-    const time = `${hours}:${minute}`;
+const pad2 = (value: number): string => String(value).padStart(2, "0");
+
+const formatNativeDate = (date: Date): string => `${pad2(date.getHours())}:${pad2(date.getMinutes())} ${pad2(date.getDate())}.${pad2(date.getMonth() + 1)}.${date.getFullYear()}`;
+
+const formatGameDate = (clock: GameClock): string => {
+    const date = new Date(Date.UTC(GOLDENLAND_START_YEAR, GOLDENLAND_START_MONTH - 1, GOLDENLAND_START_DAY + clock.day, 0, clock.minuteOfDay));
+    return `${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())} ${pad2(date.getUTCDate())}.${pad2(date.getUTCMonth() + 1)}.${date.getUTCFullYear()}`;
+};
+
+const describeSave = (save: GameSaveData | null): SaveDescription => {
+    if (!save) return { title: "Пусто", metadata: "", details: "" };
     return {
-        title: `${slotNumber}. ${save.location.level}`,
-        metadata: `День ${save.clock.day} · ${time}`,
-        details: `${save.location.level}\nДень ${save.clock.day} · ${time}`,
+        title: save.metadata.name,
+        metadata: save.metadata.savedAt ? formatNativeDate(new Date(save.metadata.savedAt)) : "",
+        details: `${save.metadata.locationTitle}\n${formatGameDate(save.clock)}`,
     };
 };
 
@@ -90,15 +100,23 @@ export const SaveLoadMenuPanel = ({ mode, game, onClose, onLoad }: SaveLoadMenuP
     const [selected, setSelected] = useState(0);
     const [revision, setRevision] = useState(0);
     const [message, setMessage] = useState("");
+    const [saveName, setSaveName] = useState("");
     const [interfaceStrings, setInterfaceStrings] = useState<SDBData>({});
     const slots = slotsForPage(page);
     const saves = slots.map((slot) => {
         try { return persistence.load(slot); } catch { return null; }
     });
-    const descriptions = saves.map((save, index) => describeSave(
-        save,
-        page * SAVE_LOAD_SLOTS_PER_PAGE + index + 1,
-    ));
+    const descriptions = saves.map(describeSave);
+
+    useEffect(() => {
+        if (mode !== "save") return;
+        const slot = slotsForPage(page)[selected];
+        try {
+            setSaveName(persistence.load(slot)?.metadata.name ?? "");
+        } catch {
+            setSaveName("");
+        }
+    }, [mode, page, persistence, revision, selected]);
 
     useEffect(() => {
         let cancelled = false;
@@ -113,8 +131,11 @@ export const SaveLoadMenuPanel = ({ mode, game, onClose, onLoad }: SaveLoadMenuP
         const slot = slots[slotIndex];
         if (mode === "save") {
             if (!game) return;
+            const name = slotIndex === selected
+                ? saveName
+                : saves[slotIndex]?.metadata.name ?? "";
             try {
-                game.save(slot);
+                game.save(slot, name);
                 setRevision((value) => value + 1);
                 setMessage("Игра сохранена");
             } catch (error) {
@@ -138,13 +159,20 @@ export const SaveLoadMenuPanel = ({ mode, game, onClose, onLoad }: SaveLoadMenuP
     const titleId = SAVE_LOAD_TITLE_STRING_IDS[mode];
     const title = interfaceStrings[titleId] ?? (mode === "save" ? "Сохранить" : "Загрузить");
     const details = message || descriptions[selected]?.details || "";
+    const selectedSave = saves[selected] ?? null;
+    const selectedPreview = selectedSave?.metadata.preview ?? null;
     void revision;
 
     return (
         <section className={styles.panel} aria-label={mode === "save" ? "Сохранение игры" : "Загрузка игры"}>
             <CsxImage className={styles.background} src="/assets/engineres/interface/save_load_menu/background.csx" />
-            <img className={styles.preview} style={nativeRectStyle(SAVE_LOAD_PREVIEW_RECT)}
-                src="/assets/engineres/interface/save_load_menu/back.bmp" alt="" draggable={false} />
+            {selectedPreview ? (
+                <img className={styles.preview} style={nativeRectStyle(SAVE_LOAD_PREVIEW_RECT)}
+                    src={selectedPreview} alt="" draggable={false} />
+            ) : !selectedSave ? (
+                <img className={styles.preview} style={nativeRectStyle(SAVE_LOAD_PREVIEW_RECT)}
+                    src="/assets/engineres/interface/save_load_menu/back.bmp" alt="" draggable={false} />
+            ) : null}
             <CsxImage className={styles.slotsFrame} style={nativeRectStyle(SAVE_LOAD_SLOTS_FRAME_RECT)}
                 src="/assets/engineres/interface/save_load_menu/slots.csx" />
             <CsxImage className={styles.slotFocus} style={nativeRectStyle(SAVE_LOAD_SLOT_RECTS[selected])}
@@ -160,11 +188,33 @@ export const SaveLoadMenuPanel = ({ mode, game, onClose, onLoad }: SaveLoadMenuP
                         aria-pressed={selected === index}
                         onClick={() => { setSelected(index); setMessage(""); }}
                         onDoubleClick={() => { setSelected(index); void commit(index); }}>
-                        <span className={styles.slotTitle}>{description.title}</span>
+                        {(mode !== "save" || selected !== index) && <span className={styles.slotTitle}>{description.title}</span>}
                         <span className={styles.slotMetadata}>{description.metadata}</span>
                     </button>
                 ))}
             </div>
+                {mode === "save" && <input key={slots[selected]}
+                    className={styles.slotNameInput}
+                    style={{
+                        ...shippedFontStyle(HEADS_INTERFACE_FONT),
+                        left: `${SAVE_LOAD_SLOT_RECTS[selected].left}px`,
+                        top: `${SAVE_LOAD_SLOT_RECTS[selected].top + 5}px`,
+                        width: `${SAVE_LOAD_SLOT_RECTS[selected].width}px`,
+                        height: "20px",
+                    }}
+                    aria-label={`Название сохранения ${page * SAVE_LOAD_SLOTS_PER_PAGE + selected + 1}`}
+                    autoFocus
+                    maxLength={63}
+                    value={saveName}
+                    onChange={(event) => setSaveName(event.target.value)}
+                    onClick={(event) => event.stopPropagation()}
+                    onDoubleClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => {
+                        if (event.key !== "Enter") return;
+                        event.preventDefault();
+                        void commit().catch((error) => setMessage(error instanceof Error ? error.message : String(error)));
+                    }}
+                />}
 
             <OriginalGuiLayer className={styles.authoredControls}
                 script="save_load_menu"

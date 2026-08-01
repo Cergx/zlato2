@@ -23,6 +23,20 @@
 .dialogue {
     z-index: 10;
 }
+.gameOverFade {
+    position: absolute;
+    inset: 0;
+    z-index: 41;
+    pointer-events: auto;
+    background: #000;
+    animation: gameOverFade 700ms linear forwards;
+}
+
+@keyframes gameOverFade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
 
 .finished {
     position: absolute;

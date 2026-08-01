@@ -6,8 +6,12 @@ import type { WorldPosition } from "./WorldCoordinates.ts";
 import type { EquipmentSlot } from "./systems/Items.ts";
 import { originalInventoryLevelForWorld } from "./systems/Combat.ts";
 
-export const SAVE_FORMAT_VERSION = 8;
-export const QUICK_SAVE_SLOT = "quick";
+export const SAVE_FORMAT_VERSION = 9;
+export const QUICK_SAVE_SLOT = "slot0";
+export const GOLDENLAND_START_YEAR = 1124;
+export const GOLDENLAND_START_MONTH = 5;
+export const GOLDENLAND_START_DAY = 11;
+export const GOLDENLAND_START_MINUTE_OF_DAY = 6 * 60 + 12;
 export const DEFAULT_SAVE_KEY_PREFIX = "golden-land-2:save:";
 
 export type ScriptVariableValue = boolean | number | string;
@@ -74,10 +78,18 @@ export interface GameClock {
     day: number;
     minuteOfDay: number;
 }
+export interface SaveMetadata {
+    name: string;
+    savedAt: string | null;
+    locationTitle: string;
+    preview: string | null;
+}
+
 
 export interface GameSaveData {
     version: typeof SAVE_FORMAT_VERSION;
     location: SaveLocation;
+    metadata: SaveMetadata;
     player: PlayerSaveState;
     inventories: Inventories;
     equipped: EquippedItems;
@@ -175,6 +187,7 @@ export class LocalStorageAdapter implements StorageAdapter {
  */
 export const createSaveData = (location: SaveLocation): GameSaveData => ({
     version: SAVE_FORMAT_VERSION,
+    metadata: defaultSaveMetadata(location),
     location: cloneLocation(location),
     player: {
         position: { x: 0, y: 0 },
@@ -199,7 +212,7 @@ export const createSaveData = (location: SaveLocation): GameSaveData => ({
     lootGenerationLevel: originalInventoryLevelForWorld([]),
     magicEffects: [],
     regenerationElapsed: {},
-    clock: { day: 0, minuteOfDay: 0 },
+    clock: { day: 0, minuteOfDay: GOLDENLAND_START_MINUTE_OF_DAY },
 });
 
 /** Validates and clones a save, so callers never retain mutable persisted state. */
@@ -214,6 +227,7 @@ export const validateSaveData = (value: unknown): GameSaveData => {
     if (version === 5) return migrateVersion5(record);
     if (version === 6) return migrateVersion6(record);
     if (version === 7) return migrateVersion7(record);
+    if (version === 8) return migrateVersion8(record);
     if (version !== SAVE_FORMAT_VERSION) {
         if (typeof version === "number" && Number.isInteger(version) && version > SAVE_FORMAT_VERSION) {
             throw new SaveVersionError(`Save format version ${version} is newer than supported version ${SAVE_FORMAT_VERSION}`);
@@ -222,12 +236,13 @@ export const validateSaveData = (value: unknown): GameSaveData => {
     }
 
     assertOnlyKeys(record, [
-        "version", "location", "player", "inventories", "equipped", "scriptVariables", "doors", "triggers", "questFlags", "clock",
+        "version", "metadata", "location", "player", "inventories", "equipped", "scriptVariables", "doors", "triggers", "questFlags", "clock",
         "persons", "personStatesByLevel", "stageFlags", "locationAccess", "bestiaryKills", "personParameters", "experience", "lootGenerationLevel", "magicEffects", "regenerationElapsed",
     ], "save");
 
     return {
         version: SAVE_FORMAT_VERSION,
+        metadata: readSaveMetadata(requireField(record, "metadata", "save"), "save.metadata"),
         location: readLocation(requireField(record, "location", "save"), "save.location"),
         player: readPlayer(requireField(record, "player", "save"), "save.player", false),
         inventories: readInventories(requireField(record, "inventories", "save"), "save.inventories"),
@@ -343,7 +358,8 @@ export class PersistenceRuntime {
 
     public load(slot: string): GameSaveData | null {
         const key = this.keyForSlot(slot);
-        const serialized = this.read(key);
+        const legacySlot = legacyBrowserSlot(slot);
+        const serialized = this.read(key) ?? (legacySlot === null ? null : this.read(this.keyForSlot(legacySlot)));
         return serialized === null ? null : deserializeSaveData(serialized);
     }
 
@@ -409,6 +425,12 @@ export class PersistenceRuntime {
     }
 }
 
+const legacyBrowserSlot = (slot: string): string | null => {
+    if (slot === "slot0") return "quick";
+    const match = /^slot([1-9]|[12][0-9])$/u.exec(slot);
+    return match ? `slot-${match[1].padStart(2, "0")}` : null;
+};
+
 const SLOT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/;
 const UNSAFE_RECORD_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const DIRECTIONS: readonly Direction[] = ["LEFT", "RIGHT", "UP", "DOWN", "UP_LEFT", "UP_RIGHT", "DOWN_LEFT", "DOWN_RIGHT"];
@@ -421,6 +443,10 @@ type LegacyInventories = Record<string, Record<string, number>>;
 
 
 type UnknownRecord = Record<string, unknown>;
+function defaultSaveMetadata(location: SaveLocation): SaveMetadata {
+    return { name: location.level, savedAt: null, locationTitle: location.level, preview: null };
+}
+
 
 function migrateVersion1(record: UnknownRecord): GameSaveData {
     assertOnlyKeys(record, [
@@ -436,6 +462,7 @@ function migrateVersion1(record: UnknownRecord): GameSaveData {
 
     return {
         version: SAVE_FORMAT_VERSION,
+        metadata: defaultSaveMetadata(location),
         location,
         player: record.player === undefined ? defaultPlayer() : readPlayer(record.player, "version 1 save.player", true),
         ...migrateLegacyInventories(
@@ -445,7 +472,7 @@ function migrateVersion1(record: UnknownRecord): GameSaveData {
         doors: record.doors === undefined ? {} : readDoorStates(record.doors, "version 1 save.doors"),
         triggers: record.triggers === undefined ? {} : readTriggerStates(record.triggers, "version 1 save.triggers"),
         questFlags: record.questFlags === undefined ? {} : readBooleanRecord(record.questFlags, "version 1 save.questFlags"),
-        clock: record.clock === undefined ? { day: 0, minuteOfDay: 0 } : readClock(record.clock, "version 1 save.clock"),
+        clock: record.clock === undefined ? { day: 0, minuteOfDay: GOLDENLAND_START_MINUTE_OF_DAY } : readClock(record.clock, "version 1 save.clock"),
         persons: {},
         personStatesByLevel: {},
         stageFlags: {},
@@ -465,6 +492,7 @@ function migrateVersion2(record: UnknownRecord): GameSaveData {
     ], "version 2 save");
     return {
         version: SAVE_FORMAT_VERSION,
+        metadata: defaultSaveMetadata(readLocation(requireField(record, "location", "version 2 save"), "version 2 save.location")),
         location: readLocation(requireField(record, "location", "version 2 save"), "version 2 save.location"),
         player: readPlayer(requireField(record, "player", "version 2 save"), "version 2 save.player", false),
         ...migrateLegacyInventories(readLegacyInventories(requireField(record, "inventories", "version 2 save"), "version 2 save.inventories")),
@@ -493,6 +521,7 @@ function migrateVersion3(record: UnknownRecord): GameSaveData {
     ], "version 3 save");
     return {
         version: SAVE_FORMAT_VERSION,
+        metadata: defaultSaveMetadata(readLocation(requireField(record, "location", "version 3 save"), "version 3 save.location")),
         location: readLocation(requireField(record, "location", "version 3 save"), "version 3 save.location"),
         player: readPlayer(requireField(record, "player", "version 3 save"), "version 3 save.player", false),
         ...migrateLegacyInventories(readLegacyInventories(requireField(record, "inventories", "version 3 save"), "version 3 save.inventories")),
@@ -521,6 +550,7 @@ function migrateVersion4(record: UnknownRecord): GameSaveData {
     ], "version 4 save");
     return {
         version: SAVE_FORMAT_VERSION,
+        metadata: defaultSaveMetadata(readLocation(requireField(record, "location", "version 4 save"), "version 4 save.location")),
         location: readLocation(requireField(record, "location", "version 4 save"), "version 4 save.location"),
         player: readPlayer(requireField(record, "player", "version 4 save"), "version 4 save.player", false),
         ...migrateLegacyInventories(readLegacyInventories(requireField(record, "inventories", "version 4 save"), "version 4 save.inventories")),
@@ -549,6 +579,7 @@ function migrateVersion5(record: UnknownRecord): GameSaveData {
     ], "version 5 save");
     return {
         version: SAVE_FORMAT_VERSION,
+        metadata: defaultSaveMetadata(readLocation(requireField(record, "location", "version 5 save"), "version 5 save.location")),
         location: readLocation(requireField(record, "location", "version 5 save"), "version 5 save.location"),
         player: readPlayer(requireField(record, "player", "version 5 save"), "version 5 save.player", false),
         ...migrateLegacyInventories(readLegacyInventories(requireField(record, "inventories", "version 5 save"), "version 5 save.inventories")),
@@ -576,6 +607,7 @@ function migrateVersion6(record: UnknownRecord): GameSaveData {
     ], "version 6 save");
     return {
         version: SAVE_FORMAT_VERSION,
+        metadata: defaultSaveMetadata(readLocation(requireField(record, "location", "version 6 save"), "version 6 save.location")),
         location: readLocation(requireField(record, "location", "version 6 save"), "version 6 save.location"),
         player: readPlayer(requireField(record, "player", "version 6 save"), "version 6 save.player", false),
         inventories: readInventories(requireField(record, "inventories", "version 6 save"), "version 6 save.inventories"),
@@ -609,6 +641,7 @@ function migrateVersion7(record: UnknownRecord): GameSaveData {
         .find(([name]) => name.toLowerCase() === "hero")?.[1] ?? {};
     return {
         version: SAVE_FORMAT_VERSION,
+        metadata: defaultSaveMetadata(readLocation(requireField(record, "location", "version 7 save"), "version 7 save.location")),
         location: readLocation(requireField(record, "location", "version 7 save"), "version 7 save.location"),
         player: readPlayer(requireField(record, "player", "version 7 save"), "version 7 save.player", false),
         inventories: readInventories(requireField(record, "inventories", "version 7 save"), "version 7 save.inventories"),
@@ -632,6 +665,36 @@ function migrateVersion7(record: UnknownRecord): GameSaveData {
         }]),
         magicEffects: readMagicEffects(requireField(record, "magicEffects", "version 7 save"), "version 7 save.magicEffects"),
         regenerationElapsed: readRegenerationElapsed(requireField(record, "regenerationElapsed", "version 7 save"), "version 7 save.regenerationElapsed"),
+    };
+}
+function migrateVersion8(record: UnknownRecord): GameSaveData {
+    assertOnlyKeys(record, [
+        "version", "location", "player", "inventories", "equipped", "scriptVariables", "doors", "triggers", "questFlags", "clock",
+        "persons", "personStatesByLevel", "stageFlags", "locationAccess", "bestiaryKills", "personParameters", "experience", "lootGenerationLevel", "magicEffects", "regenerationElapsed",
+    ], "version 8 save");
+    const location = readLocation(requireField(record, "location", "version 8 save"), "version 8 save.location");
+    return {
+        version: SAVE_FORMAT_VERSION,
+        metadata: defaultSaveMetadata(location),
+        location,
+        player: readPlayer(requireField(record, "player", "version 8 save"), "version 8 save.player", false),
+        inventories: readInventories(requireField(record, "inventories", "version 8 save"), "version 8 save.inventories"),
+        equipped: readEquippedItems(requireField(record, "equipped", "version 8 save"), "version 8 save.equipped"),
+        scriptVariables: readScriptVariables(requireField(record, "scriptVariables", "version 8 save"), "version 8 save.scriptVariables"),
+        doors: readDoorStates(requireField(record, "doors", "version 8 save"), "version 8 save.doors"),
+        triggers: readTriggerStates(requireField(record, "triggers", "version 8 save"), "version 8 save.triggers"),
+        questFlags: readBooleanRecord(requireField(record, "questFlags", "version 8 save"), "version 8 save.questFlags"),
+        clock: readClock(requireField(record, "clock", "version 8 save"), "version 8 save.clock"),
+        persons: readBooleanRecord(requireField(record, "persons", "version 8 save"), "version 8 save.persons"),
+        personStatesByLevel: readNestedBooleanRecord(requireField(record, "personStatesByLevel", "version 8 save"), "version 8 save.personStatesByLevel"),
+        stageFlags: readBooleanRecord(requireField(record, "stageFlags", "version 8 save"), "version 8 save.stageFlags"),
+        locationAccess: readNumberRecord(requireField(record, "locationAccess", "version 8 save"), "version 8 save.locationAccess"),
+        bestiaryKills: readBestiaryKills(requireField(record, "bestiaryKills", "version 8 save"), "version 8 save.bestiaryKills"),
+        personParameters: readNestedNumberRecord(requireField(record, "personParameters", "version 8 save"), "version 8 save.personParameters"),
+        experience: readNonNegativeNumber(requireField(record, "experience", "version 8 save"), "version 8 save.experience"),
+        lootGenerationLevel: readLootGenerationLevel(requireField(record, "lootGenerationLevel", "version 8 save"), "version 8 save.lootGenerationLevel"),
+        magicEffects: readMagicEffects(requireField(record, "magicEffects", "version 8 save"), "version 8 save.magicEffects"),
+        regenerationElapsed: readRegenerationElapsed(requireField(record, "regenerationElapsed", "version 8 save"), "version 8 save.regenerationElapsed"),
     };
 }
 function readLegacyLootGenerationLevel(record: UnknownRecord, path: string): number {
@@ -851,6 +914,31 @@ function readTriggerStates(value: unknown, path: string): TriggerStates {
         result[name] = { active, visible };
     }
     return result;
+}
+
+function readSaveMetadata(value: unknown, path: string): SaveMetadata {
+    const record = requireRecord(value, path);
+    assertOnlyKeys(record, ["name", "savedAt", "locationTitle", "preview"], path);
+    const rawName = requireField(record, "name", path);
+    const rawSavedAt = requireField(record, "savedAt", path);
+    const rawLocationTitle = requireField(record, "locationTitle", path);
+    const rawPreview = requireField(record, "preview", path);
+    if (typeof rawName !== "string" || rawName.length > 63 || hasControlCharacter(rawName)) {
+        throw new SaveFormatError(`${path}.name must contain 0..63 printable characters`);
+    }
+    if (rawSavedAt !== null && (typeof rawSavedAt !== "string" || !Number.isFinite(Date.parse(rawSavedAt)))) {
+        throw new SaveFormatError(`${path}.savedAt must be null or an ISO-compatible date`);
+    }
+    if (typeof rawLocationTitle !== "string" || rawLocationTitle.length === 0) {
+        throw new SaveFormatError(`${path}.locationTitle must be non-empty text`);
+    }
+    const locationTitle = readText(rawLocationTitle, `${path}.locationTitle`);
+    if (rawPreview !== null && (typeof rawPreview !== "string"
+        || rawPreview.length > 300_000
+        || !rawPreview.startsWith("data:image/jpeg;base64,"))) {
+        throw new SaveFormatError(`${path}.preview must be null or a JPEG data URL no larger than 300 KB`);
+    }
+    return { name: rawName, savedAt: rawSavedAt, locationTitle, preview: rawPreview };
 }
 
 function readClock(value: unknown, path: string): GameClock {

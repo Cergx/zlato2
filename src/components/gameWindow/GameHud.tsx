@@ -47,6 +47,11 @@ const nativeMinimapTransitionGlowSize = (minimapScale: number): number =>
     Math.max(1, Math.round(minimapScale * 36 + 2) + 7);
 const clamp = (value: number, minimum: number, maximum: number): number =>
     Math.max(minimum, Math.min(maximum, value));
+const isTextEntryTarget = (target: EventTarget | null): boolean => {
+    if (!(target instanceof HTMLElement)) return false;
+    const tagName = target.tagName;
+    return target.isContentEditable || tagName === "INPUT" || tagName === "SELECT" || tagName === "TEXTAREA";
+};
 
 interface GameHudProps {
     getGame: () => Game | null;
@@ -82,7 +87,6 @@ interface HudInfo {
     actionPoints: number;
     worldMapAvailable: boolean;
     combatMode: boolean;
-    heroDead: boolean;
     combatMessage: string;
     hotbarSpellIds: readonly (number | null)[];
     castableSpellIds: readonly number[];
@@ -106,7 +110,6 @@ const initialInfo: HudInfo = {
     actionPoints: 0,
     worldMapAvailable: false,
     combatMode: false,
-    heroDead: false,
     combatMessage: "",
     hotbarSpellIds: Array.from({ length: 9 }, () => null),
     castableSpellIds: [],
@@ -394,14 +397,14 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
     }, [addStatusMessage, statusMessages]);
 
     useEffect(() => {
-        const message = info.heroDead ? "Игра окончена." : info.combatMessage;
+        const message = info.combatMessage;
         if (!message || message === previousCombatMessageRef.current) {
             previousCombatMessageRef.current = message;
             return;
         }
         previousCombatMessageRef.current = message;
         addStatusMessage(message);
-    }, [addStatusMessage, info.combatMessage, info.heroDead]);
+    }, [addStatusMessage, info.combatMessage]);
 
     useEffect(() => {
         const viewport = statusHistoryViewportRef.current;
@@ -518,7 +521,6 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
                 actionPoints: heroCombat?.actionPoints ?? 0,
                 worldMapAvailable: game.canShowWorldMap(),
                 combatMode: game.isCombatMode(),
-                heroDead: heroCombat?.health === 0,
                 combatMessage: runtime.combat.message,
                 hotbarSpellIds: runtime.magic.hotbarSpellIds,
                 castableSpellIds: runtime.magic.castableSpellIds,
@@ -842,6 +844,7 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
 
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
+            if (isTextEntryTarget(event.target)) return;
             if (event.code === "Space") {
                 event.preventDefault();
                 getGame()?.endCombatTurn();
@@ -1028,7 +1031,7 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
                 style={{ ...guiObjectStyle(guiObjects.get(38)!), ...HUD_STATUS_FONT_STYLE }} type="button"
                 aria-expanded={statusHistoryVisible}
                 onClick={() => { setStatusHistoryVisible((visible) => !visible); setStatusScrollOffset(0); }}>
-                {info.heroDead ? "Игра окончена." : statusText || transientStatusText}
+                {statusText || transientStatusText}
             </button>}
             {guiObjects.get(35) && <span className={styles.lifeValue}
                 style={{ ...guiObjectStyle(guiObjects.get(35)!), ...HUD_VALUE_FONT_STYLE }}>

@@ -266,7 +266,7 @@ assert.deepEqual(duplicateLootRuntime.getInventory("trigger:BOX#1"), { FOD_1_1_1
 const legacySave = createSaveData({ gameMode: "single", level: "L1_3", entrance: null });
 legacySave.personParameters = { Hero: { skill_critical_hit: 10, skill_hack: 5 } };
 const migratedSave = validateSaveData(Object.fromEntries(
-    Object.entries({ ...legacySave, version: 7 }).filter(([key]) => key !== "lootGenerationLevel"),
+    Object.entries({ ...legacySave, version: 7 }).filter(([key]) => key !== "lootGenerationLevel" && key !== "metadata"),
 ));
 assert.equal(migratedSave.version, SAVE_FORMAT_VERSION);
 assert.equal(migratedSave.lootGenerationLevel, 12, "Version-7 saves must recover the persisted loot rating from hero XP and skills");
