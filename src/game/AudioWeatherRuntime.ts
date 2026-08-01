@@ -2,12 +2,13 @@ import { Paths } from "../constants/paths.ts";
 import { WORLD_CHUNK_HEIGHT, WORLD_CHUNK_WIDTH, type WorldPosition } from "./WorldCoordinates.ts";
 import type { TilePosition } from "./parsers/SEFParser.ts";
 import type { LVLData } from "./parsers/LVLParser.ts";
+import { nativeDayPhase, type DayPhase } from "./NativeDayNight.ts";
 
 export type EnvironmentSoundData = LVLData["environmentSounds"];
 export type AmbientEmitterData = EnvironmentSoundData["otherSounds"][number];
 
 export type WeatherKind = "clear" | "rain" | "snow" | "snowstorm" | "sand" | "sandstorm" | "unknown";
-export type DayPhase = "day" | "night";
+export type { DayPhase } from "./NativeDayNight.ts";
 
 export interface WeatherSnapshot {
     readonly type: number;
@@ -68,6 +69,8 @@ export interface AudioWeatherRuntimeOptions {
     /** Resolves an LVL SENV resource such as `sounds\\locations\\water.wav`. */
     resolveAudioUrl?: (source: string) => string;
     clock?: () => Date;
+    /** Returns total elapsed in-game minutes. Day is 06:00..19:59 in the native runtime. */
+    gameTime?: () => number;
     random?: () => number;
     frameScheduler?: FrameScheduler;
     crossfadeDurationMs?: number;
@@ -347,14 +350,9 @@ const assertWeather = (weather: LVLData["weather"]): void => {
     }
 };
 
-const isDayAt = (date: Date): boolean => {
-    const timestamp = date.getTime();
-    if (!Number.isFinite(timestamp)) {
-        throw new Error("The audio weather clock returned an invalid date.");
-    }
-
-    const hour = date.getHours();
-    return hour >= 6 && hour < 18;
+const assertGameTime = (elapsedMinutes: number): number => {
+    if (!isFiniteNumber(elapsedMinutes)) throw new Error("The audio weather game clock returned an invalid minute count.");
+    return elapsedMinutes;
 };
 
 const validateBrowserUrl = (url: string): string => {
@@ -416,6 +414,7 @@ export class AudioWeatherRuntime {
     private readonly createAudio: (url: string) => BrowserAudio;
     private readonly resolveAudioUrl: (source: string) => string;
     private readonly clock: () => Date;
+    private readonly gameTime: () => number;
     private readonly random: () => number;
     private readonly frameScheduler: FrameScheduler;
     private readonly crossfadeDurationMs: number;
@@ -440,7 +439,6 @@ export class AudioWeatherRuntime {
     private listenerWorldPosition: WorldPosition | undefined;
     private weatherSnapshot: WeatherSnapshot;
     private weatherEnabled = true;
-    private dayNightEnabled = true;
     private configuredWeather: LVLData["weather"] = { type: 0, intensity: 0 };
     private configuredWeatherUrl: string | undefined;
 
@@ -448,6 +446,10 @@ export class AudioWeatherRuntime {
         this.createAudio = options.createAudio ?? defaultAudioFactory;
         this.resolveAudioUrl = options.resolveAudioUrl ?? resolveLevelAudioUrl;
         this.clock = options.clock ?? defaultClock;
+        this.gameTime = options.gameTime ?? (() => {
+            const date = this.clock();
+            return date.getHours() * 60 + date.getMinutes();
+        });
         this.random = options.random ?? Math.random;
         this.frameScheduler = options.frameScheduler ?? defaultFrameScheduler;
         this.crossfadeDurationMs = options.crossfadeDurationMs ?? 600;
@@ -465,7 +467,7 @@ export class AudioWeatherRuntime {
         this.setVolumes(options.volumes ?? {});
         const initialDate = this.clock();
         const timestamp = initialDate.getTime();
-        this.phase = isDayAt(initialDate) ? "day" : "night";
+        this.phase = nativeDayPhase(assertGameTime(this.gameTime()));
         this.weatherSnapshot = {
             type: 0,
             intensity: 0,
@@ -483,7 +485,7 @@ export class AudioWeatherRuntime {
         this.assertAlive();
         const plan = this.createPlan(level);
         const date = this.clock();
-        const phase: DayPhase = this.dayNightEnabled && !isDayAt(date) ? "night" : "day";
+        const phase: DayPhase = nativeDayPhase(assertGameTime(this.gameTime()));
         const ambienceUrl = phase === "day" ? plan.dayAmbienceUrl : plan.nightAmbienceUrl;
         const weatherSnapshot = this.effectiveWeatherSnapshot(plan.weather, date, phase);
         const created: AudioTrack[] = [];
@@ -582,7 +584,7 @@ export class AudioWeatherRuntime {
             this.listenerWorldPosition = { ...listenerWorldPosition };
         }
         const date = this.clock();
-        const phase: DayPhase = this.dayNightEnabled && !isDayAt(date) ? "night" : "day";
+        const phase: DayPhase = nativeDayPhase(assertGameTime(this.gameTime()));
         if (phase !== this.phase) {
             const source = phase === "day" ? this.dayAmbienceUrl : this.nightAmbienceUrl;
             this.replaceAmbience(source);
@@ -593,22 +595,12 @@ export class AudioWeatherRuntime {
         return this.getWeatherSnapshot();
     }
 
-    public setEnvironmentEnabled(weatherEnabled: boolean, dayNightEnabled: boolean): void {
+    public setEnvironmentEnabled(weatherEnabled: boolean): void {
         this.assertAlive();
-        if (typeof weatherEnabled !== "boolean" || typeof dayNightEnabled !== "boolean") {
-            throw new Error("Environment settings must be boolean values.");
+        if (typeof weatherEnabled !== "boolean") {
+            throw new Error("Weather setting must be boolean.");
         }
-
         const date = this.clock();
-        if (this.dayNightEnabled !== dayNightEnabled) {
-            this.dayNightEnabled = dayNightEnabled;
-            const phase: DayPhase = dayNightEnabled && !isDayAt(date) ? "night" : "day";
-            if (phase !== this.phase) {
-                this.replaceAmbience(phase === "day" ? this.dayAmbienceUrl : this.nightAmbienceUrl);
-                this.phase = phase;
-            }
-        }
-
         if (this.weatherEnabled !== weatherEnabled) {
             this.weatherEnabled = weatherEnabled;
             const next = weatherEnabled && this.configuredWeatherUrl
@@ -946,7 +938,7 @@ export class AudioWeatherRuntime {
             strength: active ? clamp(weather.intensity, 0, 1) : 0,
             kind,
             active,
-            phase: isDayAt(date) ? "day" : "night",
+            phase: nativeDayPhase(assertGameTime(this.gameTime())),
             seed: Math.floor(random * 0x1_0000_0000),
             updatedAt: timestamp,
         };

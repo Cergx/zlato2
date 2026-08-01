@@ -190,9 +190,7 @@ export interface LevelOptions {
 }
 
 export class Level {
-    private readonly audioWeather = new AudioWeatherRuntime({
-        onPlaybackError: (error, source) => console.warn(`Не удалось воспроизвести ${source}`, error),
-    });
+    private readonly audioWeather: AudioWeatherRuntime;
     private soundVolume = 0.5;
     private readonly runtime: GameStateRuntime;
     private canvas: HTMLCanvasElement;
@@ -235,6 +233,10 @@ export class Level {
             onMagicEffect: (technicalName, targetName) => this.mapRenderer?.playMagicEffect(technicalName, targetName),
             onWorldMagicEffect: (technicalName, position) => this.mapRenderer?.playMagicEffectAt(technicalName, position),
             onWeather: (type) => this.audioWeather.setWeather(type),
+        });
+        this.audioWeather = new AudioWeatherRuntime({
+            gameTime: () => this.runtime.getElapsedMinutes(),
+            onPlaybackError: (error, source) => console.warn(`Не удалось воспроизвести ${source}`, error),
         });
     }
     public initializeHeroProfile(parameters: Readonly<Record<string, number>>, experience: number): void {
@@ -480,6 +482,7 @@ export class Level {
             (technicalName) => this.runtime.getCombatVisualState(technicalName),
             () => this.runtime.getHeroCombatActionPoints(),
             () => this.runtime.completeHeroCombatAction(),
+            () => this.runtime.getElapsedMinutes(),
         );
         this.mapRenderer.setPaused(this.paused);
         for (const [technicalName, present] of Object.entries(this.runtime.snapshot().persons)) {
@@ -584,7 +587,7 @@ export class Level {
             music: Math.max(0, Math.min(1, Number(settings[6]) / 100)),
             ambient: this.soundVolume,
         });
-        this.audioWeather.setEnvironmentEnabled(settings[3] === true, settings[4] === true);
+        this.audioWeather.setEnvironmentEnabled(settings[3] === true);
         this.mapRenderer?.applySettings(settings);
     }
 

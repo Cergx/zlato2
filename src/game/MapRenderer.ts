@@ -22,6 +22,7 @@ import {
     type NativeOccluderSelection,
 } from "./MaskCompositorRuntime.ts";
 import { gameAnimationSpeed, gameScrollSpeed } from "./GameSettingsRuntime.ts";
+import { drawNativeNightShading } from "./NativeDayNight.ts";
 
 interface PersonRuntime {
     person: LevelPerson;
@@ -175,6 +176,7 @@ export class MapRenderer {
     private alwaysRun = false;
     private showHints = true;
     private transparentOccluders = true;
+    private dayNightEnabled = true;
     private readonly interactionRangeCells = 6;
     private readonly randomMovementRadius = 8;
 
@@ -282,6 +284,7 @@ export class MapRenderer {
         getCombatVisualState?: (technicalName: string) => Readonly<{ relation: "friendly" | "neutral" | "hostile"; current: boolean; active: boolean }>,
         private readonly getHeroCombatActionPoints?: () => number,
         private readonly onHeroCombatActionComplete?: () => boolean,
+        private readonly getElapsedMinutes?: () => number,
     ) {
         this.canvas = canvas;
         this.ctx = canvas.getContext("2d");
@@ -357,6 +360,7 @@ export class MapRenderer {
         this.showHints = settings[13] !== false;
         this.transparentOccluders = settings[14] === true;
         if (!this.showHints) this.setHoveredTarget();
+        this.dayNightEnabled = settings[4] === true;
     }
 
     public getMinimapState() {
@@ -597,6 +601,15 @@ export class MapRenderer {
         this.drawMagicEffects(highlightTime);
         this.drawTriggerMaskHighlights(highlightTime);
         this.drawDoorMaskHighlights(highlightTime);
+        if (this.dayNightEnabled) {
+            drawNativeNightShading(
+                ctx,
+                this.canvas.width,
+                this.canvas.height,
+                this.getElapsedMinutes?.() ?? 0,
+                this.levelData.sefData.internalLocation === true,
+            );
+        }
     }
 
     private drawMagicEffects(now: number): void {

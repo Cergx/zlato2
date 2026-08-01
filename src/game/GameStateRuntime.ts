@@ -47,6 +47,7 @@ import { loadPersonCombatAssets, type PersonCombatAssets } from "./PersonAssetRu
 import type { ShippedItem } from "./ItemCatalogRuntime.ts";
 import type { SoundShaderDefinition } from "./SoundShaderRuntime.ts";
 import type { Direction, RouteType, SEFPerson } from "./parsers/SEFParser.ts";
+import { nativeDayPhase } from "./NativeDayNight.ts";
 import {
     loadMagicCatalog,
     magicActionPointCost,
@@ -1470,6 +1471,9 @@ export class GameStateRuntime {
         }
         if (minutes > 0) this.options.onClockChange?.(this.elapsedMinutes);
     }
+    public getElapsedMinutes(): number {
+        return this.elapsedMinutes;
+    }
 
 
     public setVariable(name: string, value: SCRValue): void {
@@ -1720,10 +1724,8 @@ export class GameStateRuntime {
                 return Math.floor(this.elapsedMinutes / (24 * 60));
             case "rs_getcurrenttimeofdayi":
                 return Math.floor(this.elapsedMinutes / 60) % 24;
-            case "rs_getdayornight": {
-                const hour = Math.floor(this.elapsedMinutes / 60) % 24;
-                return hour >= 6 && hour < 20 ? 1 : 0;
-            }
+            case "rs_getdayornight":
+                return nativeDayPhase(this.elapsedMinutes) === "day" ? 1 : 0;
             case "rs_addtime": {
                 const hours = integerArgument(arguments_, 0, name);
                 const minutes = integerArgument(arguments_, 1, name);
