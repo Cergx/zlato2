@@ -25,6 +25,8 @@ export interface PersonSpriteSet {
     turnWalk?: PADAnimation;
     attackImage?: HTMLCanvasElement;
     attack?: PADAnimation;
+    castImage?: HTMLCanvasElement;
+    cast?: PADAnimation;
     sufferImage?: HTMLCanvasElement;
     suffer?: PADAnimation;
     dieImage?: HTMLCanvasElement;
@@ -110,12 +112,13 @@ const loadSpriteSet = (resource: string): Promise<PersonSpriteSet> => {
         const pad = new PADParser(await response.arrayBuffer());
         const profile = selectAnimationProfile(pad, resource);
         const hasTurnProfile = pad.hasAnimation(turnBasedProfile.idleAction) && pad.hasAnimation(turnBasedProfile.walkAction);
-        const [idleImage, walkImage, turnIdleImage, turnWalkImage, attack, suffer, die] = await Promise.all([
+        const [idleImage, walkImage, turnIdleImage, turnWalkImage, attack, cast, suffer, die] = await Promise.all([
             loadCSX(Paths.PERSON_ANIMATION(resource, profile.idleFile)),
             loadCSX(Paths.PERSON_ANIMATION(resource, profile.walkFile)),
             profile === turnBasedProfile || !hasTurnProfile ? undefined : loadCSX(Paths.PERSON_ANIMATION(resource, turnBasedProfile.idleFile)),
             profile === turnBasedProfile || !hasTurnProfile ? undefined : loadCSX(Paths.PERSON_ANIMATION(resource, turnBasedProfile.walkFile)),
             loadOptionalAnimation(pad, resource, ["hits0.csx", "hits1.csx", "hits2.csx", "hits3.csx"], [0x10000, 0x20000, 0x40000, 0x80000]),
+            loadOptionalAnimation(pad, resource, ["cast.csx", "ss_attack.csx"], [0x40, 0x400]),
             loadOptionalAnimation(pad, resource, ["suffer.csx"], [0x80]),
             loadOptionalAnimation(pad, resource, ["die.csx"], [0x100]),
         ]);
@@ -131,6 +134,8 @@ const loadSpriteSet = (resource: string): Promise<PersonSpriteSet> => {
             turnWalk: hasTurnProfile ? pad.getAnimation(turnBasedProfile.walkAction) : undefined,
             attackImage: attack?.image,
             attack: attack?.animation,
+            castImage: cast?.image,
+            cast: cast?.animation,
             sufferImage: suffer?.image,
             suffer: suffer?.animation,
             dieImage: die?.image,

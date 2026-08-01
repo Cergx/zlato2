@@ -2,11 +2,21 @@ import type { MaskHDR } from "./parsers/LVLParser.ts";
 import type { TilePosition } from "./parsers/SEFParser.ts";
 
 const NO_WAY_BIT = 1 << 2;
-const CARDINAL_COST = 1;
-const DIAGONAL_COST = Math.SQRT2;
+const CARDINAL_COST = 10;
+const DIAGONAL_COST = 14;
+// Deliberately native rather than octile: 8 * Manhattan can overestimate a
+// diagonal (16 versus 14), but Server.dll uses this exact priority term.
+const HEURISTIC_AXIS_COST = 8;
 
-const neighborX = [-1, 0, 1, -1, 1, -1, 0, 1] as const;
-const neighborY = [-1, -1, -1, 0, 0, 1, 1, 1] as const;
+// Server.dll 0x1400FF28 expands these eight branches in this exact order.
+// The native collision test validates the destination footprint only; it does
+// not reject a diagonal merely because either adjacent cardinal cell is blocked.
+const neighborX = [1, -1, 0, 0, 1, 1, -1, -1] as const;
+const neighborY = [0, 0, 1, -1, -1, 1, 1, -1] as const;
+const neighborCost = [
+    CARDINAL_COST, CARDINAL_COST, CARDINAL_COST, CARDINAL_COST,
+    DIAGONAL_COST, DIAGONAL_COST, DIAGONAL_COST, DIAGONAL_COST,
+] as const;
 
 export class WorldGrid {
     public readonly width: number;
@@ -146,14 +156,10 @@ export class WorldGrid {
                 const dy = neighborY[i];
                 const next = { x: currentX + dx, y: currentY + dy };
                 if (!this.isWalkable(next, blocked, goalIndex)) continue;
-                if (dx !== 0 && dy !== 0) {
-                    if (!this.isWalkable({ x: currentX + dx, y: currentY }, blocked, startIndex)) continue;
-                    if (!this.isWalkable({ x: currentX, y: currentY + dy }, blocked, startIndex)) continue;
-                }
 
                 const nextIndex = this.index(next);
                 if (this.closed[nextIndex]) continue;
-                const tentative = this.gScore[currentIndex] + (dx === 0 || dy === 0 ? CARDINAL_COST : DIAGONAL_COST);
+                const tentative = this.gScore[currentIndex] + neighborCost[i];
                 if (tentative >= this.gScore[nextIndex]) continue;
 
                 this.cameFrom[nextIndex] = currentIndex;
@@ -175,9 +181,7 @@ export class WorldGrid {
     }
 
     private heuristic(x: number, y: number, goalX: number, goalY: number): number {
-        const dx = Math.abs(goalX - x);
-        const dy = Math.abs(goalY - y);
-        return Math.max(dx, dy) + (DIAGONAL_COST - CARDINAL_COST) * Math.min(dx, dy);
+        return HEURISTIC_AXIS_COST * (Math.abs(goalX - x) + Math.abs(goalY - y));
     }
 
     private reconstructPath(startIndex: number, goalIndex: number): TilePosition[] {

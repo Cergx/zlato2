@@ -13,7 +13,7 @@ import {
 } from "./WorldCoordinates.ts";
 import { expandDoorBarrierCells, type ScenarioTriggerState } from "./ScenarioRuntime.ts";
 import { CursorType } from "../enums/CursorTypes.ts";
-import type { CombatAnimationKind } from "./GameStateRuntime.ts";
+import type { CombatAnimationKind, CombatMovementResult } from "./GameStateRuntime.ts";
 import { MagicEffectAnimation } from "./MagicEffectAnimation.ts";
 import { originalCombatDistance } from "./systems/Combat.ts";
 import {
@@ -96,6 +96,10 @@ interface ActiveMagicAnimation {
 
 type HoverTargetKind = "person" | "door" | "trigger" | "reference" | "ground";
 
+// [INFERENCE] Native duplicate-object arbitration is not present in the available Client listing.
+// Cycle exact-name overlaps on a stable cadence so both persistent instances remain selectable.
+const DUPLICATE_TRIGGER_SELECTION_MS = 300;
+
 
 type RenderKind = "static" | "animation" | "person";
 
@@ -148,6 +152,10 @@ export class MapRenderer {
     private triggerMasksByName = new Map<string, LevelTriggerMask>();
     private interactiveTriggerMasks: readonly LevelTriggerMask[] = [];
     private hoveredTargetKey = "";
+    private hoveredTargetKind: HoverTargetKind | undefined;
+    private hoveredTargetName: string | undefined;
+    private pointerWorldPosition: WorldPosition | undefined;
+    private duplicateTriggerSelectionCycle = -1;
     private hoveredPerson: PersonRuntime | undefined;
     private currentCursor = CursorType.NORMAL;
     private flashInteractiveObjects = false;
@@ -163,8 +171,6 @@ export class MapRenderer {
     private paused = false;
 
     private readonly simulationStepMs = 1000 / 60;
-    private walkingSpeed = 48;
-    private runningSpeed = 96;
     private animationSpeed = 1;
     private alwaysRun = false;
     private showHints = true;
@@ -216,6 +222,7 @@ export class MapRenderer {
             return;
         }
         const world = { x: local.x + this.offset.x, y: local.y + this.offset.y };
+        this.pointerWorldPosition = world;
         const person = this.findPersonAt(world);
         if (person) {
             this.setHoveredTarget("person", person.person.combatantId, person);
@@ -230,7 +237,7 @@ export class MapRenderer {
         }
         const trigger = this.findTriggerAt(world, true);
         const reference = trigger ? this.isReferenceTrigger(trigger) : false;
-        if (trigger) this.setHoveredTarget(reference ? "reference" : "trigger", trigger.name);
+        if (trigger) this.setHoveredTarget(reference ? "reference" : "trigger", trigger.name, undefined, trigger.instanceKey);
         else {
             const groundStatus = this.combatMode && !this.magicTargeting ? this.combatGroundHoverStatus(world) : undefined;
             this.setHoveredTarget(groundStatus ? "ground" : undefined, groundStatus);
@@ -239,6 +246,7 @@ export class MapRenderer {
     };
 
     private readonly handleMouseLeave = () => {
+        this.pointerWorldPosition = undefined;
         this.setHoveredTarget();
         this.changeCursor(CursorType.NORMAL);
     };
@@ -344,8 +352,6 @@ export class MapRenderer {
 
     public applySettings(settings: Readonly<Record<number, boolean | number | string>>): void {
         this.animationSpeed = gameAnimationSpeed(settings);
-        this.walkingSpeed = 48;
-        this.runningSpeed = 96;
         this.scroller.setScrollSpeed(gameScrollSpeed(settings));
         this.alwaysRun = settings[12] === true;
         this.showHints = settings[13] !== false;
@@ -426,18 +432,22 @@ export class MapRenderer {
         this.hiddenPersons.delete(person.name);
     }
 
-    public playPersonCombatAnimation(technicalName: string, kind: CombatAnimationKind): void {
+    public playPersonCombatAnimation(technicalName: string, kind: CombatAnimationKind): number | undefined {
         const normalized = technicalName.toLowerCase();
         const runtime = normalized === "hero"
             ? this.player
             : this.persons.find((candidate) => candidate.person.combatantId.toLowerCase() === normalized);
-        if (!runtime) return;
+        if (!runtime) return undefined;
         if (kind === "die") this.deadPersons.add(normalized);
         runtime.combatAnimation = { kind, startedAt: this.simulationTick * this.simulationStepMs };
         runtime.route = [];
         runtime.targetIndex = 0;
         runtime.moving = false;
         runtime.running = false;
+        const metadata = kind === "attack" ? runtime.person.sprites.attack
+            : kind === "cast" ? runtime.person.sprites.cast
+                : kind === "suffer" ? runtime.person.sprites.suffer : runtime.person.sprites.die;
+        return metadata ? personAnimationClipDuration(metadata) : undefined;
     }
 
     public faceCombatant(technicalName: string, targetPosition: Readonly<WorldPosition>): void {
@@ -504,9 +514,9 @@ export class MapRenderer {
     }
 
     public setTriggerState(trigger: ScenarioTriggerState): void {
-        const existing = this.triggers.get(trigger.name);
+        const existing = this.triggers.get(trigger.instanceKey);
         if (existing) Object.assign(existing, trigger, { cells: trigger.cells.map((cell) => ({ ...cell })) });
-        else this.triggers.set(trigger.name, { ...trigger, cells: trigger.cells.map((cell) => ({ ...cell })) });
+        else this.triggers.set(trigger.instanceKey, { ...trigger, cells: trigger.cells.map((cell) => ({ ...cell })) });
         this.refreshInteractiveVisuals();
     }
 
@@ -616,7 +626,7 @@ export class MapRenderer {
         const context = this.highlightContext;
         if (!context) return;
         for (const trigger of this.interactiveTriggerMasks) {
-            const hovered = this.hoveredTargetKey.toLowerCase() === `trigger:${trigger.name}`.toLowerCase();
+            const hovered = this.hoveredTargetKind === "trigger" && this.hoveredTargetName?.toLowerCase() === trigger.name.toLowerCase();
             if (!this.flashInteractiveObjects && !hovered) continue;
             const drawX = trigger.position.x - this.offset.x;
             const drawY = trigger.position.y - this.offset.y;
@@ -691,6 +701,12 @@ export class MapRenderer {
         const edgeDirection = this.scroller.update();
         if (!edgeDirection && this.isEdgeCursor(this.currentCursor)) this.changeCursor(CursorType.NORMAL);
 
+        const selectionCycle = Math.floor(simulationTime / DUPLICATE_TRIGGER_SELECTION_MS);
+        if (selectionCycle !== this.duplicateTriggerSelectionCycle) {
+            this.duplicateTriggerSelectionCycle = selectionCycle;
+            this.refreshDuplicateTriggerHover();
+        }
+
         for (const levelAnimation of this.levelData.levelAnimations) {
             levelAnimation.animation?.update(this.simulationStepMs * this.animationSpeed);
         }
@@ -742,12 +758,17 @@ export class MapRenderer {
         }
         this.refreshAlternateMaskTiles();
         this.triggers.clear();
+        const occurrences = new Map<string, number>();
         for (const trigger of levelData.sefData.triggers) {
+            const occurrence = occurrences.get(trigger.name) ?? 0;
+            occurrences.set(trigger.name, occurrence + 1);
+            const instanceKey = occurrence === 0 ? trigger.name : `${trigger.name}#${occurrence}`;
             const exactMask = this.triggerMasksByName.get(trigger.name.toLowerCase());
             const cells = trigger.cellsName
                 ? levelData.sefData.cellGroups[trigger.cellsName] ?? []
                 : exactMask ? levelData.triggerCells[exactMask.name] ?? [] : [];
-            this.triggers.set(trigger.name, {
+            this.triggers.set(instanceKey, {
+                instanceKey,
                 name: trigger.name,
                 active: trigger.isActive ?? true,
                 visible: trigger.isVisible ?? true,
@@ -946,7 +967,7 @@ export class MapRenderer {
         } else if (interaction.kind === "door") {
             this.onDoorClick?.(interaction.door.name);
         } else {
-            this.onTriggerClick?.(interaction.trigger.name);
+            this.onTriggerClick?.(interaction.trigger.instanceKey);
         }
         return true;
     }
@@ -978,7 +999,7 @@ export class MapRenderer {
         }
     }
 
-    public stepCombatant(technicalName: string, targetPosition: Readonly<WorldPosition>, away: boolean): WorldPosition | undefined {
+    public stepCombatant(technicalName: string, targetPosition: Readonly<WorldPosition>, away: boolean): CombatMovementResult | undefined {
         const runtime = this.persons.find((candidate) => candidate.person.combatantId.toLowerCase() === technicalName.toLowerCase());
         if (!runtime) return undefined;
         const current = worldToCell(runtime.position);
@@ -1010,63 +1031,67 @@ export class MapRenderer {
         }
         if (!next) return undefined;
         const destination = cellToWorld(next);
+        const durationMs = this.movementDurationMs(runtime, destination);
         runtime.route = [destination];
         runtime.targetIndex = 0;
         runtime.moving = true;
         runtime.direction = this.directionFromVector(destination.x - runtime.position.x, destination.y - runtime.position.y);
-        return destination;
+        return { position: destination, durationMs };
     }
 
     private updatePlayer(deltaSeconds: number) {
         this.player.moving = false;
         if (this.player.combatAnimation) return;
         if (this.completePendingInteraction()) return;
-        const target = this.player.route[this.player.targetIndex];
-        if (!target) {
-            this.player.running = false;
-            this.pendingPersonInteraction = undefined;
-            return;
-        }
 
-        if (this.combatMode && this.playerCombatChargedTargetIndex !== this.player.targetIndex) {
-            if (this.onCombatMovementStep && !this.onCombatMovementStep()) {
-                this.player.route = [];
-                this.player.targetIndex = 0;
+        let remainingMs = deltaSeconds * 1000;
+        while (remainingMs > 0.001) {
+            const target = this.player.route[this.player.targetIndex];
+            if (!target) {
                 this.player.running = false;
                 this.pendingPersonInteraction = undefined;
                 return;
             }
-            this.playerCombatChargedTargetIndex = this.player.targetIndex;
-        }
-        this.moveRuntimeTowards(this.player, target, (this.player.running ? this.runningSpeed : this.walkingSpeed) * deltaSeconds);
-        if (Math.hypot(target.x - this.player.position.x, target.y - this.player.position.y) < 0.001) {
+
+            if (this.combatMode && this.playerCombatChargedTargetIndex !== this.player.targetIndex) {
+                if (this.onCombatMovementStep && !this.onCombatMovementStep()) {
+                    this.player.route = [];
+                    this.player.targetIndex = 0;
+                    this.player.running = false;
+                    this.pendingPersonInteraction = undefined;
+                    return;
+                }
+                this.playerCombatChargedTargetIndex = this.player.targetIndex;
+            }
+
+            remainingMs = this.moveRuntimeTowards(this.player, target, remainingMs);
+            if (Math.hypot(target.x - this.player.position.x, target.y - this.player.position.y) >= 0.001) return;
             this.player.targetIndex++;
             if (this.combatMode && this.onHeroCombatActionComplete?.()) return;
             if (this.completePendingInteraction()) return;
-            this.player.moving = this.player.targetIndex < this.player.route.length;
-            if (!this.player.moving) {
-                this.player.running = false;
-                this.pendingPersonInteraction = undefined;
-            }
+        }
+        this.player.moving = this.player.targetIndex < this.player.route.length;
+        if (!this.player.moving) {
+            this.player.running = false;
+            this.pendingPersonInteraction = undefined;
         }
     }
 
     private updatePersons(now: number, deltaSeconds: number) {
         for (const runtime of this.persons) {
-            if (!this.combatMode || runtime.person.combatantId !== this.currentCombatant || runtime.route.length > 0) runtime.moving = false;
+            runtime.moving = false;
             if (this.hiddenPersons.has(runtime.person.name)) continue;
-            if (runtime.person.combatantId.toLowerCase() === this.dialogueSpeakerCombatantId) {
-                runtime.moving = false;
-                continue;
-            }
+            if (runtime.person.combatantId.toLowerCase() === this.dialogueSpeakerCombatantId) continue;
             if (this.pendingPersonInteraction?.kind === "person"
                 && !this.pendingPersonInteraction.attack
                 && this.pendingPersonInteraction.runtime === runtime) continue;
             if (runtime.combatAnimation) continue;
+
+            let remainingMs = deltaSeconds * 1000;
             if (this.combatMode) {
                 const combatTarget = runtime.route[runtime.targetIndex];
                 if (!combatTarget) continue;
-                this.moveRuntimeTowards(runtime, combatTarget, this.walkingSpeed * deltaSeconds);
+                this.moveRuntimeTowards(runtime, combatTarget, remainingMs);
                 if (Math.hypot(combatTarget.x - runtime.position.x, combatTarget.y - runtime.position.y) < 0.001) {
                     runtime.route = [];
                     runtime.targetIndex = 0;
@@ -1083,40 +1108,58 @@ export class MapRenderer {
             }
             if (now < runtime.waitUntil) continue;
             if (runtime.targetIndex >= runtime.route.length && !this.planNpcRoute(runtime, now)) continue;
-            const target = runtime.route[runtime.targetIndex];
-            if (!target) continue;
-            const targetCell = worldToCell(target);
-            if (this.blockedCells(runtime).has(this.worldGrid.index(targetCell))) {
-                runtime.route = [];
-                runtime.targetIndex = 0;
-                runtime.waitUntil = now + 250;
-                continue;
-            }
-            this.moveRuntimeTowards(runtime, target, this.walkingSpeed * deltaSeconds);
-            if (Math.hypot(target.x - runtime.position.x, target.y - runtime.position.y) < 0.001) {
+
+            while (remainingMs > 0.001) {
+                const target = runtime.route[runtime.targetIndex];
+                if (!target) break;
+                const targetCell = worldToCell(target);
+                if (this.blockedCells(runtime).has(this.worldGrid.index(targetCell))) {
+                    runtime.route = [];
+                    runtime.targetIndex = 0;
+                    runtime.waitUntil = now + 250;
+                    break;
+                }
+                remainingMs = this.moveRuntimeTowards(runtime, target, remainingMs);
+                if (Math.hypot(target.x - runtime.position.x, target.y - runtime.position.y) >= 0.001) break;
                 runtime.targetIndex++;
-                if (runtime.targetIndex >= runtime.route.length) this.finishNpcRoute(runtime, now);
+                if (runtime.targetIndex >= runtime.route.length) {
+                    this.finishNpcRoute(runtime, now);
+                    break;
+                }
             }
         }
     }
 
-    private moveRuntimeTowards(runtime: PersonRuntime, target: Readonly<WorldPosition>, travel: number): void {
+    private moveRuntimeTowards(runtime: PersonRuntime, target: Readonly<WorldPosition>, elapsedMs: number): number {
         const dx = target.x - runtime.position.x;
         const dy = target.y - runtime.position.y;
-        const distance = Math.hypot(dx, dy);
-        if (distance <= travel || distance < 0.001) {
-            runtime.position.x = target.x;
-            runtime.position.y = target.y;
-            runtime.moving = true;
-            if (runtime !== this.player) this.onPersonPositionChange?.(runtime.person.combatantId, runtime.position);
-            return;
-        }
-        const ratio = travel / distance;
-        runtime.position.x += dx * ratio;
-        runtime.position.y += dy * ratio;
+        const durationMs = this.movementDurationMs(runtime, target);
         runtime.direction = this.directionFromVector(dx, dy);
         runtime.moving = true;
+        if (durationMs <= elapsedMs || durationMs < 0.001) {
+            runtime.position.x = target.x;
+            runtime.position.y = target.y;
+            if (runtime !== this.player) this.onPersonPositionChange?.(runtime.person.combatantId, runtime.position);
+            return Math.max(0, elapsedMs - durationMs);
+        }
+        const ratio = elapsedMs / durationMs;
+        runtime.position.x += dx * ratio;
+        runtime.position.y += dy * ratio;
         if (runtime !== this.player) this.onPersonPositionChange?.(runtime.person.combatantId, runtime.position);
+        return 0;
+    }
+
+    private movementDurationMs(runtime: PersonRuntime, target: Readonly<WorldPosition>): number {
+        const metadata = this.combatMode
+            ? runtime.person.sprites.turnWalk ?? runtime.person.sprites.walk
+            : runtime.running
+                ? runtime.person.sprites.run ?? runtime.person.sprites.walk
+                : runtime.person.sprites.walk;
+        const dx = Math.abs(target.x - runtime.position.x);
+        const dy = Math.abs(target.y - runtime.position.y);
+        const xDuration = dx > 0.001 && metadata.movementX > 0 ? dx * metadata.frameDuration / metadata.movementX : 0;
+        const yDuration = dy > 0.001 && metadata.movementY > 0 ? dy * metadata.frameDuration / metadata.movementY : 0;
+        return Math.max(xDuration, yDuration);
     }
 
     private planNpcRoute(runtime: PersonRuntime, now: number): boolean {
@@ -1223,6 +1266,7 @@ export class MapRenderer {
 
 
     private findTriggerAt(position: Readonly<WorldPosition>, includeReferences = false): TriggerRuntime | undefined {
+        const hits: TriggerRuntime[] = [];
         for (const trigger of this.triggers.values()) {
             if (!this.isTriggerInteractive(trigger) && !(includeReferences && this.isReferenceTrigger(trigger))) continue;
             const mask = this.triggerMasksByName.get(trigger.name.toLowerCase());
@@ -1231,13 +1275,18 @@ export class MapRenderer {
                 const y = Math.floor(position.y - mask.position.y);
                 if (x < 0 || y < 0 || x >= mask.image.width || y >= mask.image.height) continue;
                 const context = mask.image.getContext("2d", { willReadFrequently: true });
-                if ((context?.getImageData(x, y, 1, 1).data[3] ?? 0) > 16) return trigger;
+                if ((context?.getImageData(x, y, 1, 1).data[3] ?? 0) > 16) hits.push(trigger);
                 continue;
             }
             const cell = worldToCell(position);
-            if (trigger.cells.some((candidate) => candidate.x === cell.x && candidate.y === cell.y)) return trigger;
+            if (trigger.cells.some((candidate) => candidate.x === cell.x && candidate.y === cell.y)) hits.push(trigger);
         }
-        return undefined;
+        const first = hits[0];
+        if (!first) return undefined;
+        const duplicates = hits.filter((candidate) => candidate.name.toLowerCase() === first.name.toLowerCase());
+        if (duplicates.length < 2) return first;
+        const cycle = Math.floor(this.simulationTick * this.simulationStepMs / DUPLICATE_TRIGGER_SELECTION_MS);
+        return duplicates[cycle % duplicates.length];
     }
 
     private eventCanvasPosition(event: MouseEvent): WorldPosition {
@@ -1272,11 +1321,22 @@ export class MapRenderer {
             || cursor === CursorType.LUP || cursor === CursorType.RUP || cursor === CursorType.LDOWN || cursor === CursorType.RDOWN;
     }
 
-    private setHoveredTarget(kind?: HoverTargetKind, name?: string, person?: PersonRuntime): void {
-        const key = kind && name ? `${kind}:${name}` : "";
+    private refreshDuplicateTriggerHover(): void {
+        if (!this.pointerWorldPosition || this.hoveredTargetKind !== "trigger" && this.hoveredTargetKind !== "reference") return;
+        const trigger = this.findTriggerAt(this.pointerWorldPosition, true);
+        if (!trigger) return;
+        const reference = this.isReferenceTrigger(trigger);
+        this.setHoveredTarget(reference ? "reference" : "trigger", trigger.name, undefined, trigger.instanceKey);
+        this.changeCursor(this.cursorForTrigger(trigger));
+    }
+
+    private setHoveredTarget(kind?: HoverTargetKind, name?: string, person?: PersonRuntime, identity?: string): void {
+        const key = kind && name ? `${kind}:${identity ?? name}` : "";
         const nextPerson = kind === "person" ? person : undefined;
         const personChanged = nextPerson !== this.hoveredPerson;
         this.hoveredPerson = nextPerson;
+        this.hoveredTargetKind = kind;
+        this.hoveredTargetName = name;
         if (key === this.hoveredTargetKey && !personChanged) return;
         this.hoveredTargetKey = key;
         const doorOpened = kind === "door" && name ? this.doors.get(name)?.opened : undefined;
@@ -1326,9 +1386,11 @@ export class MapRenderer {
         if (combat) {
             const clip = combat.kind === "attack"
                 ? { metadata: sprites.attack, image: sprites.attackImage }
-                : combat.kind === "suffer"
-                    ? { metadata: sprites.suffer, image: sprites.sufferImage }
-                    : { metadata: sprites.die, image: sprites.dieImage };
+                : combat.kind === "cast"
+                    ? { metadata: sprites.cast, image: sprites.castImage }
+                    : combat.kind === "suffer"
+                        ? { metadata: sprites.suffer, image: sprites.sufferImage }
+                        : { metadata: sprites.die, image: sprites.dieImage };
             if (clip.metadata && clip.image) {
                 const elapsed = Math.max(0, now - combat.startedAt);
                 const frameDuration = personAnimationFrameDuration(clip.metadata);
@@ -1452,12 +1514,15 @@ export class MapRenderer {
 
     private refreshInteractiveVisuals(): void {
         const triggerMasks: LevelTriggerMask[] = [];
-        for (const trigger of this.levelData.sefData.triggers) {
-            if (!trigger.inventoryName && !trigger.isTransition) continue;
-            const runtime = this.triggers.get(trigger.name);
-            if (runtime && !this.isTriggerInteractive(runtime)) continue;
-            const exactMask = this.triggerMasksByName.get(trigger.name.toLowerCase());
-            if (exactMask) triggerMasks.push(exactMask);
+        const added = new Set<string>();
+        for (const trigger of this.triggers.values()) {
+            if (!trigger.inventoryName && !trigger.transition || !this.isTriggerInteractive(trigger)) continue;
+            const normalizedName = trigger.name.toLowerCase();
+            if (added.has(normalizedName)) continue;
+            const exactMask = this.triggerMasksByName.get(normalizedName);
+            if (!exactMask) continue;
+            triggerMasks.push(exactMask);
+            added.add(normalizedName);
         }
         this.interactiveTriggerMasks = triggerMasks;
     }

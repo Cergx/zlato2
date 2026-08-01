@@ -423,7 +423,7 @@ export class Game {
     }
 
     public async getPersonTradeCapabilities(owner: string): Promise<PersonTradeCapabilities> {
-        const technicalName = owner.replace(/^person:/i, "");
+        const technicalName = owner.replace(/^(?:person|trade):/i, "");
         return (await loadPersonCombatAssets(technicalName)).template?.trade ?? NO_PERSON_TRADE_CAPABILITIES;
     }
 
@@ -593,6 +593,7 @@ export class Game {
             Object.entries(runtime.regenerationElapsed).map(([name, elapsed]) => [name, { ...elapsed }]),
         );
         save.experience = runtime.experience;
+        save.lootGenerationLevel = runtime.lootGenerationLevel;
         save.clock = {
             day: Math.floor(runtime.elapsedMinutes / (24 * 60)),
             minuteOfDay: runtime.elapsedMinutes % (24 * 60),
@@ -634,7 +635,7 @@ export class Game {
         const response = await fetch(`${Paths.SCRIPTS}/inventory/hero_items.inv`);
         if (!response.ok) throw new Error(`Не удалось загрузить начальный инвентарь: HTTP ${response.status}`);
         const source = new TextDecoder("windows-1251").decode(await response.arrayBuffer());
-        level.getRuntime().initializeInventoryFromScript("Hero", source, { periodicSecondPass: false });
+        level.getRuntime().initializeInventoryFromScript("Hero", source);
     }
 
     private getItemCatalog(): Promise<ShippedItemCatalog> {
@@ -702,7 +703,7 @@ export class Game {
         if (!speaker || !level || !person?.scriptInventory) {
             throw new Error("Собеседник не поддерживает обмен");
         }
-        const owner = `person:${speaker}`;
+        const owner = `trade:${speaker}`;
         if (!level.getRuntime().hasInventory(owner)) {
             const fileName = person.scriptInventory.toLowerCase().endsWith(".inv") ? person.scriptInventory : `${person.scriptInventory}.inv`;
             const response = await fetch(`${Paths.SCRIPTS}/inventory/${fileName.toLowerCase()}`);

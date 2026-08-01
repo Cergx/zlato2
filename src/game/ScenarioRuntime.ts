@@ -6,6 +6,7 @@ export type ScenarioTriggerPhase = "enter" | "leave" | "click";
 
 export interface ScenarioTriggerState {
     name: string;
+    instanceKey: string;
     active: boolean;
     visible: boolean;
     transition: boolean;
@@ -69,6 +70,7 @@ export interface ScenarioRuntimeOptions {
 }
 
 interface TriggerRecord {
+    readonly instanceKey: string;
     readonly definition: SEFTrigger;
     readonly cells: readonly TilePosition[];
     active: boolean;
@@ -112,6 +114,8 @@ const cellKey = ({ x, y }: TilePosition) => `${x},${y}`;
 
 const cloneCell = ({ x, y }: TilePosition): TilePosition => ({ x, y });
 
+const triggerInstanceKey = (name: string, occurrence: number): string => occurrence === 0 ? name : `${name}#${occurrence}`;
+
 export const expandDoorBarrierCells = (cells: readonly TilePosition[]): readonly TilePosition[] => {
     if (cells.length !== 2) return cells.map(cloneCell);
 
@@ -146,12 +150,13 @@ export const expandDoorBarrierCells = (cells: readonly TilePosition[]): readonly
  */
 export class ScenarioRuntime {
     private readonly triggers = new Map<string, TriggerRecord>();
+    private readonly triggersByName = new Map<string, readonly TriggerRecord[]>();
     private readonly triggersByCell = new Map<string, readonly TriggerRecord[]>();
     private readonly doors = new Map<string, DoorRecord>();
     private readonly doorActions = new Map<string, { door: DoorRecord; opened: boolean }>();
     private readonly persons: NpcRecord[];
     private playerCell: TilePosition | undefined;
-    private activeTriggerNames = new Set<string>();
+    private activeTriggerKeys = new Set<string>();
     private lastRouteUpdateAt = 0;
 
     public constructor(
@@ -179,14 +184,14 @@ export class ScenarioRuntime {
     public setPlayerCell(cell: TilePosition): ScenarioTriggerEvent[] {
         const nextCell = this.requireCell(cell, "Player cell");
         const nextTriggers = this.activeTriggersAt(nextCell);
-        const nextNames = new Set(nextTriggers.map((trigger) => trigger.definition.name));
+        const nextKeys = new Set(nextTriggers.map((trigger) => trigger.instanceKey));
         const previousCell = this.playerCell;
         const events: ScenarioTriggerEvent[] = [];
 
         if (previousCell) {
-            for (const name of this.activeTriggerNames) {
-                if (nextNames.has(name)) continue;
-                const trigger = this.triggers.get(name);
+            for (const instanceKey of this.activeTriggerKeys) {
+                if (nextKeys.has(instanceKey)) continue;
+                const trigger = this.triggers.get(instanceKey);
                 if (!trigger) continue;
                 const event = this.createTriggerEvent("leave", trigger, nextCell);
                 events.push(event);
@@ -194,11 +199,12 @@ export class ScenarioRuntime {
             }
         }
 
+        const previousKeys = this.activeTriggerKeys;
         this.playerCell = nextCell;
-        this.activeTriggerNames = nextNames;
+        this.activeTriggerKeys = nextKeys;
 
         for (const trigger of nextTriggers) {
-            if (previousCell && this.activeTriggerNames.has(trigger.definition.name) && this.wasInsideTrigger(trigger.definition.name, previousCell)) continue;
+            if (previousCell && previousKeys.has(trigger.instanceKey) && this.wasInsideTrigger(trigger.instanceKey, previousCell)) continue;
             const event = this.createTriggerEvent("enter", trigger, nextCell);
             events.push(event);
             this.applyDoorAction(trigger.definition.name);
@@ -303,16 +309,22 @@ export class ScenarioRuntime {
     }
 
     private createTriggers() {
+        const occurrences = new Map<string, number>();
         for (const definition of this.sefData.triggers) {
-            if (this.triggers.has(definition.name)) continue;
+            const occurrence = occurrences.get(definition.name) ?? 0;
+            occurrences.set(definition.name, occurrence + 1);
+            const instanceKey = triggerInstanceKey(definition.name, occurrence);
             const cells = this.resolveTriggerCells(definition);
             const trigger: TriggerRecord = {
+                instanceKey,
                 definition,
                 cells,
                 active: definition.isActive ?? false,
                 visible: definition.isVisible ?? false,
             };
-            this.triggers.set(definition.name, trigger);
+            this.triggers.set(instanceKey, trigger);
+            const named = this.triggersByName.get(definition.name) ?? [];
+            this.triggersByName.set(definition.name, [...named, trigger]);
             for (const cell of cells) {
                 const key = cellKey(cell);
                 const existing = this.triggersByCell.get(key) ?? [];
@@ -413,13 +425,13 @@ export class ScenarioRuntime {
         return (this.triggersByCell.get(cellKey(cell)) ?? []).filter((trigger) => trigger.active);
     }
 
-    private wasInsideTrigger(name: string, cell: TilePosition): boolean {
-        return (this.triggersByCell.get(cellKey(cell)) ?? []).some((trigger) => trigger.definition.name === name && trigger.active);
+    private wasInsideTrigger(instanceKey: string, cell: TilePosition): boolean {
+        return (this.triggersByCell.get(cellKey(cell)) ?? []).some((trigger) => trigger.instanceKey === instanceKey && trigger.active);
     }
 
     private refreshActiveTriggers() {
         if (!this.playerCell) return;
-        this.activeTriggerNames = new Set(this.activeTriggersAt(this.playerCell).map((trigger) => trigger.definition.name));
+        this.activeTriggerKeys = new Set(this.activeTriggersAt(this.playerCell).map((trigger) => trigger.instanceKey));
     }
 
     private createTriggerEvent(phase: ScenarioTriggerPhase, trigger: TriggerRecord, cell: TilePosition): ScenarioTriggerEvent {
@@ -572,6 +584,7 @@ export class ScenarioRuntime {
 
     private createTriggerState(trigger: TriggerRecord): ScenarioTriggerState {
         return {
+            instanceKey: trigger.instanceKey,
             name: trigger.definition.name,
             active: trigger.active,
             visible: trigger.visible,
@@ -613,9 +626,9 @@ export class ScenarioRuntime {
         return cloneCell(cell);
     }
 
-    private requireTrigger(name: string): TriggerRecord {
-        const trigger = this.triggers.get(name);
-        if (!trigger) throw new Error(`Unknown scenario trigger ${name}`);
+    private requireTrigger(keyOrName: string): TriggerRecord {
+        const trigger = this.triggers.get(keyOrName) ?? this.triggersByName.get(keyOrName)?.[0];
+        if (!trigger) throw new Error(`Unknown scenario trigger ${keyOrName}`);
         return trigger;
     }
 

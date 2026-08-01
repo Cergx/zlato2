@@ -23,6 +23,7 @@ import {
     createOriginalCombatProfile,
     resolveOriginalAttack,
     originalCombatDistance,
+    originalInventoryLevelForWorld,
     originalLevelForExperience,
     selectOriginalPersonWeapon,
     type Combatant,
@@ -32,6 +33,11 @@ import {
     type OriginalWeaponProfile,
     type PersonCombatTemplate,
 } from "./systems/Combat.ts";
+import {
+    NATIVE_TARGET_RETRY_LIMIT,
+    nativeSelfPreservationProbability,
+    rankNativeCombatAiTargets,
+} from "./systems/NativeCombatAi.ts";
 import { cellToWorld, worldToCell, type WorldPosition } from "./WorldCoordinates.ts";
 import { createItemInstance, type EquipmentSlot, type ItemClass, type ItemDefinition, type ItemInstance } from "./systems/Items.ts";
 import { materializeInventory, parseInventoryScript } from "./parsers/INVParser.ts";
@@ -80,7 +86,7 @@ export interface AreaTransitionRequest {
     entrance?: string;
 }
 
-export type CombatAnimationKind = "attack" | "suffer" | "die";
+export type CombatAnimationKind = "attack" | "cast" | "suffer" | "die";
 
 export interface CombatantRuntimeSnapshot {
     readonly health: number;
@@ -152,6 +158,7 @@ export interface GameRuntimeSnapshot {
     bestiaryKills: Readonly<Record<string, number>>;
     personParameters: Readonly<Record<string, Readonly<Record<string, number>>> >;
     experience: number;
+    lootGenerationLevel: number;
     elapsedMinutes: number;
     magic: MagicRuntimeSnapshot;
     regenerationElapsed: Readonly<Record<string, RegenerationElapsedRuntimeSnapshot>>;
@@ -166,6 +173,11 @@ export interface RestRuntimeState {
 
 /** Client.dll defaults the rest clock multiplier to 60.0 at 0x1200282b..0x12002838. */
 export const NATIVE_REST_CLOCK_MINUTES_PER_SECOND = 60;
+
+export interface CombatMovementResult {
+    readonly position: WorldPosition;
+    readonly durationMs: number;
+}
 
 export interface GameStateRuntimeOptions {
     onLoadArea: (request: AreaTransitionRequest) => void;
@@ -186,14 +198,14 @@ export interface GameStateRuntimeOptions {
     onWeather?: (type: number) => void;
     onSound?: (arguments_: readonly SCRValue[]) => void;
     onPersonSound?: (shader: SoundShaderDefinition) => void;
-    onCombatAnimation?: (technicalName: string, kind: CombatAnimationKind) => void;
+    onCombatAnimation?: (technicalName: string, kind: CombatAnimationKind) => number | undefined;
     onMagicEffect?: (technicalName: string, targetName: string) => void;
     onWorldMagicEffect?: (technicalName: string, position: Readonly<WorldPosition>) => void;
     onClockChange?: (elapsedMinutes: number) => void;
     onRestChange?: (state: RestRuntimeState) => void;
     onCombatModeChange?: (active: boolean) => void;
     onCombatantPositionChange?: (technicalName: string, position: Readonly<WorldPosition>) => void;
-    onCombatantMoveRequest?: (technicalName: string, targetPosition: Readonly<WorldPosition>, away: boolean) => WorldPosition | undefined;
+    onCombatantMoveRequest?: (technicalName: string, targetPosition: Readonly<WorldPosition>, away: boolean) => CombatMovementResult | undefined;
     onCombatantFace?: (technicalName: string, targetPosition: Readonly<WorldPosition>) => void;
     onCombatantCanSee?: (technicalName: string, targetPosition: Readonly<WorldPosition>) => boolean;
     random?: () => number;
@@ -412,7 +424,7 @@ export class GameStateRuntime {
     private readonly persons = new Map<string, boolean>();
     private readonly personStatesByLevel = new Map<string, Map<string, boolean>>();
     private readonly inventories = new Map<string, Inventory>();
-    private readonly inventoryGenerations = new Map<string, number>();
+    private readonly initializedTriggerInventories = new Set<string>();
     private readonly questFlags = new Map<string, boolean>();
     private readonly stageFlags = new Map<string, boolean>();
     private readonly locationAccess = new Map<string, number>();
@@ -422,6 +434,9 @@ export class GameStateRuntime {
     private readonly combatants = new Map<string, Combatant>();
     private readonly personSounds = new Map<string, PersonCombatAssets["sounds"]>();
     private readonly corpseInventorySources = new Map<string, string>();
+    private readonly personInventoryLevels = new Map<string, number>();
+    private readonly traders = new Set<string>();
+    private lootGenerationLevel = 1;
     private readonly lootableCorpses = new Set<string>();
     private readonly random: () => number;
     private readonly combatProfiles = new Map<string, OriginalCombatProfile>();
@@ -455,8 +470,11 @@ export class GameStateRuntime {
     private remainingActionPoints = new Map<string, number>();
     private aiTurnQueue: string[] = [];
     private aiNextActionTimeMs = 0;
+    private lastCombatActionDurationMs = 350;
+    private aiTurnEndsAfterAction = false;
     private aiCycleFoundHostileTarget = false;
     private heroLastTarget: string | undefined;
+    private readonly aiPreferredTargets = new Map<string, string>();
     private scenario: ScenarioRuntime | null = null;
     private levelData: LevelData | null = null;
     private coreScript: SCRScript | null = null;
@@ -617,16 +635,16 @@ export class GameStateRuntime {
         return true;
     }
 
-    public async interactTrigger(name: string): Promise<boolean> {
+    public async interactTrigger(instanceKey: string): Promise<boolean> {
         const scenario = this.scenario;
         if (!scenario) return false;
-        const trigger = scenario.interactTrigger(name);
+        const trigger = scenario.interactTrigger(instanceKey);
         if (!trigger.active) return false;
         if (!trigger.inventoryName) return true;
 
-        const inventoryOwner = `trigger:${trigger.name}`;
+        const inventoryOwner = `trigger:${trigger.instanceKey}`;
         const existingOwner = this.inventoryOwner(inventoryOwner);
-        if (this.inventoryGenerations.get(existingOwner) !== this.generation) {
+        if (!this.initializedTriggerInventories.has(existingOwner)) {
             const fileName = trigger.inventoryName.toLowerCase().endsWith(".inv")
                 ? trigger.inventoryName.toLowerCase()
                 : `${trigger.inventoryName.toLowerCase()}.inv`;
@@ -634,17 +652,12 @@ export class GameStateRuntime {
             if (!response.ok) throw new Error(`Failed to load trigger inventory ${fileName}: HTTP ${response.status}`);
             const source = new TextDecoder("windows-1251").decode(await response.arrayBuffer());
             const script = parseInventoryScript(source);
-            const inventory = this.inventories.get(existingOwner);
-            const regenerate = script.regenerateChance > 0
-                && (script.regenerateChance > 100 || this.random() * 100 < script.regenerateChance);
-            if (!inventory || inventory.count === 0 || regenerate) {
-                this.inventories.delete(existingOwner);
-                this.initializeInventory(existingOwner, materializeInventory(script, {
-                    level: originalLevelForExperience(this.experience),
-                    random: this.random,
-                }));
-            }
-            this.inventoryGenerations.set(existingOwner, this.generation);
+            this.initializeInventory(existingOwner, materializeInventory(script, {
+                level: this.lootGenerationLevel,
+                random: this.random,
+                resolveMaximumStack: (technicalName) => this.inventoryCatalog.get(technicalName).maxStack,
+            }));
+            this.initializedTriggerInventories.add(existingOwner);
         }
         this.options.onContainerOpen?.(inventoryOwner, trigger.name);
         return true;
@@ -659,6 +672,12 @@ export class GameStateRuntime {
             this.setPersonParameter("Hero", name, value);
         }
         this.experience = experience;
+        const heroParameters = this.personParameters.get("Hero");
+        this.lootGenerationLevel = originalInventoryLevelForWorld([{
+            experience,
+            criticalHitSkill: heroParameters?.get("skill_critical_hit") ?? 0,
+            hackSkill: heroParameters?.get("skill_hack") ?? 0,
+        }]);
     }
 
     public adjustHeroProgression(
@@ -703,14 +722,24 @@ export class GameStateRuntime {
     public initializeInventoryFromScript(
         owner: string,
         source: string,
-        options: Readonly<{ periodicSecondPass?: boolean }> = {},
+        options: Readonly<{ pass?: "normal" | "decreased" }> = {},
     ): void {
         const script = parseInventoryScript(source);
         if (script.regenerateChance > 0 && script.regenerateChance <= 100) this.random();
+        const normalizedOwner = owner.toLowerCase();
+        const personInventoryOwner = normalizedOwner.startsWith("person:")
+            ? normalizedOwner.slice("person:".length)
+            : normalizedOwner.startsWith("trade:")
+                ? normalizedOwner.slice("trade:".length)
+                : undefined;
+        const materializationLevel = personInventoryOwner === undefined
+            ? this.lootGenerationLevel
+            : this.personInventoryLevels.get(personInventoryOwner) ?? this.lootGenerationLevel;
         this.initializeInventory(owner, materializeInventory(script, {
-            level: originalLevelForExperience(this.experience),
+            level: materializationLevel,
             random: this.random,
-            periodicSecondPass: options.periodicSecondPass,
+            pass: options.pass,
+            resolveMaximumStack: (technicalName) => this.inventoryCatalog.get(technicalName).maxStack,
         }));
     }
 
@@ -815,8 +844,8 @@ export class GameStateRuntime {
         const inventorySource = this.corpseInventorySources.get(normalized);
         if (!combatant?.isDead || !this.lootableCorpses.has(normalized) || !inventorySource) return false;
 
-        // The native person owns one inventory before and after death; trading and corpse
-        // looting therefore observe the same retained stacks rather than rerolling a corpse.
+        // Server.dll 0x1404B1C0 gives traders two inventories: normal merchant
+        // stock and a separately rolled, decreased personal inventory retained by the corpse.
         const inventoryOwner = `person:${resolvedName ?? technicalName}`;
         if (!this.hasInventory(inventoryOwner)) {
             const fileName = inventorySource.toLowerCase().endsWith(".inv")
@@ -825,7 +854,9 @@ export class GameStateRuntime {
             const response = await fetch(`${Paths.SCRIPTS}/inventory/${fileName}`);
             if (!response.ok) throw new Error(`Failed to load corpse inventory ${fileName}: HTTP ${response.status}`);
             const source = new TextDecoder("windows-1251").decode(await response.arrayBuffer());
-            this.initializeInventoryFromScript(inventoryOwner, source);
+            this.initializeInventoryFromScript(inventoryOwner, source, {
+                pass: this.traders.has(normalized) ? "decreased" : "normal",
+            });
         }
         this.options.onContainerOpen?.(inventoryOwner, resolvedName ?? technicalName);
         return true;
@@ -971,6 +1002,8 @@ export class GameStateRuntime {
         this.selectedMagicId = undefined;
         this.activeEnemies.clear();
         this.aiTurnQueue = [];
+        this.aiNextActionTimeMs = 0;
+        this.aiTurnEndsAfterAction = false;
         this.aiCycleFoundHostileTarget = false;
         this.combatRound = active ? 1 : 0;
         this.currentCombatant = active ? "hero" : undefined;
@@ -1020,6 +1053,7 @@ export class GameStateRuntime {
             .sort((left, right) => (this.combatProfiles.get(right)?.initiative ?? 0) - (this.combatProfiles.get(left)?.initiative ?? 0));
         this.aiCycleFoundHostileTarget = false;
         this.aiNextActionTimeMs = 0;
+        this.aiTurnEndsAfterAction = false;
         if (this.aiTurnQueue.length === 0) {
             this.finishAiCycle();
             return true;
@@ -1062,12 +1096,14 @@ export class GameStateRuntime {
             }
             const profile = this.combatProfiles.get(name);
             const combatant = this.combatants.get(name);
-            if (!profile || !combatant || combatant.isDead || !this.isCombatantPresent(name) || !this.combatTargetFor(name)) continue;
+            if (!profile || !combatant || combatant.isDead || !this.isCombatantPresent(name)
+                || this.nativeCombatTargetsFor(name).length === 0) continue;
 
             this.currentCombatant = name;
             this.remainingActionPoints.set(name, profile.actionPoints);
             this.combatMessage = "";
             this.aiNextActionTimeMs = 0;
+            this.aiTurnEndsAfterAction = false;
             this.syncCombatParameters(name);
             return;
         }
@@ -1093,85 +1129,81 @@ export class GameStateRuntime {
         this.syncCombatParameters("hero");
     }
 
-    private combatTargetFor(actorName: string): string | undefined {
+    private nativeCombatTargetsFor(actorName: string): readonly string[] {
         const actor = this.combatants.get(actorName);
-        if (!actor) return undefined;
+        if (!actor) return [];
         let candidates = [...this.combatants.entries()]
             .filter(([name, combatant]) => name !== actorName && this.isCombatantPresent(name) && !combatant.isDead
                 && this.factions.isHostile(actor.factionId, combatant.factionId))
             .map(([name]) => name);
-        if (candidates.length === 0) return undefined;
+        let primary = this.aiPreferredTargets.get(actorName);
+        let secondary: string | undefined;
 
         if (this.isPartyMember(actorName)) {
             const command = this.getPersonParameter(actorName, "ally_command");
-            if (command === ALLY_COMMANDS.CMD_ALLY_DO_NOT_FIGHT) return undefined;
+            if (command === ALLY_COMMANDS.CMD_ALLY_DO_NOT_FIGHT) return [];
             if (command === ALLY_COMMANDS.CMD_ALLY_HERO_TARGET) {
-                return this.heroLastTarget && candidates.includes(this.heroLastTarget) ? this.heroLastTarget : undefined;
+                if (!this.heroLastTarget || !candidates.includes(this.heroLastTarget)) return [];
+                candidates = [this.heroLastTarget];
+                primary = this.heroLastTarget;
             }
             if (command === ALLY_COMMANDS.CMD_ALLY_NOT_HERO_TARGET && this.heroLastTarget) {
                 candidates = candidates.filter((name) => name !== this.heroLastTarget);
             }
             if (command === ALLY_COMMANDS.CMD_ALLY_HERO_DANGER) {
                 const heroPosition = this.combatantPositions.get("hero");
-                if (!heroPosition) return undefined;
+                if (!heroPosition) return [];
                 candidates = candidates.filter((name) => {
                     const position = this.combatantPositions.get(name);
                     return position && originalCombatDistance(heroPosition, position) <= 8;
                 });
             }
             if (command === ALLY_COMMANDS.CMD_ALLY_WEAK_TARGET) {
-                return candidates.sort((left, right) =>
+                primary = [...candidates].sort((left, right) =>
                     (this.combatants.get(left)?.health ?? 0) - (this.combatants.get(right)?.health ?? 0))[0];
             }
+            secondary = this.heroLastTarget;
         }
 
-        const actorPosition = this.combatantPositions.get(actorName);
-        return candidates.sort((left, right) => {
-            if (!actorPosition) return left.localeCompare(right);
-            const leftPosition = this.combatantPositions.get(left);
-            const rightPosition = this.combatantPositions.get(right);
-            const leftDistance = leftPosition ? originalCombatDistance(actorPosition, leftPosition) : Number.POSITIVE_INFINITY;
-            const rightDistance = rightPosition ? originalCombatDistance(actorPosition, rightPosition) : Number.POSITIVE_INFINITY;
-            return leftDistance - rightDistance;
-        })[0];
+        return rankNativeCombatAiTargets(candidates.map((name, rosterOrder) => ({
+            id: name,
+            marker: 0,
+            priority: 0,
+            relationRank: relationScores[this.factions.get(actor.factionId, this.combatants.get(name)!.factionId)],
+            rosterOrder,
+        })), { primary, secondary }).map(({ id }) => id);
     }
 
-    private aiFriendlyTargets(actorName: string): readonly string[] {
-        const actor = this.combatants.get(actorName);
-        if (!actor) return [];
-        return [...this.combatants]
-            .filter(([name, combatant]) => !combatant.isDead && this.persons.get(name) !== false)
-            .filter(([, combatant]) => this.factions.get(actor.factionId, combatant.factionId) !== "hostile")
-            .map(([name]) => name);
-    }
 
-    private aiMagicChoice(actorName: string, enemyTargetName: string): Readonly<{ magic: MagicDefinition; targetName: string }> | undefined {
+    private availableAiMagic(actorName: string): readonly MagicDefinition[] {
         const actor = this.combatants.get(actorName);
         const template = this.combatProfileSources.get(actorName)?.template;
-        if (!actor || !template || template.spells.length === 0 || template.battleMagicUse <= 0) return undefined;
-        if (this.activeMagicEffects.some((effect) => effect.targetName === actorName && effect.specialId === "IDSPEC_SILENCE")) return undefined;
-        if (this.random() * 100 >= template.battleMagicUse) return undefined;
-
+        if (!actor || !template || template.spells.length === 0) return [];
+        if (this.activeMagicEffects.some((effect) => effect.targetName === actorName && effect.specialId === "IDSPEC_SILENCE")) return [];
         const actionPoints = this.remainingActionPoints.get(actorName) ?? 0;
-        const available = template.spells
+        return template.spells
             .map((spell) => this.magicDefinitionsByName.get(spell.spellId.toLowerCase()))
             .filter((magic): magic is MagicDefinition => magic !== undefined && magic.executable)
             .filter((magic) => magicActionPointCost(magic) <= actionPoints && magicEnergyCost(magic) <= actor.mana);
-        if (available.length === 0) return undefined;
+    }
 
-        const healingTarget = this.aiFriendlyTargets(actorName)
-            .map((name) => ({ name, combatant: this.combatants.get(name)!, profile: this.combatProfiles.get(name)! }))
-            .filter(({ combatant, profile }) => profile && combatant.health < profile.maxHealth)
-            .sort((left, right) => left.combatant.health / left.profile.maxHealth - right.combatant.health / right.profile.maxHealth)[0];
-        if (healingTarget && healingTarget.combatant.health * 100 / healingTarget.profile.maxHealth <= template.lifeHealing) {
-            const healing = available.filter((magic) => magic.target === "ally" && magic.healing);
-            if (healing.length > 0) {
-                return { magic: healing[Math.floor(this.random() * healing.length)], targetName: healingTarget.name };
-            }
-        }
+    private aiSelfPreservationChoice(actorName: string): MagicDefinition | undefined {
+        const actor = this.combatants.get(actorName);
+        const profile = this.combatProfiles.get(actorName);
+        const template = this.combatProfileSources.get(actorName)?.template;
+        if (!actor || !profile || !template || template.lifeHealing <= 0) return undefined;
+        const threshold = profile.maxHealth * template.lifeHealing / 100;
+        const probability = nativeSelfPreservationProbability(actor.health, threshold);
+        if (probability <= 0 || this.random() >= probability) return undefined;
+        return this.availableAiMagic(actorName).find((magic) => magic.target === "ally" && magic.healing);
+    }
 
+    private aiCombatMagicChoice(actorName: string, enemyTargetName: string): Readonly<{ magic: MagicDefinition; targetName: string }> | undefined {
+        const template = this.combatProfileSources.get(actorName)?.template;
+        if (!template || template.battleMagicUse <= 0 || this.random() * 100 >= template.battleMagicUse) return undefined;
+        const available = this.availableAiMagic(actorName).filter((magic) => !magic.healing);
         const offensive = available.filter((magic) => magic.target === "enemy");
-        const support = available.filter((magic) => magic.target === "ally" && !magic.healing)
+        const support = available.filter((magic) => magic.target === "ally")
             .filter((magic) => !magic.specials.some((special) =>
                 this.activeMagicEffects.some((effect) => effect.targetName === actorName && effect.specialId === special.id)));
         const candidates = [...offensive, ...support];
@@ -1180,15 +1212,20 @@ export class GameStateRuntime {
         return { magic, targetName: magic.target === "enemy" ? enemyTargetName : actorName };
     }
 
-    private moveAiCombatant(actorName: string, targetName: string, away: boolean): boolean {
+    private moveAiCombatant(actorName: string, targetName: string, away: boolean): number | undefined {
         const targetPosition = this.combatantPositions.get(targetName);
         const remaining = this.remainingActionPoints.get(actorName) ?? 0;
-        if (!targetPosition || remaining <= 0) return false;
-        const moved = this.options.onCombatantMoveRequest?.(actorName, cellToWorld(targetPosition), away);
-        if (!moved) return false;
-        this.combatantPositions.set(actorName, worldToCell(moved));
+        if (!targetPosition || remaining <= 0) return undefined;
+        const movement = this.options.onCombatantMoveRequest?.(actorName, cellToWorld(targetPosition), away);
+        if (!movement) return undefined;
+        this.combatantPositions.set(actorName, worldToCell(movement.position));
         this.remainingActionPoints.set(actorName, remaining - 1);
-        return true;
+        return movement.durationMs;
+    }
+
+    private scheduleAiActionCompletion(actorName: string, simulationTimeMs: number, durationMs: number): void {
+        this.aiNextActionTimeMs = simulationTimeMs + Math.max(1, durationMs);
+        this.aiTurnEndsAfterAction = (this.remainingActionPoints.get(actorName) ?? 0) <= 0;
     }
 
     private advanceAiTurns(simulationTimeMs: number): void {
@@ -1198,6 +1235,11 @@ export class GameStateRuntime {
             return;
         }
         if (simulationTimeMs < this.aiNextActionTimeMs) return;
+        if (this.aiTurnEndsAfterAction) {
+            this.aiTurnEndsAfterAction = false;
+            this.beginNextAiTurn();
+            return;
+        }
         const actorName = this.currentCombatant;
         const actor = this.combatants.get(actorName);
         const profile = this.combatProfiles.get(actorName);
@@ -1206,41 +1248,66 @@ export class GameStateRuntime {
             this.beginNextAiTurn();
             return;
         }
-        const targetName = this.combatTargetFor(actorName);
-        if (!targetName) {
+
+        const preservation = this.aiSelfPreservationChoice(actorName);
+        if (preservation && this.performCombatantMagic(actorName, preservation, actorName)) {
+            this.scheduleAiActionCompletion(actorName, simulationTimeMs, this.lastCombatActionDurationMs);
+            return;
+        }
+
+        const targetNames = this.nativeCombatTargetsFor(actorName);
+        if (targetNames.length === 0) {
             this.beginNextAiTurn();
             return;
         }
         this.aiCycleFoundHostileTarget = true;
 
-        const magicChoice = this.aiMagicChoice(actorName, targetName);
+        const magicChoice = this.aiCombatMagicChoice(actorName, targetNames[0]);
         if (magicChoice && this.performCombatantMagic(actorName, magicChoice.magic, magicChoice.targetName)) {
-            if ((this.remainingActionPoints.get(actorName) ?? 0) <= 0) this.beginNextAiTurn();
-            else this.aiNextActionTimeMs = simulationTimeMs + 350;
+            this.scheduleAiActionCompletion(actorName, simulationTimeMs, this.lastCombatActionDurationMs);
             return;
         }
 
-        const healthPercent = actor.health * 100 / Math.max(1, profile.maxHealth);
-        if (template && template.lifeEscape > 0 && healthPercent <= template.lifeEscape) {
-            if (this.moveAiCombatant(actorName, targetName, true) && (this.remainingActionPoints.get(actorName) ?? 0) > 0) {
-                this.aiNextActionTimeMs = simulationTimeMs + 350;
-            } else this.beginNextAiTurn();
+        const healthThreshold = profile.maxHealth * (template?.lifeEscape ?? 0) / 100;
+        if (healthThreshold > 0 && actor.health < healthThreshold) {
+            if ((this.remainingActionPoints.get(actorName) ?? 0) <= 3) {
+                this.remainingActionPoints.set(actorName, 0);
+                this.beginNextAiTurn();
+            } else {
+                const movementDuration = this.moveAiCombatant(actorName, targetNames[0], true);
+                if (movementDuration !== undefined) this.scheduleAiActionCompletion(actorName, simulationTimeMs, movementDuration);
+                else {
+                    this.remainingActionPoints.set(actorName, 0);
+                    this.beginNextAiTurn();
+                }
+            }
             return;
         }
 
-        const actorPosition = this.combatantPositions.get(actorName);
-        const targetPosition = this.combatantPositions.get(targetName);
-        if (actorPosition && targetPosition && originalCombatDistance(actorPosition, targetPosition) > profile.weapon.attackDistance) {
-            if (this.moveAiCombatant(actorName, targetName, false) && (this.remainingActionPoints.get(actorName) ?? 0) > 0) {
-                this.aiNextActionTimeMs = simulationTimeMs + 350;
-            } else this.beginNextAiTurn();
+        for (const targetName of targetNames.slice(0, NATIVE_TARGET_RETRY_LIMIT)) {
+            const actorPosition = this.combatantPositions.get(actorName);
+            const targetPosition = this.combatantPositions.get(targetName);
+            if (!actorPosition || !targetPosition) continue;
+            if (originalCombatDistance(actorPosition, targetPosition) > profile.weapon.attackDistance) {
+                const movementDuration = this.moveAiCombatant(actorName, targetName, false);
+                if (movementDuration === undefined) continue;
+                this.scheduleAiActionCompletion(actorName, simulationTimeMs, movementDuration);
+                return;
+            }
+
+            if ((this.remainingActionPoints.get(actorName) ?? 0) < profile.weapon.actionPointCost) {
+                this.remainingActionPoints.set(actorName, 0);
+                this.beginNextAiTurn();
+                return;
+            }
+            const result = this.performCombatAttack(actorName, targetName);
+            if (!result) continue;
+            this.scheduleAiActionCompletion(actorName, simulationTimeMs, this.lastCombatActionDurationMs);
             return;
         }
 
-        const result = this.performCombatAttack(actorName, targetName);
-        const remaining = this.remainingActionPoints.get(actorName) ?? 0;
-        if (!result || remaining < profile.weapon.actionPointCost) this.beginNextAiTurn();
-        else this.aiNextActionTimeMs = simulationTimeMs + 350;
+        this.remainingActionPoints.set(actorName, 0);
+        this.beginNextAiTurn();
     }
 
     public invokeHost(name: string, arguments_: readonly SCRValue[]): SCRValue | undefined {
@@ -1259,8 +1326,8 @@ export class GameStateRuntime {
         }
         if (!this.combatActive) this.setCombatMode(true);
         if (this.currentCombatant !== "hero") return undefined;
+        if (this.sharesHeroPartyOwner("hero", targetName)) return undefined;
         this.activeEnemies.add(targetName);
-        this.factions.set("hero", target.factionId, "hostile");
         this.heroLastTarget = targetName;
         const result = this.performCombatAttack("hero", targetName);
         if (target.isDead) this.activeEnemies.delete(targetName);
@@ -1276,10 +1343,14 @@ export class GameStateRuntime {
         this.cancelRest();
         this.restoreScriptVariables(save.scriptVariables);
         this.inventories.clear();
+        this.initializedTriggerInventories.clear();
         for (const [owner, stacks] of Object.entries(save.inventories)) {
             const inventory = this.createInventory();
             inventory.restore(stacks.map(({ quantity, ...item }) => ({ item, quantity })));
             this.inventories.set(owner, inventory);
+            if (owner.toLowerCase().startsWith("trigger:")) {
+                this.initializedTriggerInventories.add(this.inventoryOwner(owner));
+            }
         }
         const heroOwner = this.inventoryOwner("Hero");
         const heroInventory = this.inventories.get(heroOwner) ?? this.createInventory();
@@ -1317,6 +1388,8 @@ export class GameStateRuntime {
         this.bestiaryKills.clear();
         for (const [name, count] of Object.entries(save.bestiaryKills)) this.bestiaryKills.set(name.toLowerCase(), count);
         this.experience = save.experience;
+        this.lootGenerationLevel = save.lootGenerationLevel;
+        this.personInventoryLevels.clear();
         this.elapsedMinutes = save.clock.day * 24 * 60 + save.clock.minuteOfDay;
         this.clockAccumulatorMs = 0;
         this.lastClockTimeMs = undefined;
@@ -1422,6 +1495,7 @@ export class GameStateRuntime {
             personParameters: Object.fromEntries([...this.personParameters].map(([person, values]) => [person, Object.fromEntries(values)])),
             bestiaryKills: Object.fromEntries(this.bestiaryKills),
             experience: this.experience,
+            lootGenerationLevel: this.lootGenerationLevel,
             elapsedMinutes: this.elapsedMinutes,
             magic: this.magicSnapshot(),
             regenerationElapsed: this.regenerationElapsedSnapshot(),
@@ -1578,10 +1652,11 @@ export class GameStateRuntime {
             case "rs_personadditemtotrade": {
                 if (arguments_.length !== 3) return 0;
                 const owner = stringArgument(arguments_, 0, name);
+                const inventoryOwner = name === "rs_personadditemtotrade" ? this.tradeInventoryOwner(owner) : owner;
                 const item = stringArgument(arguments_, 1, name);
                 const quantity = numberArgument(arguments_, 2, name);
-                const changed = this.changeItemCount(owner, item, quantity);
-                if (changed === 1 && quantity > 0 && this.inventoryOwner(owner).toLowerCase() === "hero") {
+                const changed = this.changeItemCount(inventoryOwner, item, quantity);
+                if (changed === 1 && quantity > 0 && this.inventoryOwner(inventoryOwner).toLowerCase() === "hero") {
                     this.notifyItemReceived(item, quantity);
                 }
                 return 0;
@@ -1589,7 +1664,13 @@ export class GameStateRuntime {
             case "rs_personremoveitem":
             case "rs_personremoveitemtotrade":
                 if (arguments_.length !== 3) return 0;
-                this.changeItemCount(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name), -numberArgument(arguments_, 2, name));
+                this.changeItemCount(
+                    name === "rs_personremoveitemtotrade"
+                        ? this.tradeInventoryOwner(stringArgument(arguments_, 0, name))
+                        : stringArgument(arguments_, 0, name),
+                    stringArgument(arguments_, 1, name),
+                    -numberArgument(arguments_, 2, name),
+                );
                 return 0;
             case "rs_getmoney":
                 return this.itemCount("Hero", "MON_1_0_1");
@@ -1600,7 +1681,7 @@ export class GameStateRuntime {
                 this.setPersonParameter(stringArgument(arguments_, 0, name), stringArgument(arguments_, 1, name), numberArgument(arguments_, 2, name));
                 return 0;
             case "rs_addexp":
-                this.experience += numberArgument(arguments_, 0, name);
+                this.addHeroExperience(numberArgument(arguments_, 0, name));
                 return 0;
             case "rs_questcomplete":
                 this.questFlags.set(stringArgument(arguments_, 0, name), true);
@@ -1669,7 +1750,10 @@ export class GameStateRuntime {
                 this.questFlags.set(`party:${member}`, true);
                 const combatantName = this.resolveCombatantName(member);
                 const combatant = combatantName ? this.combatants.get(combatantName) : undefined;
-                if (combatant) this.factions.set("hero", combatant.factionId, "friendly");
+                if (combatant) {
+                    this.factions.set("hero", combatant.factionId, "friendly");
+                    this.factions.set(combatant.factionId, "hero", "friendly");
+                }
                 return 1;
             }
             case "rs_removefromheropartyname":
@@ -1808,6 +1892,8 @@ export class GameStateRuntime {
         this.persons.clear();
         this.personSounds.clear();
         this.corpseInventorySources.clear();
+        this.personInventoryLevels.clear();
+        this.traders.clear();
         this.lootableCorpses.clear();
         this.setCombatMode(false);
 
@@ -1824,8 +1910,12 @@ export class GameStateRuntime {
         if (personAssets?.sounds) this.personSounds.set(combatantId.toLowerCase(), personAssets.sounds);
         const normalizedId = combatantId.toLowerCase();
         if (person.scriptInventory) this.corpseInventorySources.set(normalizedId, person.scriptInventory);
+        // Server.dll stores one world loot rating at +0x26C4. Person and trigger
+        // inventories created later use that persisted rating, not current XP.
+        this.personInventoryLevels.set(normalizedId, this.lootGenerationLevel);
         if (personAssets?.resource?.containerAfterDie) this.lootableCorpses.add(normalizedId);
         const template = personAssets?.template;
+        if (template && Object.values(template.trade).some((capability) => capability !== 0)) this.traders.add(normalizedId);
         const parameters: Record<string, number> = template
             ? { ...template.attributes, ...template.skills }
             : {};
@@ -1974,12 +2064,27 @@ export class GameStateRuntime {
         this.options.onMessage?.(message);
     }
 
+    private sharesHeroPartyOwner(leftName: string, rightName: string): boolean {
+        const belongsToHeroParty = (name: string): boolean => name.toLowerCase() === "hero" || this.isPartyMember(name);
+        return belongsToHeroParty(leftName) && belongsToHeroParty(rightName);
+    }
+
+    private registerDamageHostility(targetName: string, attackerName: string): void {
+        const targetFaction = this.combatants.get(targetName)?.factionId;
+        const attackerFaction = this.combatants.get(attackerName)?.factionId;
+        if (targetFaction && attackerFaction && targetFaction !== attackerFaction) {
+            this.factions.set(targetFaction, attackerFaction, "hostile");
+        }
+        this.aiPreferredTargets.set(targetName, attackerName);
+    }
+
     private performCombatAttack(attackerName: string, targetName: string): OriginalAttackResult | undefined {
         const attacker = this.combatants.get(attackerName);
         const target = this.combatants.get(targetName);
         const attackerProfile = this.combatProfiles.get(attackerName);
         const targetProfile = this.combatProfiles.get(targetName);
-        if (!attacker || !target || !attackerProfile || !targetProfile || attacker.isDead || target.isDead) return undefined;
+        if (!attacker || !target || !attackerProfile || !targetProfile || attacker.isDead || target.isDead
+            || this.sharesHeroPartyOwner(attackerName, targetName)) return undefined;
         const remaining = this.remainingActionPoints.get(attackerName) ?? attackerProfile.actionPoints;
         if (remaining < attackerProfile.weapon.actionPointCost) {
             this.combatMessage = "Недостаточно очков действия";
@@ -2000,13 +2105,15 @@ export class GameStateRuntime {
         this.remainingActionPoints.set(attackerName, remaining - result.actionPointCost);
         target.health = result.healthAfter;
         target.isDead = result.killed;
+        if (result.hit) this.registerDamageHostility(targetName, attackerName);
         if (result.hit) this.damageAttackWeapon(attackerName, attackerProfile.weapon.itemId);
         if (result.hit) this.damageTargetArmor(targetName);
-        const heroKilled = result.killed && targetName.toLowerCase() === "hero";
-        if (heroKilled) this.options.onHeroDeath?.();
-        if (result.killed && attackerName.toLowerCase() === "hero") this.recordBestiaryKill(targetName);
-        this.options.onCombatAnimation?.(attackerName, "attack");
-        if (result.hit) this.options.onCombatAnimation?.(targetName, result.killed ? "die" : "suffer");
+        if (result.killed) this.processCombatDeath(targetName, attackerName);
+        const attackDuration = this.options.onCombatAnimation?.(attackerName, "attack") ?? 350;
+        const reactionDuration = result.hit
+            ? this.options.onCombatAnimation?.(targetName, result.killed ? "die" : "suffer") ?? 0
+            : 0;
+        this.lastCombatActionDurationMs = Math.max(attackDuration, reactionDuration);
         const attackSound = this.findPersonSound(attackerName, result.hit ? ["attack_0.hit", "attack_0"] : ["attack_0.miss", "attack_0"]);
         if (attackSound) this.options.onPersonSound?.(attackSound);
         if (result.hit) {
@@ -2103,6 +2210,33 @@ export class GameStateRuntime {
         this.refreshHeroCombatProfile();
     }
 
+    /**
+     * Server.dll 0x140183E0..0x14018509 credits the victim's authored
+     * `experience_value`, applies `reputation_delta`, then updates bestiary state.
+     * The native owner record at person +0x69C makes hero-party attacks share the
+     * hero owner in single-player.
+     */
+    private processCombatDeath(targetName: string, attackerName: string): void {
+        if (targetName.toLowerCase() === "hero") {
+            this.options.onHeroDeath?.();
+            return;
+        }
+        if (attackerName.toLowerCase() !== "hero" && !this.isPartyMember(attackerName)) return;
+        const template = this.combatProfileSources.get(targetName)?.template;
+        if (template) {
+            this.addHeroExperience(template.experienceValue);
+            const reputation = this.getPersonParameter("Hero", "reputation");
+            this.setPersonParameter("Hero", "reputation", reputation + template.reputationDelta);
+        }
+        this.recordBestiaryKill(targetName);
+    }
+
+    private addHeroExperience(amount: number): void {
+        if (!Number.isFinite(amount)) throw new Error("Hero experience delta must be finite");
+        this.experience = Math.max(0, this.experience + amount);
+        this.refreshHeroCombatProfile();
+    }
+
     private recordBestiaryKill(targetName: string): void {
         const bestiaryName = this.combatProfileSources.get(targetName)?.bestiaryName;
         if (!bestiaryName) return;
@@ -2158,6 +2292,7 @@ export class GameStateRuntime {
         this.combatMessage = "";
         this.publishNativeCombatMessage(COMBAT_HISTORY_STRING_IDS.castMagic, casterLiteraryName, magic.literaryName);
 
+        let reactionDurationMs = 0;
         for (const targetName of targetNames) {
             const target = this.combatants.get(targetName);
             const targetProfile = this.combatProfiles.get(targetName);
@@ -2188,10 +2323,14 @@ export class GameStateRuntime {
                 );
             }
             target.isDead = target.health === 0;
-            if (target.isDead && targetName === "hero") this.options.onHeroDeath?.();
-            if (target.isDead && casterName === "hero" && targetName !== "hero") this.recordBestiaryKill(targetName);
+            if (target.isDead) this.processCombatDeath(targetName, casterName);
             this.options.onMagicEffect?.(magic.technicalName, targetName);
-            if (damage > damageBeforeTarget) this.options.onCombatAnimation?.(targetName, target.isDead ? "die" : "suffer");
+            if (damage > damageBeforeTarget) {
+                reactionDurationMs = Math.max(
+                    reactionDurationMs,
+                    this.options.onCombatAnimation?.(targetName, target.isDead ? "die" : "suffer") ?? 0,
+                );
+            }
             if (target.isDead) this.activeEnemies.delete(targetName);
             if (target.isDead) this.publishNativeCombatMessage(COMBAT_HISTORY_STRING_IDS.died, targetLiteraryName);
             this.syncCombatParameters(targetName);
@@ -2202,7 +2341,8 @@ export class GameStateRuntime {
             caster.health = Math.min(casterProfile.maxHealth, caster.health + damage);
             healing += caster.health - before;
         }
-        this.options.onCombatAnimation?.(casterName, "attack");
+        const castDurationMs = this.options.onCombatAnimation?.(casterName, "cast") ?? 350;
+        this.lastCombatActionDurationMs = Math.max(castDurationMs, reactionDurationMs);
         const result: MagicCastResult = {
             spellId: magic.id,
             technicalName: magic.technicalName,
@@ -2527,7 +2667,7 @@ export class GameStateRuntime {
     public getCombatantRelationToHero(name: string): FactionRelation {
         const resolved = this.resolveCombatantName(name);
         const faction = resolved ? this.combatants.get(resolved)?.factionId : undefined;
-        return faction ? this.factions.get("hero", faction) : "friendly";
+        return faction ? this.factions.get(faction, "hero") : "friendly";
     }
 
     public isPartyMember(name: string): boolean {
@@ -2564,7 +2704,7 @@ export class GameStateRuntime {
                     dead: combatant.isDead,
                     profile,
                     faction: combatant.factionId,
-                    relationToHero: this.factions.get("hero", combatant.factionId),
+                    relationToHero: this.factions.get(combatant.factionId, "hero"),
                     partyMember: this.isPartyMember(name),
                     portraitResource: this.portraitResourceFor(name),
                 }];
@@ -2631,7 +2771,18 @@ export class GameStateRuntime {
 
     private inventoryOwner(owner: string): string {
         const normalized = owner.toLowerCase();
-        return [...this.inventories.keys()].find((candidate) => candidate.toLowerCase() === normalized) ?? owner;
+        const exact = [...this.inventories.keys()].find((candidate) => candidate.toLowerCase() === normalized);
+        if (exact) return exact;
+        if (!normalized.includes(":")) {
+            const resolvedPerson = this.resolveCombatantName(owner);
+            if (resolvedPerson && resolvedPerson.toLowerCase() !== "hero") return `person:${resolvedPerson}`;
+        }
+        return normalized === "hero" ? "Hero" : owner;
+    }
+
+    private tradeInventoryOwner(owner: string): string {
+        if (owner.toLowerCase().startsWith("trade:")) return owner;
+        return `trade:${owner.replace(/^person:/iu, "")}`;
     }
 
     private createInventory(): Inventory {

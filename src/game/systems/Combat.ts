@@ -83,6 +83,10 @@ export interface PersonCombatTemplate {
     readonly scriptId: string;
     readonly resourceId?: string;
     readonly level: number;
+    /** Server.dll person field `experience_value`, awarded through 0x140529FC on death. */
+    readonly experienceValue: number;
+    /** Server.dll person field `reputation_delta`, applied to the credited owner on death. */
+    readonly reputationDelta: number;
     readonly attributes: CharacterAttributes;
     readonly radiusSee: number;
     readonly radiusHear: number;
@@ -248,32 +252,30 @@ const DEFAULT_STATS: CombatStats = {
     resistances: { physical: 0, magical: 0 },
 };
 
-/** Stores the symmetric faction relation consumed by RS_GetTribesRelation-style lookups. */
+/** Stores the directional relation consumed by RS_GetTribesRelation-style lookups. */
 export class FactionRelations {
     private readonly relations = new Map<string, FactionRelation>();
 
-    get(leftFactionId: string, rightFactionId: string): FactionRelation {
-        assertIdentifier(leftFactionId, "Left faction id");
-        assertIdentifier(rightFactionId, "Right faction id");
-        if (leftFactionId === rightFactionId) return "friendly";
-        return this.relations.get(this.key(leftFactionId, rightFactionId)) ?? "friendly";
+    get(sourceFactionId: string, targetFactionId: string): FactionRelation {
+        assertIdentifier(sourceFactionId, "Source faction id");
+        assertIdentifier(targetFactionId, "Target faction id");
+        if (sourceFactionId === targetFactionId) return "friendly";
+        return this.relations.get(this.key(sourceFactionId, targetFactionId)) ?? "friendly";
     }
 
-    set(leftFactionId: string, rightFactionId: string, relation: FactionRelation): void {
-        assertIdentifier(leftFactionId, "Left faction id");
-        assertIdentifier(rightFactionId, "Right faction id");
-        if (leftFactionId === rightFactionId) throw new Error("A faction's relation to itself is always friendly");
-        this.relations.set(this.key(leftFactionId, rightFactionId), relation);
+    set(sourceFactionId: string, targetFactionId: string, relation: FactionRelation): void {
+        assertIdentifier(sourceFactionId, "Source faction id");
+        assertIdentifier(targetFactionId, "Target faction id");
+        if (sourceFactionId === targetFactionId) throw new Error("A faction's relation to itself is always friendly");
+        this.relations.set(this.key(sourceFactionId, targetFactionId), relation);
     }
 
-    isHostile(leftFactionId: string, rightFactionId: string): boolean {
-        return this.get(leftFactionId, rightFactionId) === "hostile";
+    isHostile(sourceFactionId: string, targetFactionId: string): boolean {
+        return this.get(sourceFactionId, targetFactionId) === "hostile";
     }
 
-    private key(leftFactionId: string, rightFactionId: string): string {
-        return leftFactionId < rightFactionId
-            ? `${leftFactionId.length}:${leftFactionId}${rightFactionId.length}:${rightFactionId}`
-            : `${rightFactionId.length}:${rightFactionId}${leftFactionId.length}:${leftFactionId}`;
+    private key(sourceFactionId: string, targetFactionId: string): string {
+        return `${sourceFactionId.length}:${sourceFactionId}${targetFactionId.length}:${targetFactionId}`;
     }
 }
 
@@ -479,6 +481,28 @@ export function originalLevelForExperience(experience: number): number {
     return level;
 }
 
+export interface OriginalWorldLootParticipant {
+    readonly experience: number;
+    readonly criticalHitSkill?: number;
+    readonly hackSkill?: number;
+}
+
+/**
+ * Server.dll 0x140254BC averages the eligible player roles' native levels,
+ * adding +5 for native skill index 15 (Combat Art) >= 10 and +5 for native
+ * skill index 23 (Lockpicking) >= 5. The result is persisted only in 1..100;
+ * inventory generation then adds one at 0x14048B96 before `.inv` filtering.
+ */
+export function originalInventoryLevelForWorld(participants: readonly OriginalWorldLootParticipant[]): number {
+    if (participants.length === 0) return 1;
+    const total = participants.reduce((sum, participant) => sum
+        + originalLevelForExperience(participant.experience)
+        + ((participant.criticalHitSkill ?? 0) >= 10 ? 5 : 0)
+        + ((participant.hackSkill ?? 0) >= 5 ? 5 : 0), 0);
+    const computedLootRating = Math.trunc(total / participants.length);
+    const persistedLootRating = computedLootRating >= 1 && computedLootRating <= 100 ? computedLootRating : 0;
+    return persistedLootRating + 1;
+}
 export function originalExperienceThreshold(level: number): number {
     const boundedLevel = Math.max(1, Math.min(99, Math.trunc(level)));
     return boundedLevel * (boundedLevel + 1) * 50;
@@ -589,6 +613,8 @@ export function parsePersonCombatScript(scriptId: string, source: string): Perso
         luck: readNonNegativeNumber(raw, "luck", scriptId),
     };
     const level = readNonNegativeNumber(raw, "level", scriptId);
+    const experienceValue = readNonNegativeNumber(raw, "experience_value", scriptId);
+    const reputationDelta = readInteger(raw, "reputation_delta", scriptId);
     const resourceId = typeof raw.res_name === "string" ? raw.res_name : undefined;
     if (resourceId !== undefined) assertIdentifier(resourceId, `Person script ${scriptId} resource id`);
 
@@ -605,6 +631,8 @@ export function parsePersonCombatScript(scriptId: string, source: string): Perso
         scriptId,
         resourceId,
         level,
+        experienceValue,
+        reputationDelta,
         attributes,
         skills,
         radiusSee: readNonNegativeNumber(raw, "radius_see", scriptId),
@@ -772,6 +800,14 @@ const weaponSkillParameter = (itemId: string): string => {
 const boundedStat = (value: number, minimum: number, maximum: number): number => Math.max(minimum, Math.min(maximum, Math.round(value)));
 const positiveStat = (value: number): number => Math.max(1, Math.round(value));
 const nonNegativeStat = (value: number): number => Math.max(0, Math.round(value));
+
+function readInteger(raw: Record<string, unknown>, key: string, scriptId: string): number {
+    const value = raw[key];
+    if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+        throw new Error(`Person script ${scriptId} has invalid ${key}`);
+    }
+    return value;
+}
 
 function readNonNegativeNumber(raw: Record<string, unknown>, key: string, scriptId: string): number {
     const value = raw[key];

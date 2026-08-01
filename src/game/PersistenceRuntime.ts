@@ -4,8 +4,9 @@ import type { SDBData } from "./parsers/SDBParser.ts";
 import type { Direction, SEFData, TilePosition } from "./parsers/SEFParser.ts";
 import type { WorldPosition } from "./WorldCoordinates.ts";
 import type { EquipmentSlot } from "./systems/Items.ts";
+import { originalInventoryLevelForWorld } from "./systems/Combat.ts";
 
-export const SAVE_FORMAT_VERSION = 7;
+export const SAVE_FORMAT_VERSION = 8;
 export const QUICK_SAVE_SLOT = "quick";
 export const DEFAULT_SAVE_KEY_PREFIX = "golden-land-2:save:";
 
@@ -93,6 +94,7 @@ export interface GameSaveData {
     magicEffects: MagicEffectSaveState[];
     regenerationElapsed: RegenerationElapsedStates;
     experience: number;
+    lootGenerationLevel: number;
     clock: GameClock;
 }
 
@@ -194,6 +196,7 @@ export const createSaveData = (location: SaveLocation): GameSaveData => ({
     bestiaryKills: {},
     personParameters: {},
     experience: 0,
+    lootGenerationLevel: originalInventoryLevelForWorld([]),
     magicEffects: [],
     regenerationElapsed: {},
     clock: { day: 0, minuteOfDay: 0 },
@@ -210,6 +213,7 @@ export const validateSaveData = (value: unknown): GameSaveData => {
     if (version === 4) return migrateVersion4(record);
     if (version === 5) return migrateVersion5(record);
     if (version === 6) return migrateVersion6(record);
+    if (version === 7) return migrateVersion7(record);
     if (version !== SAVE_FORMAT_VERSION) {
         if (typeof version === "number" && Number.isInteger(version) && version > SAVE_FORMAT_VERSION) {
             throw new SaveVersionError(`Save format version ${version} is newer than supported version ${SAVE_FORMAT_VERSION}`);
@@ -219,7 +223,7 @@ export const validateSaveData = (value: unknown): GameSaveData => {
 
     assertOnlyKeys(record, [
         "version", "location", "player", "inventories", "equipped", "scriptVariables", "doors", "triggers", "questFlags", "clock",
-        "persons", "personStatesByLevel", "stageFlags", "locationAccess", "bestiaryKills", "personParameters", "experience", "magicEffects", "regenerationElapsed",
+        "persons", "personStatesByLevel", "stageFlags", "locationAccess", "bestiaryKills", "personParameters", "experience", "lootGenerationLevel", "magicEffects", "regenerationElapsed",
     ], "save");
 
     return {
@@ -243,6 +247,7 @@ export const validateSaveData = (value: unknown): GameSaveData => {
         bestiaryKills: readBestiaryKills(requireField(record, "bestiaryKills", "save"), "save.bestiaryKills"),
         personParameters: readNestedNumberRecord(requireField(record, "personParameters", "save"), "save.personParameters"),
         experience: readNonNegativeNumber(requireField(record, "experience", "save"), "save.experience"),
+        lootGenerationLevel: readLootGenerationLevel(requireField(record, "lootGenerationLevel", "save"), "save.lootGenerationLevel"),
         magicEffects: readMagicEffects(requireField(record, "magicEffects", "save"), "save.magicEffects"),
         regenerationElapsed: readRegenerationElapsed(requireField(record, "regenerationElapsed", "save"), "save.regenerationElapsed"),
     };
@@ -448,6 +453,7 @@ function migrateVersion1(record: UnknownRecord): GameSaveData {
         bestiaryKills: {},
         personParameters: {},
         experience: 0,
+        lootGenerationLevel: readLegacyLootGenerationLevel(record, "version 1 save"),
         magicEffects: [],
         regenerationElapsed: {},
     };
@@ -474,6 +480,7 @@ function migrateVersion2(record: UnknownRecord): GameSaveData {
         bestiaryKills: {},
         personParameters: {},
         experience: 0,
+        lootGenerationLevel: readLegacyLootGenerationLevel(record, "version 2 save"),
         magicEffects: [],
         regenerationElapsed: {},
     };
@@ -501,6 +508,7 @@ function migrateVersion3(record: UnknownRecord): GameSaveData {
         bestiaryKills: {},
         personParameters: readNestedNumberRecord(requireField(record, "personParameters", "version 3 save"), "version 3 save.personParameters"),
         experience: readNonNegativeNumber(requireField(record, "experience", "version 3 save"), "version 3 save.experience"),
+        lootGenerationLevel: readLegacyLootGenerationLevel(record, "version 3 save"),
         magicEffects: [],
         regenerationElapsed: {},
     };
@@ -528,6 +536,7 @@ function migrateVersion4(record: UnknownRecord): GameSaveData {
         bestiaryKills: {},
         personParameters: readNestedNumberRecord(requireField(record, "personParameters", "version 4 save"), "version 4 save.personParameters"),
         experience: readNonNegativeNumber(requireField(record, "experience", "version 4 save"), "version 4 save.experience"),
+        lootGenerationLevel: readLegacyLootGenerationLevel(record, "version 4 save"),
         magicEffects: readMagicEffects(requireField(record, "magicEffects", "version 4 save"), "version 4 save.magicEffects"),
         regenerationElapsed: readRegenerationElapsed(requireField(record, "regenerationElapsed", "version 4 save"), "version 4 save.regenerationElapsed"),
     };
@@ -555,6 +564,7 @@ function migrateVersion5(record: UnknownRecord): GameSaveData {
         bestiaryKills: readBestiaryKills(requireField(record, "bestiaryKills", "version 5 save"), "version 5 save.bestiaryKills"),
         personParameters: readNestedNumberRecord(requireField(record, "personParameters", "version 5 save"), "version 5 save.personParameters"),
         experience: readNonNegativeNumber(requireField(record, "experience", "version 5 save"), "version 5 save.experience"),
+        lootGenerationLevel: readLegacyLootGenerationLevel(record, "version 5 save"),
         magicEffects: readMagicEffects(requireField(record, "magicEffects", "version 5 save"), "version 5 save.magicEffects"),
         regenerationElapsed: readRegenerationElapsed(requireField(record, "regenerationElapsed", "version 5 save"), "version 5 save.regenerationElapsed"),
     };
@@ -582,10 +592,64 @@ function migrateVersion6(record: UnknownRecord): GameSaveData {
         bestiaryKills: readBestiaryKills(requireField(record, "bestiaryKills", "version 6 save"), "version 6 save.bestiaryKills"),
         personParameters: readNestedNumberRecord(requireField(record, "personParameters", "version 6 save"), "version 6 save.personParameters"),
         experience: readNonNegativeNumber(requireField(record, "experience", "version 6 save"), "version 6 save.experience"),
+        lootGenerationLevel: readLegacyLootGenerationLevel(record, "version 6 save"),
         magicEffects: readMagicEffects(requireField(record, "magicEffects", "version 6 save"), "version 6 save.magicEffects"),
         regenerationElapsed: readRegenerationElapsed(requireField(record, "regenerationElapsed", "version 6 save"), "version 6 save.regenerationElapsed"),
     };
 }
+
+function migrateVersion7(record: UnknownRecord): GameSaveData {
+    assertOnlyKeys(record, [
+        "version", "location", "player", "inventories", "equipped", "scriptVariables", "doors", "triggers", "questFlags", "clock",
+        "persons", "personStatesByLevel", "stageFlags", "locationAccess", "bestiaryKills", "personParameters", "experience", "magicEffects", "regenerationElapsed",
+    ], "version 7 save");
+    const personParameters = readNestedNumberRecord(requireField(record, "personParameters", "version 7 save"), "version 7 save.personParameters");
+    const experience = readNonNegativeNumber(requireField(record, "experience", "version 7 save"), "version 7 save.experience");
+    const heroParameters = Object.entries(personParameters)
+        .find(([name]) => name.toLowerCase() === "hero")?.[1] ?? {};
+    return {
+        version: SAVE_FORMAT_VERSION,
+        location: readLocation(requireField(record, "location", "version 7 save"), "version 7 save.location"),
+        player: readPlayer(requireField(record, "player", "version 7 save"), "version 7 save.player", false),
+        inventories: readInventories(requireField(record, "inventories", "version 7 save"), "version 7 save.inventories"),
+        equipped: readEquippedItems(requireField(record, "equipped", "version 7 save"), "version 7 save.equipped"),
+        scriptVariables: readScriptVariables(requireField(record, "scriptVariables", "version 7 save"), "version 7 save.scriptVariables"),
+        doors: readDoorStates(requireField(record, "doors", "version 7 save"), "version 7 save.doors"),
+        triggers: readTriggerStates(requireField(record, "triggers", "version 7 save"), "version 7 save.triggers"),
+        questFlags: readBooleanRecord(requireField(record, "questFlags", "version 7 save"), "version 7 save.questFlags"),
+        clock: readClock(requireField(record, "clock", "version 7 save"), "version 7 save.clock"),
+        persons: readBooleanRecord(requireField(record, "persons", "version 7 save"), "version 7 save.persons"),
+        personStatesByLevel: readNestedBooleanRecord(requireField(record, "personStatesByLevel", "version 7 save"), "version 7 save.personStatesByLevel"),
+        stageFlags: readBooleanRecord(requireField(record, "stageFlags", "version 7 save"), "version 7 save.stageFlags"),
+        locationAccess: readNumberRecord(requireField(record, "locationAccess", "version 7 save"), "version 7 save.locationAccess"),
+        bestiaryKills: readBestiaryKills(requireField(record, "bestiaryKills", "version 7 save"), "version 7 save.bestiaryKills"),
+        personParameters,
+        experience,
+        lootGenerationLevel: originalInventoryLevelForWorld([{
+            experience,
+            criticalHitSkill: heroParameters.skill_critical_hit ?? 0,
+            hackSkill: heroParameters.skill_hack ?? 0,
+        }]),
+        magicEffects: readMagicEffects(requireField(record, "magicEffects", "version 7 save"), "version 7 save.magicEffects"),
+        regenerationElapsed: readRegenerationElapsed(requireField(record, "regenerationElapsed", "version 7 save"), "version 7 save.regenerationElapsed"),
+    };
+}
+function readLegacyLootGenerationLevel(record: UnknownRecord, path: string): number {
+    const experience = record.experience === undefined
+        ? 0
+        : readNonNegativeNumber(record.experience, `${path}.experience`);
+    const personParameters = record.personParameters === undefined
+        ? {}
+        : readNestedNumberRecord(record.personParameters, `${path}.personParameters`);
+    const heroParameters = Object.entries(personParameters)
+        .find(([name]) => name.toLowerCase() === "hero")?.[1] ?? {};
+    return originalInventoryLevelForWorld([{
+        experience,
+        criticalHitSkill: heroParameters.skill_critical_hit ?? 0,
+        hackSkill: heroParameters.skill_hack ?? 0,
+    }]);
+}
+
 
 
 function readLegacyLocation(value: unknown, path: string): SaveLocation {
@@ -866,7 +930,6 @@ function readRegenerationElapsed(value: unknown, path: string): RegenerationElap
     const record = requireRecord(value, path);
     const result: RegenerationElapsedStates = {};
     for (const [name, elapsed] of Object.entries(record)) {
-        assertRecordKey(name, path);
         const elapsedPath = `${path}.${name}`;
         const elapsedRecord = requireRecord(elapsed, elapsedPath);
         assertOnlyKeys(elapsedRecord, ["health", "energy"], elapsedPath);
@@ -876,6 +939,12 @@ function readRegenerationElapsed(value: unknown, path: string): RegenerationElap
         };
     }
     return result;
+}
+
+function readLootGenerationLevel(value: unknown, path: string): number {
+    const level = readSafeInteger(value, path);
+    if (level < 1 || level > 101) throw new SaveFormatError(`${path} must be between 1 and 101`);
+    return level;
 }
 
 function readNonNegativeNumber(value: unknown, path: string): number {

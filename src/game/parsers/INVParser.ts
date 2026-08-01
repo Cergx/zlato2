@@ -18,7 +18,8 @@ export interface InventoryScript {
 export interface InventoryMaterializationOptions {
     readonly level?: number;
     readonly random?: () => number;
-    readonly periodicSecondPass?: boolean;
+    readonly pass?: "normal" | "decreased";
+    readonly resolveMaximumStack?: (technicalName: string) => number;
 }
 
 const ITEM_PATTERN = /^\s*item\s+"([^"]+)"\s+(.+?)\s*$/i;
@@ -52,32 +53,54 @@ export function parseInventoryScript(source: string): InventoryScript {
     };
 }
 
+
 export function materializeInventory(
     script: InventoryScript,
     options: InventoryMaterializationOptions = {},
 ): Readonly<Record<string, number>> {
-    const inventory: Record<string, number> = {};
+    const stacksByTechnicalName = new Map<string, { technicalName: string; quantities: number[] }>();
     const random = options.random ?? Math.random;
     const level = options.level ?? 1;
-    const materializePass = (chanceDivisor: number, quantityDivisor: number): void => {
-        for (const entry of script.entries) {
-            const minimumLevel = script.levelOffset + entry.minimumLevel;
-            const maximumLevel = script.levelOffset + entry.maximumLevel;
-            if (level < minimumLevel || level > maximumLevel) continue;
-            const chance = chanceDivisor <= 0 ? Number.POSITIVE_INFINITY : entry.chance / chanceDivisor;
-            if (chance <= 0 || (chance <= 100 && random() * 100 >= chance)) continue;
-            const divisor = quantityDivisor <= 0 ? Number.POSITIVE_INFINITY : quantityDivisor;
-            const minimumQuantity = Math.ceil(entry.minimumQuantity / divisor);
-            const maximumQuantity = Math.ceil(entry.maximumQuantity / divisor);
-            const quantity = maximumQuantity <= minimumQuantity
-                ? minimumQuantity
-                : minimumQuantity + Math.floor(random() * (maximumQuantity - minimumQuantity + 1));
-            if (quantity > 0) inventory[entry.technicalName] = (inventory[entry.technicalName] ?? 0) + quantity;
+    const decreased = options.pass === "decreased";
+    const chanceDivisor = decreased ? script.chanceDecrease : 1;
+    const quantityDivisor = decreased ? script.quantityDecrease : 1;
+    for (const entry of script.entries) {
+        const minimumLevel = script.levelOffset + entry.minimumLevel;
+        const maximumLevel = script.levelOffset + entry.maximumLevel;
+        if (level < minimumLevel || level > maximumLevel) continue;
+        const chance = chanceDivisor <= 0 ? Number.POSITIVE_INFINITY : entry.chance / chanceDivisor / 100;
+        if (chance <= 0) continue;
+        if (chance <= 1 && random() >= chance) continue;
+        const divisor = quantityDivisor <= 0 ? Number.POSITIVE_INFINITY : quantityDivisor;
+        const minimumQuantity = Math.ceil(entry.minimumQuantity / divisor);
+        const maximumQuantity = Math.ceil(entry.maximumQuantity / divisor);
+        const quantity = maximumQuantity <= minimumQuantity
+            ? minimumQuantity
+            : minimumQuantity + Math.floor(random() * (maximumQuantity - minimumQuantity + 1));
+        if (quantity <= 0) continue;
+        const normalizedTechnicalName = entry.technicalName.toLowerCase();
+        let generated = stacksByTechnicalName.get(normalizedTechnicalName);
+        if (!generated) {
+            generated = { technicalName: entry.technicalName, quantities: [] };
+            stacksByTechnicalName.set(normalizedTechnicalName, generated);
         }
-    };
-    materializePass(1, 1);
-    if (options.periodicSecondPass !== false && Object.keys(inventory).length < 4) {
-        materializePass(script.chanceDecrease, script.quantityDecrease);
+        const resolvedMaximumStack = options.resolveMaximumStack?.(entry.technicalName) ?? 0x7fffffff;
+        const maximumStack = Number.isSafeInteger(resolvedMaximumStack) && resolvedMaximumStack > 0
+            ? resolvedMaximumStack
+            : 0x7fffffff;
+        const existingStack = maximumStack > 1
+            ? generated.quantities.findIndex((stackQuantity) => stackQuantity < maximumStack)
+            : -1;
+        if (existingStack >= 0) {
+            generated.quantities[existingStack] += 1;
+        } else {
+            generated.quantities.push(Math.min(quantity, maximumStack));
+        }
+    }
+    const inventory: Record<string, number> = {};
+    for (const { technicalName, quantities } of stacksByTechnicalName.values()) {
+        inventory[technicalName] = quantities.reduce((total, quantity) => total + quantity, 0);
     }
     return inventory;
 }
+
