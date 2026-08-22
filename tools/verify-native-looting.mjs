@@ -218,7 +218,7 @@ const statusMessages = [];
 const runtime = new GameStateRuntime({
     onLoadArea: () => undefined,
     onMessage: (message) => statusMessages.push(String(message)),
-    resolveItemLiteraryName: (technicalName) => technicalName === "FOD_1_1_1" ? "Проверочный предмет" : technicalName,
+    resolveItemLiteraryName: (technicalName) => technicalName === "FOD_1_1_1" ? "Проверочный предмет" : technicalName === "QST_1_0_51" ? "Браслет Алдана" : technicalName,
     random: () => 0,
 });
 runtime.initializeInventoryFromScript("person:merchant", 'regenerate_chance 0\nitem "FOD_1_1_1" 1 100 100 1 1\n');
@@ -235,6 +235,13 @@ assert.deepEqual(runtime.getInventory("Hero"), { FOD_1_1_1: 1 });
 assert.deepEqual(statusMessages, [], "Loot transfers must not create status-history messages");
 runtime.invokeHost("RS_PersonAddItem", ["Hero", "FOD_1_1_1", 1]);
 assert.deepEqual(statusMessages, ["Получен предмет: Проверочный предмет"], "Scripted item grants must create a status-history message");
+runtime.invokeHost("RS_PersonAddItem", ["Hero", "QST_1_0_51", 1]);
+assert.equal(runtime.getInventory("Hero").QST_1_0_51, 1, "Kotar's Aldan bracelet branch must add QST_1_0_51 to the hero inventory");
+assert.deepEqual(statusMessages, ["Получен предмет: Проверочный предмет", "Получен предмет: Браслет Алдана"]);
+Object.assign(runtime, { personInventoryScripts: new Map([["l1_3.p1_kotar", 'regenerate_chance 0\nitem "QST_1_0_1" 1 100 1 5 5\n']]) });
+assert.equal(runtime.invokeHost("RS_PersonTransferItemI", ["L1_3.P1_Kotar", "Hero", "QST_1_0_1", 1]), 1);
+assert.equal(runtime.getInventory("Hero").QST_1_0_1, 1, "Kotar's paper branch must materialize q1.inv before transferring QST_1_0_1");
+assert.equal(runtime.getInventory("L1_3.P1_Kotar").QST_1_0_1, 4);
 
 
 const openedDuplicateOwners = [];

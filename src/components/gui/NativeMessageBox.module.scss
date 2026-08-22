@@ -49,7 +49,25 @@
     background: transparent;
 }
 
-.confirm img {
+.messageBox:has(.cancel) .confirm {
+    left: 35px;
+}
+
+.cancel {
+    position: absolute;
+    z-index: 2;
+    top: 70px;
+    left: 85px;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+}
+
+.confirm img,
+.cancel img {
     position: absolute;
     inset: 0;
     width: 40px;
@@ -64,19 +82,25 @@
 }
 
 .confirm:hover .up,
-.confirm:focus-visible .up {
+.confirm:focus-visible .up,
+.cancel:hover .up,
+.cancel:focus-visible .up {
     opacity: 0;
 }
 
 .confirm:hover .hover,
-.confirm:focus-visible .hover {
+.confirm:focus-visible .hover,
+.cancel:hover .hover,
+.cancel:focus-visible .hover {
     opacity: 1;
 }
 
-.confirm:active .hover {
+.confirm:active .hover,
+.cancel:active .hover {
     opacity: 0;
 }
 
-.confirm:active .down {
+.confirm:active .down,
+.cancel:active .down {
     opacity: 1;
 }

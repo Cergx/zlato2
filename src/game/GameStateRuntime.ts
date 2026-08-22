@@ -6,6 +6,7 @@ import {
     type NpcRouteState,
     type ScenarioDoorChange,
     type ScenarioScriptRequest,
+    type ScenarioTransitionRequest,
     type ScenarioTriggerState,
 } from "./ScenarioRuntime.ts";
 import {
@@ -48,6 +49,7 @@ import type { ShippedItem } from "./ItemCatalogRuntime.ts";
 import type { SoundShaderDefinition } from "./SoundShaderRuntime.ts";
 import type { Direction, RouteType, SEFPerson } from "./parsers/SEFParser.ts";
 import { nativeDayPhase } from "./NativeDayNight.ts";
+import { WorldGrid } from "./WorldGrid.ts";
 import {
     loadMagicCatalog,
     magicActionPointCost,
@@ -182,7 +184,7 @@ export interface CombatMovementResult {
 
 export interface GameStateRuntimeOptions {
     onLoadArea: (request: AreaTransitionRequest) => void;
-    onGlobalMap?: () => void;
+    onGlobalMap?: (transition?: ScenarioTransitionRequest) => void;
     onDialog?: (arguments_: readonly SCRValue[]) => void;
     onPersonPresence?: (technicalName: string, present: boolean) => void;
     onDynamicPerson?: (person: DynamicPersonDefinition) => void;
@@ -418,6 +420,13 @@ const MAGIC_PROFILE_MODIFIERS: Readonly<Record<string, string>> = {
 
 const dynamicPersonLevelKey = (levelData: LevelData): string => `${levelData.gameMode}:${levelData.levelName.toLowerCase()}`;
 const baseCombatantName = (name: string): string => name.replace(/#\d+$/u, "");
+const GLOBAL_MAP_LOCATION_IDS = new Set([
+    "l1_1", "l89_1_a", "l2_1", "l5_1", "l4_1", "l3_3", "l19", "l7_1", "l6_1", "l9_1", "l8_1", "l42",
+    "l11_1", "l14_1", "l13_1", "l10_1", "l12_1",
+    "l15", "l16", "l18_1", "l21_1", "l22", "l23", "l24", "l25_1", "l27", "l96", "l66", "l94", "l48",
+    "l49", "l56", "l64", "l99_1", "l26", "l52_1", "l53", "l54", "l29_1", "l31_2", "l33_1", "l35",
+    "l32", "l73_a", "l91", "l75", "l78", "l40_2", "l41", "l77", "l83", "l85", "l43_1", "l97",
+]);
 
 export class GameStateRuntime {
     private readonly scr: SCRRuntime;
@@ -435,6 +444,7 @@ export class GameStateRuntime {
     private readonly combatants = new Map<string, Combatant>();
     private readonly personSounds = new Map<string, PersonCombatAssets["sounds"]>();
     private readonly corpseInventorySources = new Map<string, string>();
+    private readonly personInventoryScripts = new Map<string, string>();
     private readonly personInventoryLevels = new Map<string, number>();
     private readonly traders = new Set<string>();
     private lootGenerationLevel = 1;
@@ -528,7 +538,7 @@ export class GameStateRuntime {
             .map((person) => ({ ...person, position: { ...person.position } }));
 
         const personDefinitions = [...levelData.sefData.persons, ...this.dynamicPersons];
-        const [personAssets, personResources, heroAssets, magicDefinitions, nativeFactionRelations, allyPortraitMappings] = await Promise.all([
+        const [personAssets, personResources, personInventoryScripts, heroAssets, magicDefinitions, nativeFactionRelations, allyPortraitMappings] = await Promise.all([
             Promise.all(personDefinitions.map(async (person) => [
                 person.name.toLowerCase(),
                 await loadPersonCombatAssets(person.name),
@@ -537,6 +547,11 @@ export class GameStateRuntime {
                 person.name.toLowerCase(),
                 await loadPersonResourceName(person.name),
             ] as const)),
+            Promise.all(personDefinitions.filter((person) => person.scriptInventory).map(async (person) => {
+                const response = await fetch(`${Paths.SCRIPTS}/inventory/${person.scriptInventory!.toLowerCase()}.inv`);
+                if (!response.ok) throw new Error(`Person inventory ${person.scriptInventory} failed: HTTP ${response.status}`);
+                return [person.name.toLowerCase(), new TextDecoder("windows-1251").decode(await response.arrayBuffer())] as const;
+            })),
             loadPersonCombatAssets("hero"),
             loadMagicCatalog(),
             this.nativeFactionRelationsLoaded ? Promise.resolve([]) : loadNativeFactionRelations(),
@@ -550,6 +565,8 @@ export class GameStateRuntime {
         this.allyPortraitMappings = allyPortraitMappings;
         this.personResources.clear();
         for (const [name, resource] of personResources) this.personResources.set(name, resource);
+        this.personInventoryScripts.clear();
+        for (const [name, source] of personInventoryScripts) this.personInventoryScripts.set(name, source);
         this.magicDefinitions.clear();
         this.magicDefinitionsByName.clear();
         for (const definition of magicDefinitions) {
@@ -559,6 +576,13 @@ export class GameStateRuntime {
         this.scenario = new ScenarioRuntime(levelData.sefData, levelData.lvlData, levelData.triggerCells, {
             random: this.random,
             onScript: (request) => void this.executeTriggerRequest(request, generation),
+            onTransition: (request) => {
+                // Only dedicated global-map exits may send the hero to the world map;
+                // ordinary location transitions keep their own target.
+                if (request.scriptName && /tg_exit_gm\.scr$/i.test(request.scriptName)) {
+                    this.options.onGlobalMap?.(request);
+                }
+            },
             onDoorChange: (change) => this.options.onDoorChange?.(change),
             onTriggerChange: ({ trigger }) => this.options.onTriggerChange?.(trigger),
         });
@@ -623,6 +647,66 @@ export class GameStateRuntime {
 
     public getDynamicPersons(): readonly DynamicPersonDefinition[] {
         return this.dynamicPersons.map((person) => ({ ...person, position: { ...person.position } }));
+    }
+    public async addWorldMapEncounterPersons(
+        technicalNames: readonly string[],
+        disposition: "evil" | "good" | "special",
+        catalog?: ReadonlyMap<string, { literaryLabel: string; scriptDialog?: string }>,
+    ): Promise<void> {
+        const levelData = this.requireLevel("world-map encounter");
+        const grid = new WorldGrid(levelData.lvlData.maskHDR);
+        const names = technicalNames.map((name) => name.trim()).filter(Boolean);
+        const occupied = new Set<number>([
+            ...levelData.sefData.persons.map((person) => grid.index(person.position)),
+            ...this.dynamicPersons.map((person) => grid.index(person.position)),
+            ...levelData.sefData.entrancePoints.map((point) => grid.index(point.position)),
+        ]);
+        const randomInteger = (minimum: number, maximum: number): number =>
+            minimum + Math.floor(this.random() * (maximum - minimum + 1));
+        const randomSpawn = (): { x: number; y: number } => {
+            for (let attempt = 0; attempt < 4096; attempt += 1) {
+                // Server.dll 0x140381BC..0x1403822D samples x in [4,width-4]
+                // and y in [6,height-4], then retries until the level accepts the cell.
+                const position = {
+                    x: randomInteger(4, Math.max(4, grid.width - 4)),
+                    y: randomInteger(6, Math.max(6, grid.height - 4)),
+                };
+                const index = grid.index(position);
+                if (grid.isWalkable(position, occupied)) {
+                    occupied.add(index);
+                    return position;
+                }
+            }
+            throw new Error("Native world-map encounter placement could not find a free cell");
+        };
+        const tribe = disposition === "evil" ? "random_evil" : disposition === "good" ? "random_good" : undefined;
+        const loads: Promise<void>[] = [];
+        for (const name of names) {
+            const metadata = catalog?.get(name.toLowerCase());
+            const person: DynamicPersonDefinition = {
+                name,
+                literaryLabel: metadata?.literaryLabel ?? "",
+                scriptDialog: metadata?.scriptDialog,
+                position: randomSpawn(),
+                direction: DIRECTIONS[randomInteger(0, 7)],
+                routeType: "STAY",
+                radius: 0,
+                delayMin: 0,
+                delayMax: 0,
+                tribe,
+            };
+            this.dynamicPersons.push(person);
+            const levelPersons = this.dynamicPersonsByLevel.get(this.currentDynamicPersonLevel) ?? [];
+            levelPersons.push({ ...person, position: { ...person.position } });
+            this.dynamicPersonsByLevel.set(this.currentDynamicPersonLevel, levelPersons);
+            this.setPersonPresence(person.name, true);
+            this.options.onDynamicPerson?.({ ...person, position: { ...person.position } });
+            const generation = this.generation;
+            loads.push(loadPersonCombatAssets(person.name).then((assets) => {
+                if (generation === this.generation) this.registerPersonCombatant(person, assets);
+            }));
+        }
+        await Promise.all(loads);
     }
 
 
@@ -1133,6 +1217,7 @@ export class GameStateRuntime {
     private nativeCombatTargetsFor(actorName: string): readonly string[] {
         const actor = this.combatants.get(actorName);
         if (!actor) return [];
+        const actorPosition = this.combatantPositions.get(actorName);
         let candidates = [...this.combatants.entries()]
             .filter(([name, combatant]) => name !== actorName && this.isCombatantPresent(name) && !combatant.isDead
                 && this.factions.isHostile(actor.factionId, combatant.factionId))
@@ -1164,6 +1249,22 @@ export class GameStateRuntime {
                     (this.combatants.get(left)?.health ?? 0) - (this.combatants.get(right)?.health ?? 0))[0];
             }
             secondary = this.heroLastTarget;
+        }
+
+        // Native Server.dll 0x1401AB74..0x1401D83C ranks candidates by a
+        // fixed score (primary/secondary bonus, relation rank, priority,
+        // marker) without distance; ties keep roster order. Keep that exact
+        // scoring, but when the actor has no remembered primary target and no
+        // party command, prefer the nearest hostile so enemies spread across
+        // the field instead of all beelining for the hero.
+        if (primary === undefined && !this.isPartyMember(actorName) && actorPosition) {
+            primary = [...candidates].sort((left, right) => {
+                const leftPosition = this.combatantPositions.get(left);
+                const rightPosition = this.combatantPositions.get(right);
+                if (!leftPosition) return 1;
+                if (!rightPosition) return -1;
+                return originalCombatDistance(actorPosition, leftPosition) - originalCombatDistance(actorPosition, rightPosition);
+            })[0];
         }
 
         return rankNativeCombatAiTargets(candidates.map((name, rosterOrder) => ({
@@ -1483,6 +1584,9 @@ export class GameStateRuntime {
     public getVariable(name: string): SCRValue | undefined {
         return this.scr.getVariable(name);
     }
+    public getHeroParameter(name: string): number {
+        return this.getPersonParameter("Hero", name);
+    }
 
     public snapshot(): GameRuntimeSnapshot {
         return {
@@ -1595,13 +1699,25 @@ export class GameStateRuntime {
         throw new Error(`${name} is not recovered; native host semantics are unavailable`);
     }
 
+    private revealLocation(location: string): void {
+        const key = location.toLowerCase();
+        if (!GLOBAL_MAP_LOCATION_IDS.has(key)) return;
+        const current = this.locationAccess.get(key);
+        if (current === undefined || current < 1) {
+            this.locationAccess.set(key, 1);
+            this.scr.setVariable(`${location}_state`, 1);
+        }
+    }
+
     private callHost(name: string, arguments_: readonly SCRValue[]): SCRValue | undefined {
         switch (name) {
             case "wd_loadarea": {
                 const levelData = this.requireLevel(name);
+                const location = stringArgument(arguments_, 0, name);
+                this.revealLocation(location);
                 this.options.onLoadArea({
                     gameMode: levelData.gameMode,
-                    level: stringArgument(arguments_, 0, name).toLowerCase(),
+                    level: location.toLowerCase(),
                     entrance: typeof arguments_[1] === "string" ? arguments_[1] : undefined,
                 });
                 return 0;
@@ -1729,9 +1845,8 @@ export class GameStateRuntime {
             case "rs_addtime": {
                 const hours = integerArgument(arguments_, 0, name);
                 const minutes = integerArgument(arguments_, 1, name);
-                if (hours < 0 || minutes < 0 || minutes >= 60) throw new Error(`${name} requires non-negative hours and 0..59 minutes`);
                 this.advanceClock(hours * 60 + minutes);
-                return 1;
+                return 0;
             }
             case "rs_getrandminmaxi": {
                 const minimum = Math.ceil(numberArgument(arguments_, 0, name));
@@ -2918,8 +3033,16 @@ export class GameStateRuntime {
         return false;
     }
 
+    private ensurePersonScriptInventory(owner: string): void {
+        const resolvedOwner = this.inventoryOwner(owner);
+        if (this.inventories.has(resolvedOwner)) return;
+        const source = this.personInventoryScripts.get(owner.toLowerCase());
+        if (source) this.initializeInventoryFromScript(resolvedOwner, source);
+    }
+
     private transferItem(source: string, destination: string, item: string, quantity: number): number {
         if (!Number.isSafeInteger(quantity) || quantity <= 0) throw new Error("Transfer quantity must be a positive safe integer");
+        this.ensurePersonScriptInventory(source);
         const transaction = new InventoryTransaction();
         if (!this.queueDefinitionTransfer(transaction, source, destination, item, quantity)) return 0;
         try {
@@ -2931,6 +3054,7 @@ export class GameStateRuntime {
     }
 
     private transferAllItems(source: string, destination: string): number {
+        this.ensurePersonScriptInventory(source);
         const sourceInventory = this.inventories.get(this.inventoryOwner(source));
         if (!sourceInventory || sourceInventory.count === 0) return 1;
         const transaction = new InventoryTransaction();

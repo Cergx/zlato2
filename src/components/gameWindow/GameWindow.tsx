@@ -7,7 +7,7 @@ import { DialoguePanel } from "../dialogue/DialoguePanel.tsx";
 import type { DialogueState } from "../../game/dialogue/DialogueRuntime.ts";
 import { WorldMapPanel } from "./WorldMapPanel.tsx";
 import { GameHud } from "./GameHud.tsx";
-import type { WorldMapLocationState } from "../../game/WorldMapRuntime.ts";
+import type { WorldMapState } from "../../game/WorldMapRuntime.ts";
 import InventoryPanel from "../InventoryPanel.tsx";
 import { RecoveredGameMenuPanel, type GameMenuPanelKind } from "./GameMenuPanel.tsx";
 import { PauseMenu } from "../PauseMenu.tsx";
@@ -117,7 +117,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
     const gameOverClosingRef = useRef(false);
     const { setCursor, cursorClassName } = useCursor();
     const [dialogueState, setDialogueState] = useState<DialogueState | null>(null);
-    const [worldMapLocations, setWorldMapLocations] = useState<readonly WorldMapLocationState[] | null>(null);
+    const [worldMapState, setWorldMapState] = useState<WorldMapState | null>(null);
     const [finishedEnding, setFinishedEnding] = useState<number | null>(null);
     const [runtimeError, setRuntimeError] = useState<string | null>(null);
     const [gameOverVisible, setGameOverVisible] = useState(false);
@@ -147,7 +147,12 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
             (error) => setRuntimeError(error instanceof Error ? error.message : String(error)),
         );
     }, []);
-    const travelWorldMap = useCallback((locationId: string) => gameRef.current?.travelWorldMap(locationId), []);
+    const moveWorldMap = useCallback((x: number, y: number, locationId?: string) =>
+        gameRef.current?.moveWorldMap(x, y, locationId) ?? false, []);
+    const answerWorldMapEncounter = useCallback((accept: boolean) => gameRef.current?.answerWorldMapEncounter(accept), []);
+    const updateWorldMap = useCallback((elapsedMs: number) => gameRef.current?.updateWorldMap(elapsedMs), []);
+    const continueWorldMapArrival = useCallback(() => gameRef.current?.continueWorldMapArrival(), []);
+    const selectWorldMapArrival = useCallback((level: string) => gameRef.current?.selectWorldMapArrival(level), []);
     const closeWorldMap = useCallback(() => gameRef.current?.closeWorldMap(), []);
     const togglePanel = useCallback((panel: GameMenuPanelKind | "inventory" | "skills" | "characteristics" | "pause" | "relax") => {
         setActivePanel((current) => current === panel ? null : panel);
@@ -162,7 +167,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
         gameOverTimerRef.current = window.setTimeout(onMainMenu, 700);
     }, [onMainMenu]);
     const paused = gameOverVisible || gameOverClosing
-        || worldMapLocations !== null
+        || worldMapState !== null
         || activePanel !== null
             && activePanel !== "skills"
             && activePanel !== "relax"
@@ -203,13 +208,13 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
         if (!gameRef.current) {
             gameRef.current = new Game(canvasRef.current, {
                 onDialogueStateChange: setDialogueState,
-                onWorldMapStateChange: setWorldMapLocations,
+                onWorldMapStateChange: setWorldMapState,
                 onGameFinished: setFinishedEnding,
                 onHeroDeath: () => {
                     setActivePanel(null);
                     setTransferPanel(null);
                     setDialogueState(null);
-                    setWorldMapLocations(null);
+                    setWorldMapState(null);
                     setReferenceHint(null);
                     gameOverClosingRef.current = false;
                     setGameOverClosing(false);
@@ -292,7 +297,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
         <div className={`${styles.gameWindow} ${cursorClassName}`} style={{ filter: `brightness(${gameGamma(settings)})` }}>
             <canvas width={1024} height={768} ref={canvasRef} />
             <WeatherOverlay getGame={getGame} paused={paused} enabled={settings[3] === true} />
-            <MapReferenceTooltip hint={!activePanel && dialogueState?.status !== "active" && !worldMapLocations && !loading ? referenceHint : null}
+            <MapReferenceTooltip hint={!activePanel && dialogueState?.status !== "active" && !worldMapState && !loading ? referenceHint : null}
                 delayMs={gameHintDelayMs(settings)} />
 
             <GameHud
@@ -338,10 +343,14 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
                     onTrade={openDialogueTrade}
                 />
             )}
-            {worldMapLocations && (
+            {worldMapState && (
                 <WorldMapPanel
-                    locations={worldMapLocations}
-                    onTravel={travelWorldMap}
+                    state={worldMapState}
+                    onMove={moveWorldMap}
+                    onTick={updateWorldMap}
+                    onAnswerEncounter={answerWorldMapEncounter}
+                    onContinueArrival={continueWorldMapArrival}
+                    onSelectArrival={selectWorldMapArrival}
                     onClose={closeWorldMap}
                 />
             )}

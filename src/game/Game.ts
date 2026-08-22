@@ -22,13 +22,13 @@ import {
     type GameSaveData,
 } from "./PersistenceRuntime.ts";
 import {
-    GOLDEN_LAND_WORLD_MAP_LOCATIONS,
     WorldMapRuntime,
-    type WorldMapLocationState,
-    type WorldMapLocation,
-
-    type WorldMapTravelLink,
+    type WorldMapEncounterRequest,
+    type WorldMapPoint,
+    type WorldMapState,
 } from "./WorldMapRuntime.ts";
+import { loadNativeGlobalMapData, type NativeGlobalMapData, type NativeGlobalMapLocation } from "./NativeGlobalMapData.ts";
+import { WorldMapAudioRuntime } from "./WorldMapAudioRuntime.ts";
 import type { TradeOffer } from "./systems/Trade.ts";
 import {
     ShippedItemCatalog,
@@ -58,6 +58,18 @@ const HERO_CHARACTERISTICS = new Set([
     "strength", "constitution", "dexterity", "perception", "intelligence", "wisdom", "luck",
 ]);
 const EMPTY_DIALOGUE_PACKET_BYTES = new Uint8Array(0);
+const DIALOGUE_PACKET_TEXT_ENCODER = new TextEncoder();
+// Global-map locations visible from a new game. Native location access is a `{id}_state`
+// SCR variable: 0 = hidden, 1 = discovered (travelable), 2 = available. Parsed from the
+// native start-of-game save slot9.sav (zlib body: length-prefixed name + double value):
+// these 17 hold 1.0 there; the other 37 authored points are 0 until raised. The
+// discovered function (Server.dll 0x14027494) raises to 1.0, RS_SetLocationAccess to 2.0;
+// both are travelable (gate is access>=1, matching the 17 starting travelable points).
+const VISIBLE_BY_DEFAULT = new Set([
+    "L1_1", "L89_1_A", "L2_1", "L5_1", "L4_1", "L3_3", "L19",
+    "L7_1", "L6_1", "L9_1", "L8_1", "L42", "L11_1", "L14_1", "L13_1",
+    "L10_1", "L12_1",
+]);
 
 
 
@@ -78,25 +90,13 @@ for (const [path, url] of Object.entries(dialogueAssetUrls)) {
 }
 
 
-// The shipped scripts expose locations but no serialized road table. The web host
-// therefore permits direct zero-cost travel and derives elapsed time from map distance.
-const createWorldMapLinks = (locations: readonly WorldMapLocation[]): readonly WorldMapTravelLink[] => locations.flatMap((from) =>
-    locations
-        .filter((to) => to.id !== from.id)
-        .map((to) => ({
-            from: from.id,
-            to: to.id,
-            cost: 0,
-            duration: Math.max(1, Math.round(Math.hypot(to.position.x - from.position.x, to.position.y - from.position.y) / 100)),
-        })),
-);
 
 
 export type LoadingStage = "Инициализация..." | "Создание игры..." | "Загрузка игры..." | `Подключается ${string}...`;
 
 export interface GameEvents {
     onDialogueStateChange?: (state: DialogueState) => void;
-    onWorldMapStateChange?: (locations: readonly WorldMapLocationState[] | null) => void;
+    onWorldMapStateChange?: (state: WorldMapState | null) => void;
     onLevelChanged?: (gameMode: GameMode, levelName: string) => void;
     onError?: (error: unknown) => void;
     onGameFinished?: (ending: number) => void;
@@ -124,6 +124,14 @@ export class Game {
     private readonly persistence = new PersistenceRuntime(new LocalStorageAdapter(window.localStorage));
     private level: Level | null = null;
     private worldMap: WorldMapRuntime | null = null;
+    private worldMapOpening = false;
+    private worldMapAudio: WorldMapAudioRuntime | null = null;
+    private worldMapData: NativeGlobalMapData | null = null;
+    private worldMapDataPromise: Promise<NativeGlobalMapData> | null = null;
+    private worldMapPosition: WorldMapPoint | null = null;
+    private worldMapOpenPosition: WorldMapPoint | null = null;
+    private pendingWorldMapEncounter: WorldMapEncounterRequest | null = null;
+    private encounterPersonCatalogPromise: Promise<Map<string, { literaryLabel: string; scriptDialog?: string }>> | null = null;
     private gameLoopActive = false;
     private stopped = false;
     private paused = false;
@@ -235,6 +243,7 @@ export class Game {
         this.stopDialogueVoice();
 
         this.worldMap = null;
+        this.stopWorldMapAudio();
         this.currentWorldMapLocation = null;
 
         this.level?.destroy();
@@ -328,6 +337,11 @@ export class Game {
         this.settings = { ...settings };
         this.level?.applySettings(settings);
         if (this.dialogueVoice) this.dialogueVoice.volume = Math.max(0, Math.min(1, Number(settings[7]) / 100));
+        this.worldMapAudio?.setVolumes(
+            Math.max(0, Math.min(1, Number(settings[6]) / 100)),
+            Math.max(0, Math.min(1, Number(settings[5]) / 100)),
+        );
+        this.worldMapAudio?.setEnvironmentEnabled(settings[3] === true);
     }
 
     public isCombatMode(): boolean {
@@ -507,25 +521,94 @@ export class Game {
 
 
     public canShowWorldMap(): boolean {
-        return Boolean(this.level?.getData());
+        return this.level?.getData() != null;
     }
 
-    public travelWorldMap(destinationId: string): void {
-        if (!this.worldMap) throw new Error("Глобальная карта не открыта");
-        this.worldMap.travel(destinationId);
-        this.currentWorldMapLocation = destinationId;
-        this.worldMap = null;
+    private canTravelFromLevel(): boolean {
+        const levelData = this.level?.getData();
+        if (!levelData) return false;
+        if (levelData.sefData.exitToGlobalMap === true && !this.levelHasLivingHostiles()) return true;
+        // The hero may travel once standing on an active GM exit transition.
+        const playerCell = this.level?.getRuntime().getScenario()?.getPlayerCell();
+        const scenario = this.level?.getRuntime().getScenario();
+        if (!playerCell || !scenario) return false;
+        return scenario.getTriggersAt(playerCell).some((trigger) => trigger.transition && trigger.active);
+    }
 
-        this.events.onWorldMapStateChange?.(null);
+    public moveWorldMap(x: number, y: number, locationId?: string): boolean {
+        if (!this.worldMap) return false;
+        const moved = this.worldMap.travelTo(x, y, locationId);
+        if (moved) this.events.onWorldMapStateChange?.(this.worldMap.getState());
+        return moved;
+    }
+
+    public updateWorldMap(elapsedMs: number): void {
+        const map = this.worldMap;
+        if (map?.update(elapsedMs) && this.worldMap === map) this.events.onWorldMapStateChange?.(map.getState());
+    }
+    public answerWorldMapEncounter(accept: boolean): void {
+        if (!this.worldMap) return;
+        this.worldMap.answerEncounter(accept);
+        if (this.worldMap) this.events.onWorldMapStateChange?.(this.worldMap.getState());
+    }
+    public continueWorldMapArrival(): void {
+        const map = this.worldMap;
+        if (!map) return;
+        map.continueArrival();
+        if (this.worldMap === map) this.events.onWorldMapStateChange?.(map.getState());
+    }
+
+    public selectWorldMapArrival(level: string): void {
+        const map = this.worldMap;
+        if (!map) return;
+        map.selectArrival(level);
+        if (this.worldMap === map) this.events.onWorldMapStateChange?.(map.getState());
     }
 
     public closeWorldMap(): void {
+        const map = this.worldMap;
+        const mapState = map?.getState();
+        if (mapState) this.worldMapPosition = mapState.position;
+        const position = this.worldMapPosition;
+        const openPosition = this.worldMapOpenPosition;
+        const closeZoneId = map?.getZoneId() ?? mapState?.zoneId;
+        const data = this.worldMapData;
+        const moved = position !== null && openPosition !== null
+            && Math.hypot(position.x - openPosition.x, position.y - openPosition.y) > 0.001;
+        const city = position && data?.locations.find((candidate) =>
+            Math.hypot(candidate.x - position.x, candidate.y - position.y) <= 16);
+        if (moved && city && map?.openArrivalPrompt(city.id)) {
+            this.events.onWorldMapStateChange?.(map.getState());
+            return;
+        }
+        this.stopWorldMapAudio();
         this.worldMap = null;
+        this.worldMapOpenPosition = null;
+        if (!position || !openPosition || !mapState) {
+            this.events.onWorldMapStateChange?.(null);
+            return;
+        }
         this.events.onWorldMapStateChange?.(null);
+        if (!moved || city) return;
+        // Native close behavior leaves the source level unchanged when the
+        // hero only opened the map. After real map movement, closing outside
+        // a city enters an empty level from the last authored crime zone
+        // crossed during this map journey.
+        const zone = closeZoneId ? data?.crimeZones.find((candidate) => candidate.id === closeZoneId) : undefined;
+        const pool = [...new Set(zone?.levels ?? [])];
+        if (pool.length === 0) return;
+        const level = pool[Math.floor(Math.random() * pool.length)];
+        void this.changeLevel("single", level, "GM").catch((error) => this.reportError(error));
     }
 
     public showWorldMap(): boolean {
-        return this.openWorldMap();
+        void this.openWorldMap().catch((error) => this.reportError(error));
+        return true;
+    }
+
+    private levelHasLivingHostiles(): boolean {
+        const combatants = this.level?.getRuntimeSnapshot()?.combat.combatants ?? {};
+        return Object.values(combatants).some((combatant) => combatant.relationToHero === "hostile" && !combatant.dead);
     }
 
 
@@ -605,6 +688,10 @@ export class Game {
             day: Math.floor(runtime.elapsedMinutes / (24 * 60)),
             minuteOfDay: runtime.elapsedMinutes % (24 * 60),
         };
+        save.worldMap = {
+            locationId: this.currentWorldMapLocation,
+            position: this.worldMap?.getPosition() ?? this.worldMapPosition,
+        };
         const scenario = level.getRuntime().getScenario();
         if (scenario) {
             save.doors = Object.fromEntries(scenario.getDoorStates().map((door) => [door.name, door.opened]));
@@ -628,6 +715,8 @@ export class Game {
 
     private async restoreSave(save: GameSaveData | null): Promise<GameSaveData | null> {
         if (!save) return null;
+        this.currentWorldMapLocation = save.worldMap?.locationId ?? null;
+        this.worldMapPosition = save.worldMap?.position ? { ...save.worldMap.position } : null;
         const { gameMode, level, entrance } = save.location;
         this.loadingLevelName = level;
         this.loadingStage = "Загрузка игры...";
@@ -762,60 +851,156 @@ export class Game {
         return this.dialoguePhrases;
     }
 
-    private openWorldMap(): boolean {
+    private async openWorldMap(): Promise<boolean> {
         const level = this.level;
-        const data = level?.getData();
-        if (!level || !data) return false;
-        const currentLocation = this.resolveWorldMapLocation(data.levelName);
-        if (!currentLocation) return false;
+        const levelData = level?.getData();
+        if (!level || !levelData) return false;
+        if (this.worldMap || this.worldMapOpening) return false;
+        this.worldMapOpening = true;
+        try {
+            const data = await this.loadWorldMapData();
+            if (this.level !== level) return false;
+            const currentLocation = this.resolveWorldMapLocation(levelData.levelName, data)
+                ?? (data.locations.some((location) => location.id === this.currentWorldMapLocation)
+                    ? this.currentWorldMapLocation
+                    : null)
+                ?? this.resolveWorldMapLocationAtPosition(data, this.worldMapPosition)
+                ?? data.locations[0]?.id;
+            if (!currentLocation) return false;
+            const runtime = level.getRuntime();
+            const locationAccess = level.getRuntimeSnapshot().locationAccess;
+            const accessFor = (locationId: string): number => locationId === currentLocation
+                ? 1
+                : locationAccess[locationId.toLowerCase()] ?? (VISIBLE_BY_DEFAULT.has(locationId) ? 1 : 0);
+            this.stopWorldMapAudio();
+            this.worldMapAudio = new WorldMapAudioRuntime({
+                onPlaybackError: (error, source) => console.warn(`Не удалось воспроизвести звук глобальной карты ${source}:`, error),
+            });
+            this.worldMapAudio.setVolumes(
+                Math.max(0, Math.min(1, Number(this.settings[6]) / 100)),
+                Math.max(0, Math.min(1, Number(this.settings[5]) / 100)),
+            );
+            this.worldMapAudio.setEnvironmentEnabled(this.settings[3] === true);
+            this.worldMap = new WorldMapRuntime({
+                data,
+                currentLocation,
+                currentPosition: this.worldMapPosition ?? undefined,
+                canTravel: this.canTravelFromLevel(),
+                host: {
+                    getVariable: (name) => name.startsWith("worldmap:")
+                        ? accessFor(name.slice("worldmap:".length))
+                        : runtime.getVariable(name),
+                    setVariable: (name, value) => runtime.setVariable(name, typeof value === "number" || typeof value === "string" || typeof value === "boolean" ? value : 0),
+                    getHeroParameter: (name) => runtime.getHeroParameter(name),
+                    getElapsedMinutes: () => runtime.getElapsedMinutes(),
+                    advanceClock: (minutes) => runtime.advanceClock(minutes),
+                    requestTransition: (destinationLevel, entrance) => {
+                        this.worldMapPosition = this.worldMap?.getPosition() ?? this.worldMapPosition;
+                        this.currentWorldMapLocation = this.resolveWorldMapLocation(destinationLevel, data) ?? this.currentWorldMapLocation;
+                        this.stopWorldMapAudio();
+                        this.worldMap = null;
+                        this.events.onWorldMapStateChange?.(null);
+                        void this.changeLevel("single", destinationLevel, entrance).catch((error) => this.reportError(error));
+                    },
+                    requestEncounter: (request) => void this.enterWorldMapEncounter(request),
+                    random: Math.random,
+                    setAudioState: (state) => this.worldMapAudio?.setState(state),
+                },
+            });
+            const openedState = this.worldMap.getState();
+            this.worldMapOpenPosition = { x: openedState.position.x, y: openedState.position.y };
+            this.worldMapOpening = false;
+            this.events.onWorldMapStateChange?.(openedState);
+            return true;
+        } finally {
+            this.worldMapOpening = false;
+        }
+    }
 
-        const locationAccess = level.getRuntimeSnapshot().locationAccess;
-        const accessFor = (locationId: string): number => locationId === currentLocation
-            ? 2
-            : locationAccess[locationId.toLowerCase()] ?? 0;
-        const configuredLocations = GOLDEN_LAND_WORLD_MAP_LOCATIONS.map((location) => ({
-            ...location,
-            availableWhen: [{ variable: `worldmap:${location.id}`, operator: "atLeast" as const, value: 2 }],
-        }));
-        const locations = configuredLocations.some((location) => location.id === currentLocation)
-            ? configuredLocations
-            : [...configuredLocations, {
-                id: currentLocation,
-                level: data.levelName.toLowerCase(),
-                entrance: "GM",
-                position: { x: 800, y: 600 },
-                availableWhen: [{ variable: `worldmap:${currentLocation}`, operator: "atLeast" as const, value: 2 }],
-            }];
-
-        this.worldMap = new WorldMapRuntime({
-            locations,
-            links: createWorldMapLinks(locations),
-            currentLocation,
-            discoveredLocations: locations.filter((location) => accessFor(location.id) > 0).map((location) => location.id),
-            host: {
-                getVariable: (name) => name.startsWith("worldmap:")
-                    ? accessFor(name.slice("worldmap:".length))
-                    : level.getRuntime().getVariable(name),
-                chargeTravelCost: () => true,
-                advanceClock: (duration) => level.getRuntime().advanceClock(duration),
-                requestTransition: (request) => void this.changeLevel("single", request.level, request.entrance).catch((error) => this.reportError(error)),
-            },
+    private loadWorldMapData(): Promise<NativeGlobalMapData> {
+        this.worldMapDataPromise ??= loadNativeGlobalMapData().then((data) => {
+            this.worldMapData = data;
+            return data;
         });
-        this.events.onWorldMapStateChange?.(this.worldMap.getLocations());
-        return true;
+        return this.worldMapDataPromise;
     }
 
-    private resolveWorldMapLocation(levelName: string): string | null {
-        const normalized = levelName.toLowerCase();
-        return GOLDEN_LAND_WORLD_MAP_LOCATIONS.find((location) => location.level === normalized)?.id
-            ?? this.currentWorldMapLocation
-            ?? normalized.toUpperCase();
+    private async enterWorldMapEncounter(request: WorldMapEncounterRequest): Promise<void> {
+        const position = this.worldMap?.getPosition();
+        if (position) this.worldMapPosition = position;
+        this.pendingWorldMapEncounter = request;
+        this.stopWorldMapAudio();
+        this.worldMap = null;
+        this.events.onWorldMapStateChange?.(null);
+        await this.changeLevel("single", request.level, request.entrance);
+        if (this.pendingWorldMapEncounter !== request) return;
+        this.pendingWorldMapEncounter = null;
+        const catalog = await this.loadEncounterPersonCatalog();
+        await this.level?.getRuntime().addWorldMapEncounterPersons(request.persons, request.disposition, catalog);
     }
+
+    private loadEncounterPersonCatalog(): Promise<Map<string, { literaryLabel: string; scriptDialog?: string }>> {
+        this.encounterPersonCatalogPromise ??= Promise.all([
+            fetch("/assets/sdb/persons/randomtechnames.sdb").then((response) => response.ok ? response.arrayBuffer() : Promise.reject(new Error(`randomtechnames.sdb: HTTP ${response.status}`))),
+            fetch("/assets/sdb/persons/randomlitnames.sdb").then((response) => response.ok ? response.arrayBuffer() : Promise.reject(new Error(`randomlitnames.sdb: HTTP ${response.status}`))),
+            fetch("/assets/sdb/persons/randomdialognames.sdb").then((response) => response.ok ? response.arrayBuffer() : Promise.reject(new Error(`randomdialognames.sdb: HTTP ${response.status}`))),
+        ]).then(([technical, literary, dialogs]) => {
+            const technicalNames = new SDBParser(technical).getData();
+            const literaryNames = new SDBParser(literary).getData();
+            const dialogNames = new SDBParser(dialogs).getData();
+            const catalog = new Map<string, { literaryLabel: string; scriptDialog?: string }>();
+            for (const [index, technicalName] of Object.entries(technicalNames)) {
+                if (typeof technicalName !== "string" || !technicalName) continue;
+                const literaryLabel = typeof literaryNames[Number(index)] === "string"
+                    ? literaryNames[Number(index)]
+                    : technicalName;
+                const scriptDialog = typeof dialogNames[Number(index)] === "string"
+                    ? dialogNames[Number(index)]
+                    : undefined;
+                catalog.set(technicalName.toLowerCase(), { literaryLabel, scriptDialog });
+            }
+            return catalog;
+        });
+        return this.encounterPersonCatalogPromise;
+    }
+
+    private stopWorldMapAudio(): void {
+        this.worldMapAudio?.destroy();
+        this.worldMapAudio = null;
+    }
+
+    private resolveWorldMapLocation(levelName: string, data = this.worldMapData): string | null {
+        const normalized = levelName.toLowerCase();
+        const location = data?.locations.find((candidate) => candidate.level === normalized || candidate.subLevels.includes(normalized));
+        return location?.id ?? null;
+    }
+
+    private resolveWorldMapLocationAtPosition(
+        data: NativeGlobalMapData,
+        position: WorldMapPoint | null,
+    ): string | null {
+        if (!position) return null;
+        let nearest: NativeGlobalMapLocation | undefined;
+        let nearestDistance = Number.POSITIVE_INFINITY;
+        for (const location of data.locations) {
+            const candidateDistance = Math.hypot(location.x - position.x, location.y - position.y);
+            if (candidateDistance < nearestDistance) {
+                nearest = location;
+                nearestDistance = candidateDistance;
+            }
+        }
+        return nearest?.id ?? null;
+    }
+
 
 
     private rememberWorldMapLocation(levelName: string): void {
-        const location = GOLDEN_LAND_WORLD_MAP_LOCATIONS.find((candidate) => candidate.level === levelName.toLowerCase());
-        if (location) this.currentWorldMapLocation = location.id;
+        const location = this.worldMapData?.locations.find((candidate) =>
+            candidate.level === levelName.toLowerCase() || candidate.subLevels.includes(levelName.toLowerCase()));
+        if (location) {
+            this.currentWorldMapLocation = location.id;
+            this.worldMapPosition = { x: location.x, y: location.y };
+        }
     }
 
 
@@ -838,7 +1023,9 @@ export class Game {
             context: -1,
             owner: 0,
             substitutionBlob: EMPTY_DIALOGUE_PACKET_BYTES,
-            voiceBasename: EMPTY_DIALOGUE_PACKET_BYTES,
+            voiceBasename: state.voiceBasename
+                ? DIALOGUE_PACKET_TEXT_ENCODER.encode(state.voiceBasename)
+                : EMPTY_DIALOGUE_PACKET_BYTES,
         }));
         const options = Object.freeze(snapshot.replyIds.map((id, index) => {
             const source = state.options[index];

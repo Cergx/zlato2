@@ -114,15 +114,18 @@ Verified native facts:
 - snapshot copy: `0x1404476C` copies `0xAF` dwords from Server object `+0x04`;
 - phrase substitution: `0x14043638` and `0x14043B02..0x14043BFE`;
 - voice basename setter: `0x1404345C`.
+- recursive evaluation is captured at both `0x1403A010` and argument evaluator `0x1403A914`; runtime kind `48` is a function call, its full `float64` function ID lives at node `+0x40`, and typed arguments preserve numeric kind `24`, string kind `22`, expression results, order, and source record;
+- `demon.d1.age.cs` matches native execution for 147 recursive evaluations, 84 flow nodes, six `D_Say`/`D_Answer` calls with exact ordered arguments, three packet payloads, and two dialogue turns;
+- generalized flags `--native-dialog-asset` and `--native-dialog-function-limit` safely capture arbitrary shipped prefixes through the native exit flag;
+- proven prefixes now cover `D_PlaySound(string)`, `RS_GetRandMinMaxI(number,number)`, `RS_AddTime(number,number)`, and `D_CloseDialog(0)`; opcode-12 voice data is the sound basename without an extension;
+- `RS_AddTime` handler `0x14040F34` decomposes total hours into day/hour fields, forwards minutes unchanged to `0x1405B504`, and returns numeric zero.
 
-Current evaluator assumptions requiring differential verification:
+Remaining evaluator work requiring additional native corpus slices:
 
-- starting every new program at `entryRecord` and restarting graph traversal on each answer;
-- maximum-step policy;
-- truthiness and string comparison/coercion rules;
-- assignment result value;
-- exact `D_Say`/`D_Answer` return constants and when the common selector blocks execution;
-- termination distinction between `Exit`, `D_CloseDialog`, graph exhaustion, and native context destruction;
+- maximum-step and malformed-cycle policy;
+- coercion behavior for mixed numeric/string operators outside the exercised graph;
+- string-return AGE functions and higher-arity state-mutating functions;
+- termination distinction between `Exit`, graph exhaustion, and native context destruction (`D_CloseDialog` is now covered);
 - missing function ID `0` behavior;
 - variable persistence and ownership across dialogue, scenario, load, and save boundaries.
 

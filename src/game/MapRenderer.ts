@@ -228,7 +228,8 @@ export class MapRenderer {
         const person = this.findPersonAt(world);
         if (person) {
             this.setHoveredTarget("person", person.person.combatantId, person);
-            this.changeCursor(this.deadPersons.has(person.person.combatantId.toLowerCase()) ? CursorType.TAKE : this.magicTargeting ? CursorType.CAST : event.shiftKey || this.combatMode ? CursorType.ATTACK : person.person.scriptDialog ? CursorType.TALK : CursorType.NPC_TURN);
+            const hostile = this.getCombatVisualState?.(person.person.combatantId).relation === "hostile";
+            this.changeCursor(this.deadPersons.has(person.person.combatantId.toLowerCase()) ? CursorType.TAKE : this.magicTargeting ? CursorType.CAST : event.shiftKey || this.combatMode || hostile ? CursorType.ATTACK : person.person.scriptDialog ? CursorType.TALK : CursorType.NPC_TURN);
             return;
         }
         const door = this.findDoorAt(world);

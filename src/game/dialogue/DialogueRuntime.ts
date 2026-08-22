@@ -26,6 +26,7 @@ export interface DialogueState {
     text: string | null;
     transcript: readonly DialogueTranscriptEntry[];
     options: readonly DialogueOption[];
+    voiceBasename: string | null;
     endReason: DialogueEndReason | null;
 }
 
@@ -72,6 +73,7 @@ const IDLE_STATE: DialogueState = Object.freeze({
     text: null,
     options: EMPTY_OPTIONS,
     transcript: EMPTY_TRANSCRIPT,
+    voiceBasename: null,
     endReason: null,
 });
 
@@ -83,6 +85,7 @@ export class DialogueRuntime {
     private lastPhrase = 0;
     private lastAnswer = 0;
     private pendingPhraseId: number | null = null;
+    private pendingVoiceBasename: string | null = null;
     private pendingOptions: DialogueOption[] = [];
     private transcript: DialogueTranscriptEntry[] = [];
     private pendingTranscriptEntry: DialogueTranscriptEntry | null = null;
@@ -105,6 +108,7 @@ export class DialogueRuntime {
         this.lastPhrase = 0;
         this.lastAnswer = 0;
         this.transcript = [];
+        this.pendingVoiceBasename = null;
         this.pendingTranscriptEntry = null;
         this.requestedEnd = null;
         return this.runTurn();
@@ -145,6 +149,7 @@ export class DialogueRuntime {
 
         this.pendingPhraseId = null;
         this.pendingOptions = [];
+        this.pendingVoiceBasename = null;
         this.requestedEnd = null;
 
         let currentIndex: number = program.entryRecord;
@@ -209,6 +214,7 @@ export class DialogueRuntime {
             text: transcript[transcript.length - 1]?.text ?? this.resolvePhrase(phraseId),
             transcript,
             options,
+            voiceBasename: this.pendingVoiceBasename,
             endReason: null,
         });
         this.state = nextState;
@@ -225,6 +231,7 @@ export class DialogueRuntime {
             text: this.pendingPhraseId === null ? this.state.text : this.resolvePhrase(this.pendingPhraseId),
             transcript: Object.freeze([...this.transcript]),
             options: EMPTY_OPTIONS,
+            voiceBasename: this.pendingVoiceBasename ?? this.state.voiceBasename,
             endReason: reason,
         });
         this.state = nextState;
@@ -331,6 +338,7 @@ export class DialogueRuntime {
                 const phraseId = this.requirePhraseId(record, args[0]);
                 this.pendingPhraseId = phraseId;
                 this.pendingOptions = [];
+                this.pendingVoiceBasename = null;
                 return 0;
             }
             case "D_Answer": {
@@ -344,6 +352,14 @@ export class DialogueRuntime {
                 const enabled = this.host.isOptionEnabled?.({ id, text }) ?? true;
                 this.pendingOptions.push({ id, text, enabled });
                 return 0;
+            }
+            case "D_PlaySound": {
+                const source = args[0];
+                if (args.length !== 1 || typeof source !== "string" || source.trim().length === 0) {
+                    throw new Error(`AGE D_PlaySound record ${record.index} requires exactly one voice path`);
+                }
+                this.pendingVoiceBasename = source.replace(/\.[^./\\]+$/, "");
+                return this.host.invokeFunction?.(call) ?? 0;
             }
             case "D_CloseDialog":
                 if (args.length !== 1 || typeof args[0] !== "number") {

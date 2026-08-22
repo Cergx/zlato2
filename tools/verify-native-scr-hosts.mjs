@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
-import { GameStateRuntime } from "../src/game/GameStateRuntime.ts";
+import { createServer } from "vite";
+
+const vite = await createServer({ server: { middlewareMode: true }, appType: "custom" });
+try {
+const { GameStateRuntime } = await vite.ssrLoadModule("/src/game/GameStateRuntime.ts");
 
 const events = [];
 const runtime = new GameStateRuntime({
@@ -35,6 +39,9 @@ assert.equal(callHost("rs_settribesrelation", ["citizen", "hero", "VERY_EVIL"]),
 assert.equal(callHost("rs_gettribesrelation", ["citizen", "hero"]), 0);
 assert.equal(callHost("rs_gettribesrelation", ["missing", "hero"]), 2);
 assert.equal(callHost("rs_addexp", [125]), 0);
+const minutesBeforeAddTime = runtime.getElapsedMinutes();
+assert.equal(callHost("rs_addtime", [25, 0]), 0);
+assert.equal(runtime.getElapsedMinutes(), minutesBeforeAddTime + 25 * 60);
 assert.equal(callHost("rs_questcomplete", ["quest"]), 0);
 assert.equal(callHost("rs_stageenable", ["quest", "stage"]), 0);
 assert.equal(callHost("rs_stagecomplete", ["quest", "stage"]), 0);
@@ -49,6 +56,8 @@ assert.equal(callHost("rs_setundeadstate", ["person", 1]), 0);
 assert.equal(callHost("rs_setinjured", ["person", 1]), 0);
 assert.equal(callHost("rs_addperson_1", ["STAY", "", 0, 0, 0]), 0);
 assert.equal(callHost("rs_setlocationaccess", ["L1_2", 2]), 0);
+assert.equal(callHost("wd_loadarea", ["L29_1", "GM"]), 0);
+assert.equal(callHost("wd_loadarea", ["L1_1_1", "GM"]), 0);
 assert.equal(callHost("le_casteffect", ["center", "effect_fire_small", 2811, 1355]), 0);
 assert.equal(callHost("le_castmagic", ["vis_gods", 528, 585]), 0);
 assert.equal(callHost("c_finished", [3]), 0);
@@ -66,15 +75,23 @@ assert.equal(snapshot.personStatesByLevel["single:l2"]["remote-alive"], true);
 assert.equal(snapshot.personParameters.Hero.reputation, 7);
 assert.equal(snapshot.locationAccess.l1_2, 2);
 assert.equal(snapshot.variables.l1_2_state, 2);
+assert.equal(snapshot.locationAccess.l29_1, 1, "Travelling to a global-map point must discover it");
+assert.equal(snapshot.variables.l29_1_state, 1, "Discovery must mirror into the authored location-state variable");
+assert.equal("l1_1_1" in snapshot.locationAccess, false, "A sub-location target must not create a map access entry");
 assert.deepEqual(events, [
     ["global-map"],
     ["dialog", [42]],
     ["trigger", "trigger", true],
     ["visible", "trigger", false],
     ["door", "door", true],
+    ["load", { gameMode: "single", level: "l29_1", entrance: "GM" }],
+    ["load", { gameMode: "single", level: "l1_1_1", entrance: "GM" }],
     ["effect", "effect_fire_small", { x: 2811, y: 1355 }],
     ["effect", "vis_gods", { x: 528, y: 585 }],
     ["finished", 3],
 ]);
 
 console.log("Verified native-zero SCR mutator returns, faction defaults, location-state variables, and shipped visual-effect argument order");
+} finally {
+    await vite.close();
+}

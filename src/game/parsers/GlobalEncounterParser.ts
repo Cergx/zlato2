@@ -3,8 +3,8 @@ export type EncounterDisposition = "evil" | "good";
 export interface GlobalEncounterPerson {
     readonly technicalName: string;
     readonly group: number;
-    readonly chance: number;
-    readonly weight: number;
+    readonly dayWeight: number;
+    readonly nightWeight: number;
 }
 
 export interface GlobalEncounterSide {
@@ -47,8 +47,8 @@ export const parseGlobalEncounterDefinition = (source: string): GlobalEncounterD
             persons.push({
                 technicalName: personMatch[1],
                 group: Number(personMatch[2]),
-                chance: Number(personMatch[3]),
-                weight: Number(personMatch[4]),
+                dayWeight: Number(personMatch[3]),
+                nightWeight: Number(personMatch[4]),
             });
         }
         if (groupCount <= 0) throw new Error(`Global encounter ${disposition} has no groups`);

@@ -77,6 +77,7 @@ const replayDialogue = async () => {
                 sequence: dialogueEvaluationSequence,
                 depth,
                 record: record.index,
+                kind: record.tag,
                 result,
             });
         },

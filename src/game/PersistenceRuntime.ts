@@ -85,6 +85,10 @@ export interface SaveMetadata {
     preview: string | null;
 }
 
+export interface WorldMapSaveState {
+    locationId: string | null;
+    position: { x: number; y: number } | null;
+}
 
 export interface GameSaveData {
     version: typeof SAVE_FORMAT_VERSION;
@@ -108,6 +112,7 @@ export interface GameSaveData {
     experience: number;
     lootGenerationLevel: number;
     clock: GameClock;
+    worldMap?: WorldMapSaveState | null;
 }
 
 /**
@@ -237,7 +242,7 @@ export const validateSaveData = (value: unknown): GameSaveData => {
 
     assertOnlyKeys(record, [
         "version", "metadata", "location", "player", "inventories", "equipped", "scriptVariables", "doors", "triggers", "questFlags", "clock",
-        "persons", "personStatesByLevel", "stageFlags", "locationAccess", "bestiaryKills", "personParameters", "experience", "lootGenerationLevel", "magicEffects", "regenerationElapsed",
+        "persons", "personStatesByLevel", "stageFlags", "locationAccess", "bestiaryKills", "personParameters", "experience", "lootGenerationLevel", "magicEffects", "regenerationElapsed", "worldMap",
     ], "save");
 
     return {
@@ -265,6 +270,7 @@ export const validateSaveData = (value: unknown): GameSaveData => {
         lootGenerationLevel: readLootGenerationLevel(requireField(record, "lootGenerationLevel", "save"), "save.lootGenerationLevel"),
         magicEffects: readMagicEffects(requireField(record, "magicEffects", "save"), "save.magicEffects"),
         regenerationElapsed: readRegenerationElapsed(requireField(record, "regenerationElapsed", "save"), "save.regenerationElapsed"),
+        worldMap: record.worldMap === undefined ? null : readWorldMapSaveState(record.worldMap, "save.worldMap"),
     };
 };
 
@@ -939,6 +945,18 @@ function readSaveMetadata(value: unknown, path: string): SaveMetadata {
         throw new SaveFormatError(`${path}.preview must be null or a JPEG data URL no larger than 300 KB`);
     }
     return { name: rawName, savedAt: rawSavedAt, locationTitle, preview: rawPreview };
+}
+
+function readWorldMapSaveState(value: unknown, path: string): WorldMapSaveState | null {
+    if (value === null) return null;
+    const record = requireRecord(value, path);
+    assertOnlyKeys(record, ["locationId", "position"], path);
+    const locationId = record.locationId;
+    if (locationId !== null && typeof locationId !== "string") throw new SaveFormatError(`${path}.locationId must be text or null`);
+    return {
+        locationId,
+        position: record.position === null ? null : readPosition(requireField(record, "position", path), `${path}.position`),
+    };
 }
 
 function readClock(value: unknown, path: string): GameClock {

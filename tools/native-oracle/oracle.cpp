@@ -23,6 +23,10 @@
 #include <stdlib.h>
 #include <string>
 #include <vector>
+#include <utility>
+#include <set>
+#include <algorithm>
+#include <map>
 
 #if defined(_MSC_VER)
 #pragma comment(lib, "bcrypt.lib")
@@ -96,6 +100,22 @@ unsigned g_nativeAgeFlowStep = 0;
 bool g_nativeSawScrCall = false;
 double g_nativeLastScrCallResult = 0;
 std::vector<double> g_nativeScrCallResults;
+
+struct NativeAgeTraceValue {
+    uint32_t kind = 0;
+    uintptr_t node = 0;
+    double numeric = 0;
+};
+
+struct NativeAgeTraceFrame {
+    uint32_t kind = 0;
+    uintptr_t node = 0;
+    int32_t record = -1;
+    std::map<uintptr_t, std::string> stringArguments;
+    std::vector<NativeAgeTraceValue> directResults;
+};
+std::vector<NativeAgeTraceFrame> g_nativeAgeTraceFrames;
+void printNativeScrJsonString(const char* value);
 
 std::string narrowPath(const wchar_t* value) {
     std::string result;
@@ -389,13 +409,17 @@ void printModulePointer(uintptr_t pointer) {
 
 bool g_quietHostStubs = false;
 bool g_probeConfigObject = false;
+unsigned g_nativeDialogFunctionLimit = 0;
+unsigned g_nativeDialogFunctionCount = 0;
 bool g_invokeNativeDialog = false;
+std::string g_nativeDialogAsset = "demon.d1.age.cs";
 bool g_invokeNativeScr = false;
 bool g_invokeNativeScrCore = false;
 bool g_invokeNativeScrCoreReal = false;
 bool g_invokeNativeScrTrigger = false;
 bool g_invokeNativeScrEffect = false;
 bool g_invokeNativeLevel = false;
+bool g_dumpLocationAccess = false;
 unsigned g_nativeScrCommandCount = 0;
 unsigned g_nativeScrHostCallCount = 0;
 
@@ -1189,87 +1213,192 @@ using NativeDialogueClose = void (ORACLE_THISCALL*)(void*);
 using NativeClientDialogueApply = void (ORACLE_THISCALL*)(void*, const void*);
 using NativeClientDialoguePoll = uint32_t (ORACLE_THISCALL*)(void*);
 
-int32_t nativeAgeRecordIndex(uintptr_t node) {
+int32_t findNativeAgeRecordIndex(uintptr_t node) {
     if (!node) return -1;
     for (size_t index = 0; index < g_ageNodeAllocations.size(); ++index) {
         if (g_ageNodeAllocations[index] == node) return static_cast<int32_t>(index);
     }
+    return -1;
+}
+
+int32_t nativeAgeRecordIndex(uintptr_t node) {
+    const int32_t record = findNativeAgeRecordIndex(node);
+    if (record >= 0 || !node) return record;
     fail("native_age_node_pointer_not_mapped");
     return -1;
+}
+
+NativeAgeTraceFrame finishNativeAgeTraceFrame(double result) {
+    if (g_nativeAgeTraceFrames.empty()) fail("native_age_trace_frame_underflow");
+    NativeAgeTraceFrame frame = std::move(g_nativeAgeTraceFrames.back());
+    g_nativeAgeTraceFrames.pop_back();
+    if (!g_nativeAgeTraceFrames.empty()) {
+        g_nativeAgeTraceFrames.back().directResults.push_back({frame.kind, frame.node, result});
+    }
+    return frame;
+}
+
+const char* nativeAgeFunctionName(uint32_t id) {
+    switch (id) {
+        case 0x01000000u: return "Exit";
+        case 0x01000003u: return "Cmd";
+        case 0x01000004u: return "D_Say";
+        case 0x01000005u: return "D_CloseDialog";
+        case 0x01000006u: return "D_Answer";
+        case 0x01000007u: return "D_PlaySound";
+        case 0x02000002u: return "LE_CastMagic";
+        case 0x03000000u: return "WD_LoadArea";
+        case 0x03000002u: return "RS_SetTribesRelation";
+        case 0x03000005u: return "WD_SetVisible";
+        case 0x04000000u: return "RS_GetPersonParameterI";
+        case 0x04000001u: return "RS_SetPersonParameterI";
+        case 0x04000002u: return "RS_AddPerson_1";
+        case 0x04000003u: return "RS_AddPerson_2";
+        case 0x04000004u: return "RS_IsPersonExistsI";
+        case 0x04000005u: return "RS_AddExp";
+        case 0x04000006u: return "RS_DelPerson";
+        case 0x04000007u: return "RS_AddToHeroPartyName";
+        case 0x04000008u: return "RS_RemoveFromHeroPartyName";
+        case 0x04000009u: return "RS_TestHeroHasPartyName";
+        case 0x0400000au: return "RS_AllyCmd";
+        case 0x05000000u: return "RS_TestPersonHasItem";
+        case 0x05000001u: return "RS_PersonTransferItemI";
+        case 0x05000002u: return "RS_GetItemCountI";
+        case 0x05000004u: return "RS_PersonAddItem";
+        case 0x05000005u: return "RS_PersonRemoveItem";
+        case 0x06000000u: return "RS_GetDayOrNight";
+        case 0x06000002u: return "RS_GetDaysFromBeginningI";
+        case 0x06000003u: return "RS_AddTime";
+        case 0x07000000u: return "RS_QuestComplete";
+        case 0x07000001u: return "RS_StageEnable";
+        case 0x07000002u: return "RS_QuestEnable";
+        case 0x07000003u: return "RS_StageComplete";
+        case 0x07000004u: return "RS_StorylineQuestEnable";
+        case 0x07000007u: return "RS_ClearEvent";
+        case 0x07000008u: return "RS_SetLocationAccess";
+        case 0x07000009u: return "RS_EnableTrigger";
+        case 0x0700000au: return "RS_GetRandMinMaxI";
+        case 0x0700000bu: return "RS_SetWeather";
+        case 0x0700000cu: return "RS_SetSpecialPerk";
+        case 0x0700000du: return "RS_PassToTradePanel";
+        case 0x0700000eu: return "RS_GetDialogEnabled";
+        case 0x0700000fu: return "RS_SetUndeadState";
+        case 0x07000013u: return "RS_SetInjured";
+        default: return "UNKNOWN";
+    }
+}
+
+void emitNativeAgeFunction(const NativeAgeTraceFrame& frame, uintptr_t node, double result) {
+    const double encodedId = *reinterpret_cast<const double*>(node + 0x40);
+    const uint32_t id = static_cast<uint32_t>(encodedId);
+    const uint32_t slot = id & 0x00ffffffu;
+    printf("{\"event\":\"native_age_function\",\"turn\":%u,\"record\":%ld,"
+        "\"id\":%lu,\"slot\":%lu,\"name\":\"%s\",\"arguments\":[",
+        g_nativeAgeTraceTurn, static_cast<long>(frame.record),
+        static_cast<unsigned long>(id), static_cast<unsigned long>(slot), nativeAgeFunctionName(id));
+    std::vector<int32_t> argumentRecords;
+    bool firstArgument = true;
+    for (uint32_t offset = 0x18; offset < 0x3c; offset += sizeof(uintptr_t)) {
+        const uintptr_t argumentNode = *reinterpret_cast<const uintptr_t*>(node + offset);
+        const int32_t argumentRecord = findNativeAgeRecordIndex(argumentNode);
+        if (argumentRecord < 0) break;
+        argumentRecords.push_back(argumentRecord);
+        if (!firstArgument) printf(",");
+        const uint32_t argumentKind = *reinterpret_cast<const uint32_t*>(argumentNode + 0x3c);
+        if (argumentKind == 22) {
+            const auto captured = frame.stringArguments.find(argumentNode);
+            printNativeScrJsonString(captured != frame.stringArguments.end()
+                ? captured->second.c_str() : *reinterpret_cast<const char* const*>(argumentNode + 0x48));
+        } else {
+            const auto evaluated = std::find_if(frame.directResults.begin(), frame.directResults.end(),
+                [argumentNode](const NativeAgeTraceValue& value) { return value.node == argumentNode; });
+            if (evaluated != frame.directResults.end()) printf("%.17g", evaluated->numeric);
+            else if (argumentKind == 24) printf("%.17g", *reinterpret_cast<const double*>(argumentNode + 0x40));
+            else printf("null");
+        }
+        firstArgument = false;
+    }
+    printf("],\"argumentRecords\":[");
+    for (size_t index = 0; index < argumentRecords.size(); ++index) {
+        if (index != 0) printf(",");
+        printf("%ld", static_cast<long>(argumentRecords[index]));
+    }
+    printf("],\"result\":%.17g}\n", result);
+    g_nativeDialogFunctionCount += 1;
+    if (g_nativeDialogFunctionLimit != 0 && g_nativeDialogFunctionCount >= g_nativeDialogFunctionLimit) {
+        *reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(g_server) + 0x88dd8) = 1;
+    }
 }
 
 double ORACLE_THISCALL tracedNativeAgeEvaluate(void* program, void* nodePointer) {
     if (!g_nativeAgeEvaluate) fail("native_age_evaluator_not_installed");
     if (!g_nativeAgeTraceEnabled) return g_nativeAgeEvaluate(program, nodePointer);
-
-    const unsigned depth = g_nativeAgeTraceDepth;
-    g_nativeAgeTraceDepth += 1;
+    const unsigned depth = g_nativeAgeTraceDepth++;
     const uintptr_t node = reinterpret_cast<uintptr_t>(nodePointer);
     const int32_t record = nativeAgeRecordIndex(node);
+    const uint32_t kind = *reinterpret_cast<const uint32_t*>(node + 0x3c);
+    NativeAgeTraceFrame traceFrame{kind, node, record, {}, {}};
+    if (kind == 48) {
+        for (uint32_t offset = 0x18; offset < 0x3c; offset += sizeof(uintptr_t)) {
+            const uintptr_t argumentNode = *reinterpret_cast<const uintptr_t*>(node + offset);
+            if (findNativeAgeRecordIndex(argumentNode) < 0) break;
+            if (*reinterpret_cast<const uint32_t*>(argumentNode + 0x3c) != 22) continue;
+            const char* value = *reinterpret_cast<const char* const*>(argumentNode + 0x48);
+            traceFrame.stringArguments.emplace(argumentNode, value ? value : "");
+        }
+    }
+    g_nativeAgeTraceFrames.push_back(std::move(traceFrame));
     const double result = g_nativeAgeEvaluate(program, nodePointer);
+    const NativeAgeTraceFrame frame = finishNativeAgeTraceFrame(result);
     g_nativeAgeTraceDepth -= 1;
     const unsigned sequence = ++g_nativeAgeEvaluationSequence;
-    const uint32_t kind = *reinterpret_cast<const uint32_t*>(node + 0x3c);
     if (g_nativeTraceIsScr && kind == 48) {
         g_nativeSawScrCall = true;
         g_nativeLastScrCallResult = result;
         g_nativeScrCallResults.push_back(result);
     }
-    if (g_nativeTraceIsScr) {
-        printf("{\"event\":\"native_scr_evaluation\",\"turn\":%u,\"sequence\":%u,"
-            "\"depth\":%u,\"record\":%ld,\"kind\":%lu,\"result\":%.17g}\n",
-            g_nativeAgeTraceTurn, sequence, depth, static_cast<long>(record),
-            static_cast<unsigned long>(kind), result);
-    } else {
-        printf("{\"event\":\"native_age_evaluation\",\"turn\":%u,\"sequence\":%u,"
-            "\"depth\":%u,\"record\":%ld,\"result\":%.17g}\n",
-            g_nativeAgeTraceTurn, sequence, depth, static_cast<long>(record), result);
-    }
-
+    if (!g_nativeTraceIsScr && kind == 48) emitNativeAgeFunction(frame, node, result);
+    printf("{\"event\":\"%s\",\"turn\":%u,\"sequence\":%u,"
+        "\"depth\":%u,\"record\":%ld,\"kind\":%lu,\"result\":%.17g}\n",
+        g_nativeTraceIsScr ? "native_scr_evaluation" : "native_age_evaluation",
+        g_nativeAgeTraceTurn, sequence, depth, static_cast<long>(record),
+        static_cast<unsigned long>(kind), result);
     if (depth == 0) {
-        const bool requestedExit = *reinterpret_cast<const uint32_t*>(
-            reinterpret_cast<uintptr_t>(g_server) + 0x88dd8) != 0;
+        const bool requestedExit = *reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(g_server) + 0x88dd8) != 0;
         const bool zeroBranch = result == 0.0;
-        const uintptr_t successor = *reinterpret_cast<const uintptr_t*>(
-            node + (zeroBranch ? 0x08 : 0x0c));
+        const uintptr_t successor = *reinterpret_cast<const uintptr_t*>(node + (zeroBranch ? 0x08 : 0x0c));
         const int32_t successorRecord = nativeAgeRecordIndex(successor);
         const unsigned step = ++g_nativeAgeFlowStep;
         printf("{\"event\":\"%s\",\"turn\":%u,\"step\":%u,\"record\":%ld,"
             "\"result\":%.17g,\"branch\":\"%s\",\"successor\":%ld,\"exit\":%s}\n",
-            g_nativeTraceIsScr ? "native_scr_node" : "native_age_node",
-            g_nativeAgeTraceTurn, step, static_cast<long>(record), result,
-            zeroBranch ? "zero" : "nonzero", static_cast<long>(successorRecord),
-            requestedExit ? "true" : "false");
+            g_nativeTraceIsScr ? "native_scr_node" : "native_age_node", g_nativeAgeTraceTurn, step,
+            static_cast<long>(record), result, zeroBranch ? "zero" : "nonzero",
+            static_cast<long>(successorRecord), requestedExit ? "true" : "false");
     }
     return result;
 }
 double ORACLE_THISCALL tracedNativeAgeArgumentEvaluate(void* program, void* nodePointer) {
     if (!g_nativeAgeArgumentEvaluate) fail("native_age_argument_evaluator_not_installed");
     if (!g_nativeAgeTraceEnabled) return g_nativeAgeArgumentEvaluate(program, nodePointer);
-
-    const unsigned depth = g_nativeAgeTraceDepth;
-    g_nativeAgeTraceDepth += 1;
+    const unsigned depth = g_nativeAgeTraceDepth++;
     const uintptr_t node = reinterpret_cast<uintptr_t>(nodePointer);
     const int32_t record = nativeAgeRecordIndex(node);
+    const uint32_t kind = *reinterpret_cast<const uint32_t*>(node + 0x3c);
+    g_nativeAgeTraceFrames.push_back({kind, node, record, {}, {}});
     const double result = g_nativeAgeArgumentEvaluate(program, nodePointer);
+    finishNativeAgeTraceFrame(result);
     g_nativeAgeTraceDepth -= 1;
     const unsigned sequence = ++g_nativeAgeEvaluationSequence;
-    const uint32_t kind = *reinterpret_cast<const uint32_t*>(node + 0x3c);
     if (g_nativeTraceIsScr && kind == 48) {
         g_nativeSawScrCall = true;
         g_nativeLastScrCallResult = result;
         g_nativeScrCallResults.push_back(result);
     }
-    if (g_nativeTraceIsScr) {
-        printf("{\"event\":\"native_scr_evaluation\",\"turn\":%u,\"sequence\":%u,"
-            "\"depth\":%u,\"record\":%ld,\"kind\":%lu,\"result\":%.17g}\n",
-            g_nativeAgeTraceTurn, sequence, depth, static_cast<long>(record),
-            static_cast<unsigned long>(kind), result);
-    } else {
-        printf("{\"event\":\"native_age_evaluation\",\"turn\":%u,\"sequence\":%u,"
-            "\"depth\":%u,\"record\":%ld,\"result\":%.17g}\n",
-            g_nativeAgeTraceTurn, sequence, depth, static_cast<long>(record), result);
-    }
+    printf("{\"event\":\"%s\",\"turn\":%u,\"sequence\":%u,"
+        "\"depth\":%u,\"record\":%ld,\"kind\":%lu,\"result\":%.17g}\n",
+        g_nativeTraceIsScr ? "native_scr_evaluation" : "native_age_evaluation",
+        g_nativeAgeTraceTurn, sequence, depth, static_cast<long>(record),
+        static_cast<unsigned long>(kind), result);
     return result;
 }
 
@@ -1331,11 +1460,13 @@ void beginNativeAgeTrace(unsigned turn) {
     g_nativeAgeTraceDepth = 0;
     g_nativeAgeEvaluationSequence = 0;
     g_nativeAgeFlowStep = 0;
+    g_nativeAgeTraceFrames.clear();
     g_nativeAgeTraceEnabled = true;
 }
 
 void endNativeAgeTrace() {
     g_nativeAgeTraceEnabled = false;
+    if (!g_nativeAgeTraceFrames.empty()) fail("native_age_trace_frames_not_empty");
     printf("{\"event\":\"%s\",\"turn\":%u,\"evaluations\":%u,\"flowNodes\":%u}\n",
         g_nativeTraceIsScr ? "native_scr_trace_summary" : "native_age_trace_summary",
         g_nativeAgeTraceTurn, g_nativeAgeEvaluationSequence, g_nativeAgeFlowStep);
@@ -1938,7 +2069,9 @@ void invokeNativeLevel(uintptr_t serverFacade) {
 
 void invokeNativeDialogFunction(HMODULE module, uintptr_t clientFacade) {
     std::vector<unsigned char> bytes;
-    const std::string asset = g_assetRoot + "\\scripts\\dialogs\\demon.d1.age.cs";
+    std::string relativeAsset = g_nativeDialogAsset;
+    for (char& character : relativeAsset) if (character == '/') character = '\\';
+    const std::string asset = g_assetRoot + "\\scripts\\dialogs\\" + relativeAsset;
     if (!readResourceFile(asset, &bytes) || bytes.empty() || bytes.size() > UINT32_MAX) {
         fail("cannot_read_native_dialogue_asset");
     }
@@ -1969,7 +2102,7 @@ void invokeNativeDialogFunction(HMODULE module, uintptr_t clientFacade) {
     g_captureAgeNodeAllocations = false;
     if (!loaded) fail("native_dialogue_age_load_failed");
     const size_t rawNodeAllocationCount = g_ageNodeAllocations.size();
-    if (rawNodeAllocationCount != 241) fail("native_dialogue_node_allocation_count_mismatch");
+    if (rawNodeAllocationCount <= 1) fail("native_dialogue_node_allocation_count_invalid");
     g_ageNodeAllocations.erase(g_ageNodeAllocations.begin());
     printf("{\"event\":\"native_age_node_allocations\",\"rawCount\":%lu,\"recordCount\":%lu}\n",
         static_cast<unsigned long>(rawNodeAllocationCount),
@@ -1983,18 +2116,26 @@ void invokeNativeDialogFunction(HMODULE module, uintptr_t clientFacade) {
     *reinterpret_cast<uint32_t*>(dialog + 0x5528) = 0;
     memset(reinterpret_cast<void*>(dialog + 0x04), 0, 0xaf * sizeof(uint32_t));
 
-    const char* numericVariables[] = {
-        reinterpret_cast<const char*>(base + 0x91c64),
-        reinterpret_cast<const char*>(base + 0x91c80),
-        "demon_univ",
-        "result",
-    };
-    for (const char* name : numericVariables) {
-        if (addVariable(variableContext, name, 0, 0.0) != 0) fail("native_dialogue_variable_registration_failed");
+    std::set<std::string> numericVariables;
+    numericVariables.insert(reinterpret_cast<const char*>(base + 0x91c64));
+    numericVariables.insert(reinterpret_cast<const char*>(base + 0x91c80));
+    g_nativeDialogFunctionCount = 0;
+    *reinterpret_cast<uint32_t*>(base + 0x88dd8) = 0;
+    for (uintptr_t node : g_ageNodeAllocations) {
+        if (*reinterpret_cast<const uint32_t*>(node + 0x3c) != 23) continue;
+        const char* name = *reinterpret_cast<const char* const*>(node + 0x48);
+        if (name && *name) numericVariables.insert(name);
+    }
+    for (const std::string& name : numericVariables) {
+        if (addVariable(variableContext, name.c_str(), 0, 0.0) != 0) {
+            fail("native_dialogue_variable_registration_failed");
+        }
     }
 
-    printf("{\"event\":\"native_age_program\",\"asset\":\"scripts/dialogs/demon.d1.age.cs\",\"bytes\":%lu}\n",
-        static_cast<unsigned long>(bytes.size()));
+    const std::string traceAsset = "scripts/dialogs/" + g_nativeDialogAsset;
+    printf("{\"event\":\"native_age_program\",\"asset\":");
+    printNativeScrJsonString(traceAsset.c_str());
+    printf(",\"bytes\":%lu}\n", static_cast<unsigned long>(bytes.size()));
     setNumericVariable(variableContext, reinterpret_cast<const char*>(base + 0x91c80), 0.0);
     beginNativeAgeTrace(1);
     rebuildDialog(reinterpret_cast<void*>(dialog));
@@ -2003,25 +2144,50 @@ void invokeNativeDialogFunction(HMODULE module, uintptr_t clientFacade) {
     const std::vector<uint8_t> openingPacket = encodeNativeDialogueSnapshotPacket(dialog);
     emitDialoguePacketBytes("server_to_client", "opening", openingPacket);
     const uint32_t replyCount = *reinterpret_cast<const uint32_t*>(dialog + 0x0c);
-    if (replyCount == 0) fail("native_dialogue_opening_has_no_replies");
-    const uint32_t firstReply = *reinterpret_cast<const uint32_t*>(dialog + 0x18);
-    const uint32_t bridgedReply = applyNativeDialoguePacket(clientFacade, openingPacket, firstReply);
-    const std::vector<uint8_t> replyPacket = encodeNativeDialogueReplyPacket(bridgedReply);
-    emitDialoguePacketBytes("client_to_server", "first_reply", replyPacket);
-    *reinterpret_cast<uint32_t*>(dialog + 0x5528) = 0;
-    setNumericVariable(variableContext, reinterpret_cast<const char*>(base + 0x91c80), static_cast<double>(bridgedReply));
-    beginNativeAgeTrace(2);
-    rebuildDialog(reinterpret_cast<void*>(dialog));
-    endNativeAgeTrace();
-    emitNativeDialogueSnapshot("first_reply", static_cast<int32_t>(bridgedReply), dialog);
-    const std::vector<uint8_t> firstReplySnapshotPacket = encodeNativeDialogueSnapshotPacket(dialog);
-    emitDialoguePacketBytes("server_to_client", "first_reply", firstReplySnapshotPacket);
-    applyNativeDialoguePacket(clientFacade, firstReplySnapshotPacket, 0);
+    if (replyCount != 0) {
+        const uint32_t firstReply = *reinterpret_cast<const uint32_t*>(dialog + 0x18);
+        const uint32_t bridgedReply = applyNativeDialoguePacket(clientFacade, openingPacket, firstReply);
+        const std::vector<uint8_t> replyPacket = encodeNativeDialogueReplyPacket(bridgedReply);
+        emitDialoguePacketBytes("client_to_server", "first_reply", replyPacket);
+        *reinterpret_cast<uint32_t*>(dialog + 0x5528) = 0;
+        setNumericVariable(variableContext, reinterpret_cast<const char*>(base + 0x91c80), static_cast<double>(bridgedReply));
+        beginNativeAgeTrace(2);
+        rebuildDialog(reinterpret_cast<void*>(dialog));
+        endNativeAgeTrace();
+        emitNativeDialogueSnapshot("first_reply", static_cast<int32_t>(bridgedReply), dialog);
+        const std::vector<uint8_t> firstReplySnapshotPacket = encodeNativeDialogueSnapshotPacket(dialog);
+        emitDialoguePacketBytes("server_to_client", "first_reply", firstReplySnapshotPacket);
+        applyNativeDialoguePacket(clientFacade, firstReplySnapshotPacket, 0);
+    }
     closeDialog(reinterpret_cast<void*>(dialog));
     printf("{\"event\":\"native_dialogue_closed\",\"active\":%lu,\"hasContext\":%s}\n",
         static_cast<unsigned long>(*reinterpret_cast<const uint32_t*>(dialog + 0x2cc)),
         *reinterpret_cast<void* const*>(dialog + 0x2d0) ? "true" : "false");
 }
+void dumpLocationAccess(HMODULE module) {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(module);
+    void* variableContext = *reinterpret_cast<void* const*>(base + 0x7f9a0);
+    if (!variableContext) fail("location_access_variable_context_unavailable");
+    const uintptr_t variableVtable = *reinterpret_cast<const uintptr_t*>(variableContext);
+    auto getVariable = reinterpret_cast<int32_t (ORACLE_THISCALL*)(void*, const char*, double*)>(
+        *reinterpret_cast<const uintptr_t*>(variableVtable + 0x10));
+    const char* locations[] = {
+        "L1_1", "L89_1_A", "L2_1", "L5_1", "L4_1", "L3_3", "L19", "L15", "L16",
+        "L18_1", "L21_1", "L22", "L23", "L24", "L25_1", "L27", "L96", "L66",
+        "L94", "L48", "L49", "L56", "L64", "L99_1", "L26", "L52_1", "L53", "L54",
+        "L7_1", "L6_1", "L9_1", "L8_1", "L42", "L11_1", "L14_1", "L13_1",
+        "L10_1", "L12_1", "L29_1", "L31_2", "L33_1", "L35", "L32", "L73_A",
+        "L91", "L75", "L78", "L40_2", "L41", "L77", "L83", "L85", "L43_1", "L97",
+    };
+    for (const char* location : locations) {
+        const std::string state = std::string(location) + "_state";
+        double value = 0.0;
+        const int32_t found = getVariable(variableContext, state.c_str(), &value);
+        printf("{\"event\":\"location_access\",\"location\":\"%s\",\"found\":%d,\"value\":%.17g}\n",
+            location, found, found == 0 ? value : 0.0);
+    }
+}
+
 
 void loadApi(const ModuleSpec& spec, HMODULE* module, const char* exportName, uintptr_t* host, uintptr_t* table, bool initialize) {
     *module = LoadLibraryExW(modulePath(spec), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
@@ -2083,6 +2249,12 @@ int wmain(int argc, wchar_t** argv) {
             g_quietHostStubs = true;
         } else if (wcscmp(argv[index], L"--invoke-native-dialog") == 0) {
             g_invokeNativeDialog = true;
+        } else if (wcscmp(argv[index], L"--native-dialog-function-limit") == 0 && index + 1 < argc) {
+            const int limit = _wtoi(argv[++index]);
+            if (limit <= 0) fail("native_dialog_function_limit_invalid");
+            g_nativeDialogFunctionLimit = static_cast<unsigned>(limit);
+        } else if (wcscmp(argv[index], L"--native-dialog-asset") == 0 && index + 1 < argc) {
+            g_nativeDialogAsset = narrowPath(argv[++index]);
         } else if (wcscmp(argv[index], L"--invoke-native-scr") == 0) {
             g_invokeNativeScr = true;
         } else if (wcscmp(argv[index], L"--invoke-native-scr-core") == 0) {
@@ -2095,6 +2267,8 @@ int wmain(int argc, wchar_t** argv) {
             g_invokeNativeScrEffect = true;
         } else if (wcscmp(argv[index], L"--invoke-native-level") == 0) {
             g_invokeNativeLevel = true;
+        } else if (wcscmp(argv[index], L"--dump-location-access") == 0) {
+            g_dumpLocationAccess = true;
         } else if (wcscmp(argv[index], L"--asset-root") == 0 && index + 1 < argc) {
             g_assetRoot = narrowPath(argv[++index]);
         } else if (wcscmp(argv[index], L"--game-root") == 0 && index + 1 < argc) {
@@ -2189,6 +2363,10 @@ int wmain(int argc, wchar_t** argv) {
     if (g_invokeNativeDialog) {
         if (!initialize) fail("native_dialogue_requires_initialized_modules");
         invokeNativeDialogFunction(g_server, serverOnly ? 0 : clientTable[0x18 / sizeof(uintptr_t)]);
+    }
+    if (g_dumpLocationAccess) {
+        if (!initialize) fail("location_access_requires_initialized_modules");
+        dumpLocationAccess(g_server);
     }
     printf("{\"event\":\"oracle_complete\",\"initialized\":%s}\n", initialize ? "true" : "false");
     return 0;

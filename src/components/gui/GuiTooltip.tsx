@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { drawGuiFrame, guiFramePromise, type GuiFrameImages } from "./GuiFrame.ts";
 import styles from "./GuiTooltip.module.scss";
 
@@ -15,10 +15,12 @@ interface GuiTooltipProps {
     readonly canvasWidth: number;
     readonly canvasHeight: number;
     readonly fixedWidth?: number;
+    readonly children?: ReactNode;
+    readonly interactive?: boolean;
 }
 
 
-export const GuiTooltip = ({ text, anchor, canvasWidth, canvasHeight, fixedWidth }: GuiTooltipProps) => {
+export const GuiTooltip = ({ text, anchor, canvasWidth, canvasHeight, fixedWidth, children, interactive = false }: GuiTooltipProps) => {
     const elementRef = useRef<HTMLDivElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [frameImages, setFrameImages] = useState<GuiFrameImages | null>(null);
@@ -50,9 +52,9 @@ export const GuiTooltip = ({ text, anchor, canvasWidth, canvasHeight, fixedWidth
     }, [anchor, canvasHeight, canvasWidth, fixedWidth, frameImages, text]);
 
     return <div ref={elementRef} className={styles.tooltip} role="tooltip" data-gui-tooltip="true"
-        style={{ left: `${position.left}px`, top: `${position.top}px`, pointerEvents: "none",
+        style={{ left: `${position.left}px`, top: `${position.top}px`, pointerEvents: interactive ? "auto" : "none",
             ...(fixedWidth === undefined ? {} : { width: fixedWidth, minWidth: fixedWidth, maxWidth: fixedWidth }) }}>
         <canvas ref={canvasRef} className={styles.canvas} aria-hidden="true" />
-        <span className={styles.text} style={fixedWidth === undefined ? undefined : { maxWidth: fixedWidth - 40 }}>{text}</span>
+        {children ?? <span className={styles.text} style={fixedWidth === undefined ? undefined : { maxWidth: fixedWidth - 40 }}>{text}</span>}
     </div>;
 };

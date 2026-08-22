@@ -1,0 +1,156 @@
+.panel {
+    position: absolute;
+    inset: 0;
+    z-index: 80;
+    overflow: hidden;
+    background: #090705;
+    user-select: none;
+}
+
+.frame {
+    position: absolute;
+    z-index: 8;
+    pointer-events: none;
+    object-fit: none;
+}
+
+.frameTop {
+    left: 0;
+    top: 0;
+    width: 1024px;
+    height: 9px;
+}
+
+.frameBottom {
+    left: 0;
+    bottom: 0;
+    width: 1024px;
+    height: 10px;
+}
+
+.frameLeft {
+    left: 0;
+    top: 0;
+    width: 11px;
+    height: 768px;
+}
+
+.frameRight {
+    right: 0;
+    top: 0;
+    width: 10px;
+    height: 768px;
+}
+
+.frameBottomRight {
+    right: 0;
+    bottom: 0;
+    width: 174px;
+    height: 173px;
+}
+
+.map {
+    position: absolute;
+    width: 1600px;
+    height: 1200px;
+    image-rendering: auto;
+}
+
+
+.leftBottom,
+.wheel {
+    position: absolute;
+    z-index: 6;
+    pointer-events: none;
+}
+
+.leftBottom {
+    left: 0;
+    top: 697px;
+    width: 252px;
+    height: 71px;
+}
+
+.wheel {
+    left: 179px;
+    top: 700px;
+    width: 70px;
+    height: 63px;
+}
+
+.clockDate,
+.clockTime {
+    position: absolute;
+    z-index: 9;
+    left: 7px;
+    width: 170px;
+    text-align: center;
+    color: #ffffff;
+    font: 400 10px/normal ZlatoPalatino, "Palatino Linotype", Palatino, serif;
+    pointer-events: none;
+}
+
+.clockDate {
+    /* Client.dll 0x120BA7E2..0x120BA7F6: day at y=0x2C4 */
+    top: 708px;
+}
+
+.clockTime {
+    /* Client.dll 0x120BA84B..0x120BA85F: time at y=0x2DA */
+    top: 730px;
+}
+
+.prompt {
+    position: absolute;
+    inset: 0;
+    z-index: 100;
+}
+
+.arrivalContent {
+    display: grid;
+    min-width: 220px;
+    gap: 8px;
+    pointer-events: auto;
+}
+
+.arrivalTitle {
+    margin-bottom: 4px;
+    color: #191921;
+    font-family: GoldenLand, Georgia, serif;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.15;
+    text-align: center;
+}
+
+.arrivalOptions {
+    display: grid;
+    gap: 3px;
+}
+
+.arrivalOption,
+.continueButton {
+    box-sizing: border-box;
+    border: 0;
+    padding: 3px 6px;
+    background: transparent;
+    color: #191921;
+    font-family: GoldenLand, Georgia, serif;
+    font-size: 14px;
+    line-height: 1.15;
+    text-align: left;
+    cursor: pointer;
+}
+
+.arrivalOption:hover,
+.arrivalOption:focus-visible,
+.continueButton:hover,
+.continueButton:focus-visible {
+    background: rgb(25 25 33 / 12%);
+    outline: 0;
+}
+
+.continueButton {
+    margin-top: 4px;
+    text-align: center;
+}

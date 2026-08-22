@@ -34,7 +34,7 @@ try {
     const cleanRoomEvaluations = cleanRoomEvents.filter(({ event }) => event === "age_evaluation");
     assertEqual(nativeEvaluations.length, cleanRoomEvaluations.length, "AGE evaluation count");
     for (let index = 0; index < nativeEvaluations.length; index += 1) {
-        const fields = ["turn", "sequence", "depth", "record", "result"];
+        const fields = ["turn", "sequence", "depth", "record", "kind", "result"];
         for (const field of fields) {
             assertEqual(
                 nativeEvaluations[index][field],
@@ -42,6 +42,24 @@ try {
                 `AGE evaluation ${index + 1} ${field}`,
             );
         }
+    }
+
+    const nativeFunctions = nativeEvents.filter(({ event }) => event === "native_age_function");
+    const cleanRoomFunctions = cleanRoomEvents
+        .map((entry, eventIndex) => ({ entry, eventIndex }))
+        .filter(({ entry }) => entry.event === "age_function");
+    assertEqual(nativeFunctions.length, cleanRoomFunctions.length, "AGE function-call count");
+    for (let index = 0; index < nativeFunctions.length; index += 1) {
+        const nativeFunction = nativeFunctions[index];
+        const { entry: cleanRoomFunction, eventIndex } = cleanRoomFunctions[index];
+        for (const field of ["record", "id", "name", "arguments"]) {
+            assertEqual(nativeFunction[field], cleanRoomFunction[field], `AGE function ${index + 1} ${field}`);
+        }
+        assertEqual(nativeFunction.slot, cleanRoomFunction.id & 0x00ffffff, `AGE function ${index + 1} dispatch slot`);
+        const cleanRoomResult = cleanRoomEvents.slice(eventIndex + 1).find((event) =>
+            event.event === "age_evaluation" && event.record === cleanRoomFunction.record);
+        if (!cleanRoomResult) throw new Error(`AGE function ${index + 1} has no matching clean-room evaluation`);
+        assertEqual(nativeFunction.result, cleanRoomResult.result, `AGE function ${index + 1} result`);
     }
 
     const nativeNodes = nativeEvents.filter(({ event }) => event === "native_age_node");
@@ -86,7 +104,8 @@ try {
     if (!closed || closed.active !== 0 || closed.hasContext !== false) {
         throw new Error("Native trace did not destroy the active dialogue context cleanly");
     }
-    console.log(`Matched ${nativeEvaluations.length} AGE evaluations, ${nativeNodes.length} flow nodes, ${nativePackets.length} packet payloads, and ${nativeTurns.length} dialogue turns for ${nativeProgram.asset}: ${nativeTurns.map(({ phraseId, replies }) => `${phraseId} -> [${replies.join(",")}]`).join("; ")}`);
+    const functionSummary = `${nativeFunctions.length} function calls`;
+    console.log(`Matched ${nativeEvaluations.length} AGE evaluations, ${nativeNodes.length} flow nodes, ${functionSummary}, ${nativePackets.length} packet payloads, and ${nativeTurns.length} dialogue turns for ${nativeProgram.asset}: ${nativeTurns.map(({ phraseId, replies }) => `${phraseId} -> [${replies.join(",")}]`).join("; ")}`);
 } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

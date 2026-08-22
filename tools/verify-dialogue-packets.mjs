@@ -36,6 +36,18 @@ const turns = [
         },
         nativeHex: "0c020000009f0a02f905a10affffffff000000",
     },
+    {
+        snapshot: {
+            updateCounter: 1,
+            phraseId: 6127,
+            replyIds: [],
+            context: -1,
+            owner: 0,
+            substitutionBlob: empty,
+            voiceBasename: new TextEncoder().encode("Nazgul\\vot_my_i_vstretilis"),
+        },
+        nativeHex: "0c01000000ef1700ffffffff00001a4e617a67756c5c766f745f6d795f695f767374726574696c6973",
+    },
 ];
 
 for (const { snapshot, nativeHex } of turns) {
@@ -51,8 +63,8 @@ for (const { snapshot, nativeHex } of turns) {
         voiceBasename: [...decoded.voiceBasename],
     }, {
         ...snapshot,
-        substitutionBlob: [],
-        voiceBasename: [],
+        substitutionBlob: [...snapshot.substitutionBlob],
+        voiceBasename: [...snapshot.voiceBasename],
     });
 }
 

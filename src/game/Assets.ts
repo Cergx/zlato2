@@ -10,6 +10,7 @@ export const loadImage = (src: string): Promise<HTMLImageElement> => {
 };
 interface CSXLoadOptions {
     magentaTransparent?: boolean;
+    backgroundTransparent?: boolean;
 }
 
 const isBmp = (bytes: Uint8Array): boolean => bytes.length >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d;
@@ -87,7 +88,7 @@ const fetchCSXBuffer = async (path: string): Promise<ArrayBuffer | undefined> =>
 const loadFetchedCSX = async (path: string, options: CSXLoadOptions): Promise<HTMLCanvasElement | undefined> => {
     const buffer = await fetchCSXBuffer(path);
     if (!buffer) return undefined;
-    return new CSXParser(buffer).parse(true, options.magentaTransparent ?? true);
+    return new CSXParser(buffer).parse(options.backgroundTransparent ?? true, options.magentaTransparent ?? true);
 };
 
 export const loadOptionalCSX = async (path: string, options: CSXLoadOptions = {}): Promise<HTMLCanvasElement | undefined> => {
