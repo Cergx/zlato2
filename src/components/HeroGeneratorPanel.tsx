@@ -1,6 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { HERO_GENERATOR_NATIVE_LAYOUT, type NativeRect } from "../constants/clientDll.ts";
-import { BUTTON_HEADS_INTERFACE_FONT, HEADS_INTERFACE_FONT } from "../constants/fontsScr.ts";
+import { BUTTON_HEADS_INTERFACE_FONT, HEADS_INTERFACE_FONT, pointSizeToPixels } from "../constants/fontsScr.ts";
 import { DEFAULT_HERO_NAME, parseHeroProfiles, type HeroProfile } from "../game/HeroProfileRuntime.ts";
 import { SDBParser, type SDBData } from "../game/parsers/SDBParser.ts";
 import { HeroSkillsBlock } from "./HeroSkillsBlock.tsx";
@@ -27,7 +27,7 @@ const nativeRectStyle = ({ left, top, width, height }: NativeRect): CSSPropertie
 const presetCaptionStyle = (rect: NativeRect): CSSProperties => ({
     ...nativeRectStyle(rect),
     fontFamily: `ZlatoPalatino, "${BUTTON_HEADS_INTERFACE_FONT.typeFace}", serif`,
-    fontSize: `${BUTTON_HEADS_INTERFACE_FONT.size}px`,
+    fontSize: `${pointSizeToPixels(BUTTON_HEADS_INTERFACE_FONT.size)}px`,
     fontWeight: BUTTON_HEADS_INTERFACE_FONT.weight,
 });
 
@@ -35,7 +35,7 @@ const topTitleStyle = (): CSSProperties => ({
     left: HERO_GENERATOR_NATIVE_LAYOUT.topTitle.x,
     top: HERO_GENERATOR_NATIVE_LAYOUT.topTitle.y,
     fontFamily: `ZlatoPalatino, "${HEADS_INTERFACE_FONT.typeFace}", serif`,
-    fontSize: `${HEADS_INTERFACE_FONT.size}px`,
+    fontSize: `${pointSizeToPixels(HEADS_INTERFACE_FONT.size)}px`,
     fontWeight: HEADS_INTERFACE_FONT.weight,
 });
 

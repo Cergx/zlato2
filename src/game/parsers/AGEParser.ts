@@ -231,7 +231,7 @@ export class AGEParser {
         return STANDARD_PREFIX.every((expected, index) => view.getUint32(4 + index * 4, true) === expected);
     }
 
-    private decrypt(source: Uint8Array): Uint8Array {
+    private decrypt(source: Uint8Array): Uint8Array<ArrayBuffer> {
         const decrypted = new Uint8Array(source);
         for (let offset = 4; offset < decrypted.length; offset += 1) {
             decrypted[offset] ^= (XOR_SEED + offset - 4) & 0xff;

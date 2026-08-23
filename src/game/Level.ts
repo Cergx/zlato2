@@ -10,7 +10,7 @@ import {
 } from "./parsers/LVLParser.ts";
 import { Paths } from "../constants/paths.ts";
 import { SDBData, SDBParser } from "./parsers/SDBParser.ts";
-import { COMBAT_GROUND_STATUS_STRING_IDS } from "../constants/clientDll.ts";
+import { COMBATANT_HOVER_STRING_IDS, COMBAT_GROUND_STATUS_STRING_IDS } from "../constants/clientDll.ts";
 import { SEFData, SEFDoor, SEFParser, type TilePosition } from "./parsers/SEFParser.ts";
 import { MapRenderer } from "./MapRenderer.ts";
 import { LAOData, LAOParser } from "./parsers/LAOParser.ts";
@@ -226,6 +226,7 @@ export class Level {
             },
             onPersonSound: (shader) => this.playPersonSound(shader),
             onCombatAnimation: (technicalName, kind) => this.mapRenderer?.playPersonCombatAnimation(technicalName, kind),
+            onCombatFloatingText: (technicalName, text, color) => this.mapRenderer?.spawnFloatingText(technicalName, text, color),
             onCombatantMoveRequest: (technicalName, targetPosition, away) =>
                 this.mapRenderer?.stepCombatant(technicalName, targetPosition, away),
             onCombatantFace: (technicalName, targetPosition) => this.mapRenderer?.faceCombatant(technicalName, targetPosition),
@@ -463,7 +464,8 @@ export class Level {
                     const authoredName = person?.literaryName === undefined
                         ? person?.literaryLabel
                         : this.levelData?.sdbData[person.literaryName] ?? person.literaryLabel;
-                    this.options.onStatusText?.(authoredName ?? this.runtime.getCombatantLiteraryName(name));
+                    const label = authoredName ?? this.runtime.getCombatantLiteraryName(name);
+                    this.options.onStatusText?.(this.combatantHoverLabel(name, label));
                     return;
                 }
                 if (kind === "door") {
@@ -508,6 +510,28 @@ export class Level {
         this.audioWeather.destroy();
         for (const audio of this.oneShotAudio) audio.pause();
         this.oneShotAudio.clear();
+    }
+
+    private combatantHoverLabel(name: string, label: string): string {
+        const scienceLevel = this.runtime.getHeroParameter("skill_science");
+        const teamMember = name.toLowerCase() === "hero" || this.runtime.isPartyMember(name);
+        const revealLevel = teamMember ? 15 : scienceLevel;
+        if (revealLevel <= 0) return label;
+        const details = this.runtime.getCombatantHealthEnergy(name);
+        if (!details) return label;
+        const healthTemplate = this.interfaceStrings[COMBATANT_HOVER_STRING_IDS.health];
+        const energyTemplate = this.interfaceStrings[COMBATANT_HOVER_STRING_IDS.energy];
+        const unknown = this.interfaceStrings[COMBATANT_HOVER_STRING_IDS.unknown] ?? "?";
+        let result = label;
+        if (revealLevel >= 1 && healthTemplate) {
+            const current = revealLevel >= 10 ? String(details.health) : unknown;
+            result += healthTemplate.replace("%s", current).replace("%s", String(details.maximumHealth));
+        }
+        if (revealLevel >= 5 && energyTemplate) {
+            const current = revealLevel >= 15 ? String(details.energy) : unknown;
+            result += energyTemplate.replace("%s", current).replace("%s", String(details.maximumEnergy));
+        }
+        return result;
     }
 
     private async addDynamicPerson(person: DynamicPersonDefinition): Promise<void> {

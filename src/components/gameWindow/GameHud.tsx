@@ -28,7 +28,7 @@ import {
     type ProfessionSkillDefinition,
     type HudInterfaceIconDefinition,
 } from "../../constants/clientDll.ts";
-import { CONSOLE_FONT, MAIN_INTERFACE_FONT } from "../../constants/fontsScr.ts";
+import { ARIAL_FONT, EXTRA_SMALL_INTERFACE_FONT, MAIN_INTERFACE_FONT, N_SMALL_INTERFACE_FONT, pointSizeToPixels } from "../../constants/fontsScr.ts";
 import { Paths } from "../../constants/paths.ts";
 import { loadGuiDefinition, type GuiDefinition } from "../../game/GuiDefinitionRuntime.ts";
 import { loadMagicCatalog, type MagicDefinition } from "../../game/MagicCatalogRuntime.ts";
@@ -95,6 +95,8 @@ interface HudInfo {
     weaponItemId: string;
     weaponItemClass?: string;
     weaponNativeFlags: number;
+    weaponActionPointCost: number;
+    weaponDamage: Readonly<Record<"crushing" | "hacking" | "pricking", { readonly min: number; readonly max: number }>>;
     conditionIconIds: readonly number[];
     companions: readonly HudCompanion[];
 }
@@ -117,6 +119,8 @@ const initialInfo: HudInfo = {
     weaponItemId: "unarmed",
     weaponItemClass: "mace",
     weaponNativeFlags: HUD_DAMAGE_MODE_FLAGS[1],
+    weaponActionPointCost: 0,
+    weaponDamage: { crushing: { min: 0, max: 0 }, hacking: { min: 0, max: 0 }, pricking: { min: 0, max: 0 } },
     conditionIconIds: [],
     companions: [],
 };
@@ -287,9 +291,9 @@ const buildAlphaMaskedFrames = (
 
 
 const HUD_STATUS_FONT_STYLE: CSSProperties = Object.freeze({
-    fontFamily: `ZlatoPalatino, "${MAIN_INTERFACE_FONT.typeFace}", serif`,
-    fontSize: `${MAIN_INTERFACE_FONT.size}px`,
-    fontWeight: MAIN_INTERFACE_FONT.weight,
+    fontFamily: `ZlatoPalatino, "${N_SMALL_INTERFACE_FONT.typeFace}", serif`,
+    fontSize: `${pointSizeToPixels(N_SMALL_INTERFACE_FONT.size)}px`,
+    fontWeight: N_SMALL_INTERFACE_FONT.weight,
 });
 
 /** Client.dll 0x1205a5f4: native history-panel rectangles and text insets. */
@@ -309,10 +313,30 @@ interface HudStatusHistoryEntry {
     readonly text: string;
 }
 
+/** Client.dll 0x12055cf0 loads fonts.scr `arial` for the health/mana value text. */
 const HUD_VALUE_FONT_STYLE: CSSProperties = Object.freeze({
-    fontFamily: `ZlatoConsole, "${CONSOLE_FONT.typeFace}", monospace`,
-    fontSize: `${CONSOLE_FONT.size}px`,
+    fontFamily: `ZlatoArial, "${ARIAL_FONT.typeFace}", sans-serif`,
+    fontSize: `${pointSizeToPixels(ARIAL_FONT.size)}px`,
+    fontWeight: ARIAL_FONT.weight,
 });
+
+/** Client.dll 0x120553f4 loads fonts.scr `extra_small_interface` for the weapon damage/AP text. */
+const HUD_WEAPON_VALUE_FONT_STYLE: CSSProperties = Object.freeze({
+    fontFamily: `ZlatoPalatino, "${EXTRA_SMALL_INTERFACE_FONT.typeFace}", serif`,
+    fontSize: `${pointSizeToPixels(EXTRA_SMALL_INTERFACE_FONT.size)}px`,
+    fontWeight: EXTRA_SMALL_INTERFACE_FONT.weight,
+});
+
+/** Client.dll 0x12055f32/0x1205607c: health/mana value text, centered in a 42px box. Native draws health at x=base+0x9e, mana at x=base+0x338, both at y=base+0x2f0 (bottom of the 141px gauge, y=611..752). The base is 0 when [0x12106c00+0x8c]==0, otherwise [0x1210fd04+0x475c/0x4760]; the offsets below are the base=0 case. */
+const HUD_LIFE_VALUE_RECT = Object.freeze({ left: 158, top: 752, width: 42, height: 16 });
+const HUD_ENERGY_VALUE_RECT = Object.freeze({ left: 824, top: 752, width: 42, height: 16 });
+
+/** Client.dll 0x12055475/0x12055a00: weapon "ОД:" AP and "Повр:" damage text stacked inside the weapon slot. The second line is offset by 0x12031268 = |font.+0x08| (the font height), so the two lines are laid out as a flex column rather than a hardcoded pixel offset. */
+const HUD_WEAPON_VALUE_RECT = Object.freeze({ left: 20, top: 707 });
+
+/** Client.dll 0x12055418/0x1205599a: user_interface.sdb label string IDs for weapon AP and damage. */
+const HUD_WEAPON_AP_LABEL_STRING_ID = 164;
+const HUD_WEAPON_DAMAGE_LABEL_STRING_ID = 165;
 
 interface MinimapDragState {
     pointerId: number;
@@ -328,6 +352,14 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
     const combatButtonFrameRef = useRef<number | null>(null);
     const combatButtonAdvanceAtRef = useRef(0);
     const actionPointsOpacityRef = useRef(0);
+    const [hudAnimationAssets, setHudAnimationAssets] = useState<Readonly<{
+        frame: HTMLImageElement;
+        health: HTMLImageElement;
+        energy: HTMLImageElement;
+        wheel: HTMLImageElement;
+        combatButtonFrames: readonly HTMLCanvasElement[];
+        actionPoints: HTMLCanvasElement | undefined;
+    }> | null>(null);
     const minimapRef = useRef<HTMLCanvasElement>(null);
     const noWeaponRef = useRef<HTMLCanvasElement>(null);
     const minimapDragRef = useRef<MinimapDragState | null>(null);
@@ -529,6 +561,8 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
                 weaponItemId: heroCombat?.profile.weapon.itemId ?? "unarmed",
                 weaponItemClass: heroCombat?.profile.weapon.itemClass,
                 weaponNativeFlags: heroCombat?.profile.weapon.nativeFlags ?? HUD_DAMAGE_MODE_FLAGS[1],
+                weaponActionPointCost: heroCombat?.profile.weapon.actionPointCost ?? 0,
+                weaponDamage: heroCombat?.profile.weapon.damage ?? { crushing: { min: 0, max: 0 }, hacking: { min: 0, max: 0 }, pricking: { min: 0, max: 0 } },
                 conditionIconIds,
                 companions,
             });
@@ -586,7 +620,6 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
 
     useEffect(() => {
         let cancelled = false;
-        let animationFrame = 0;
         void Promise.all([
             loadImage(`${Paths.ENGINERES}/gpanel/std.bmp`),
             loadImage(`${Paths.ENGINERES}/gpanel/anim/health.bmp`),
@@ -597,106 +630,122 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
             loadCSX(`${Paths.ENGINERES}/gpanel/anim/bar_ap.csx`),
         ]).then(([frame, health, energy, wheel, combatButton, combatButtonAlpha, actionPoints]) => {
             if (cancelled) return;
-            const canvas = frameRef.current;
-            const context = canvas?.getContext("2d");
-            if (!canvas || !context) return;
-            const healthFrameCount = Math.max(1, Math.floor(health.height / HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.health));
-            const energyFrameCount = Math.max(1, Math.floor(energy.height / HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.energy));
-            const wheelFrameCount = Math.max(1, Math.floor(wheel.height / HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.wheel));
-            const combatButtonFrames = buildAlphaMaskedFrames(combatButton, combatButtonAlpha, HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.button);
-            const combatButtonTarget = info.combatMode ? combatButtonFrames.length - 1 : 0;
-            if (combatButtonFrameRef.current === null) combatButtonFrameRef.current = combatButtonTarget;
-            const actionPointsFrameCount = actionPoints
-                ? Math.max(1, Math.floor(actionPoints.height / HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.actionPoints))
-                : 0;
-            const actionPointsFrame = Math.min(
-                Math.max(0, actionPointsFrameCount - 1),
-                HUD_ACTION_POINTS_MAXIMUM_FRAME,
-                Math.max(0, Math.floor(info.actionPoints)),
-            );
-            const minuteOfDay = ((Math.floor(info.elapsedMinutes) % HUD_WHEEL_DAY_MINUTES) + HUD_WHEEL_DAY_MINUTES) % HUD_WHEEL_DAY_MINUTES;
-            const hour = Math.floor(minuteOfDay / 60);
-            const minute = minuteOfDay % 60;
-            const rotatedMinutes = hour >= HUD_WHEEL_START_HOUR
-                ? minute + 60 * (hour - HUD_WHEEL_START_HOUR)
-                : minute + 60 * hour + 60 * (24 - HUD_WHEEL_START_HOUR);
-            const wheelFrame = Math.floor(rotatedMinutes / (HUD_WHEEL_DAY_MINUTES / wheelFrameCount));
-            const healthTarget = Math.floor(info.lifeRatio * (healthFrameCount - 1));
-            const energyTarget = Math.floor(info.energyRatio * (energyFrameCount - 1));
-            const advance = (current: number | null, target: number): number =>
-                current === null ? target : current < target ? current + 1 : current > target ? current - 1 : current;
-            const draw = (now = performance.now()): void => {
-                if (cancelled) return;
-                const healthFrame = advance(healthFrameRef.current, healthTarget);
-                const energyFrame = advance(energyFrameRef.current, energyTarget);
-                healthFrameRef.current = healthFrame;
-                energyFrameRef.current = energyFrame;
-                let combatButtonFrame = combatButtonFrameRef.current ?? combatButtonTarget;
-                if (combatButtonFrame !== combatButtonTarget && now >= combatButtonAdvanceAtRef.current) {
-                    combatButtonFrame += combatButtonFrame < combatButtonTarget ? 1 : -1;
-                    combatButtonFrameRef.current = combatButtonFrame;
-                    combatButtonAdvanceAtRef.current = now + HUD_COMBAT_BUTTON_FRAME_INTERVAL_MS;
-                }
-                const actionPointsOpacityTarget = info.combatMode ? 1 : 0;
-                const actionPointsOpacity = actionPointsOpacityRef.current < actionPointsOpacityTarget
-                    ? Math.min(actionPointsOpacityTarget, actionPointsOpacityRef.current + HUD_ACTION_POINTS_OPACITY_STEP)
-                    : Math.max(actionPointsOpacityTarget, actionPointsOpacityRef.current - HUD_ACTION_POINTS_OPACITY_STEP);
-                actionPointsOpacityRef.current = actionPointsOpacity;
-                context.clearRect(0, 0, canvas.width, canvas.height);
-                drawColorKeyed(context, frame,
-                    0, 0, frame.width, frame.height,
-                    0, canvas.height - frame.height);
-                drawColorKeyed(context, health,
+            setHudAnimationAssets({
+                frame,
+                health,
+                energy,
+                wheel,
+                combatButtonFrames: buildAlphaMaskedFrames(combatButton, combatButtonAlpha, HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.button),
+                actionPoints,
+            });
+        }).catch((error) => console.error("Не удалось загрузить HUD-анимацию", error));
+        return () => { cancelled = true; };
+    }, []);
+
+    useEffect(() => {
+        const assets = hudAnimationAssets;
+        if (!assets) return;
+        const canvas = frameRef.current;
+        const context = canvas?.getContext("2d");
+        if (!canvas || !context) return;
+        const { frame, health, energy, wheel, combatButtonFrames, actionPoints } = assets;
+        let cancelled = false;
+        let animationFrame = 0;
+        const healthFrameCount = Math.max(1, Math.floor(health.height / HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.health));
+        const energyFrameCount = Math.max(1, Math.floor(energy.height / HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.energy));
+        const wheelFrameCount = Math.max(1, Math.floor(wheel.height / HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.wheel));
+        const combatButtonTarget = info.combatMode ? combatButtonFrames.length - 1 : 0;
+        if (combatButtonFrameRef.current === null) combatButtonFrameRef.current = combatButtonTarget;
+        const actionPointsFrameCount = actionPoints
+            ? Math.max(1, Math.floor(actionPoints.height / HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.actionPoints))
+            : 0;
+        const actionPointsFrame = Math.min(
+            Math.max(0, actionPointsFrameCount - 1),
+            HUD_ACTION_POINTS_MAXIMUM_FRAME,
+            Math.max(0, Math.floor(info.actionPoints)),
+        );
+        const minuteOfDay = ((Math.floor(info.elapsedMinutes) % HUD_WHEEL_DAY_MINUTES) + HUD_WHEEL_DAY_MINUTES) % HUD_WHEEL_DAY_MINUTES;
+        const hour = Math.floor(minuteOfDay / 60);
+        const minute = minuteOfDay % 60;
+        const rotatedMinutes = hour >= HUD_WHEEL_START_HOUR
+            ? minute + 60 * (hour - HUD_WHEEL_START_HOUR)
+            : minute + 60 * hour + 60 * (24 - HUD_WHEEL_START_HOUR);
+        const wheelFrame = Math.floor(rotatedMinutes / (HUD_WHEEL_DAY_MINUTES / wheelFrameCount));
+        const healthTarget = Math.floor(info.lifeRatio * (healthFrameCount - 1));
+        const energyTarget = Math.floor(info.energyRatio * (energyFrameCount - 1));
+        const advance = (current: number | null, target: number): number =>
+            current === null ? target : current < target ? current + 1 : current > target ? current - 1 : current;
+        const draw = (now = performance.now()): void => {
+            if (cancelled) return;
+            const healthFrame = advance(healthFrameRef.current, healthTarget);
+            const energyFrame = advance(energyFrameRef.current, energyTarget);
+            healthFrameRef.current = healthFrame;
+            energyFrameRef.current = energyFrame;
+            let combatButtonFrame = combatButtonFrameRef.current ?? combatButtonTarget;
+            if (combatButtonFrame !== combatButtonTarget && now >= combatButtonAdvanceAtRef.current) {
+                combatButtonFrame += combatButtonFrame < combatButtonTarget ? 1 : -1;
+                combatButtonFrameRef.current = combatButtonFrame;
+                combatButtonAdvanceAtRef.current = now + HUD_COMBAT_BUTTON_FRAME_INTERVAL_MS;
+            }
+            const actionPointsOpacityTarget = info.combatMode ? 1 : 0;
+            const actionPointsOpacity = actionPointsOpacityRef.current < actionPointsOpacityTarget
+                ? Math.min(actionPointsOpacityTarget, actionPointsOpacityRef.current + HUD_ACTION_POINTS_OPACITY_STEP)
+                : Math.max(actionPointsOpacityTarget, actionPointsOpacityRef.current - HUD_ACTION_POINTS_OPACITY_STEP);
+            actionPointsOpacityRef.current = actionPointsOpacity;
+            context.clearRect(0, 0, canvas.width, canvas.height);
+            drawColorKeyed(context, frame,
+                0, 0, frame.width, frame.height,
+                0, canvas.height - frame.height);
+            drawColorKeyed(context, health,
+                0,
+                healthFrame * HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.health,
+                health.width,
+                HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.health,
+                HUD_GAUGE_ANIMATION_ORIGINS.health.left,
+                HUD_GAUGE_ANIMATION_ORIGINS.health.top);
+            drawColorKeyed(context, energy,
+                0,
+                energyFrame * HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.energy,
+                energy.width,
+                HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.energy,
+                HUD_GAUGE_ANIMATION_ORIGINS.energy.left,
+                HUD_GAUGE_ANIMATION_ORIGINS.energy.top);
+            drawColorKeyed(context, wheel,
+                0,
+                wheelFrame * HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.wheel,
+                wheel.width,
+                HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.wheel,
+                HUD_WHEEL_ANIMATION_ORIGIN.left,
+                HUD_WHEEL_ANIMATION_ORIGIN.top);
+            const combatButtonImage = combatButtonFrames[combatButtonFrame];
+            if (combatButtonImage) context.drawImage(combatButtonImage,
+                HUD_COMBAT_BUTTON_ANIMATION_ORIGIN.left,
+                HUD_COMBAT_BUTTON_ANIMATION_ORIGIN.top);
+            if (actionPoints && actionPointsOpacity > 0) {
+                context.save();
+                context.globalAlpha = actionPointsOpacity;
+                context.drawImage(actionPoints,
                     0,
-                    healthFrame * HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.health,
-                    health.width,
-                    HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.health,
-                    HUD_GAUGE_ANIMATION_ORIGINS.health.left,
-                    HUD_GAUGE_ANIMATION_ORIGINS.health.top);
-                drawColorKeyed(context, energy,
-                    0,
-                    energyFrame * HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.energy,
-                    energy.width,
-                    HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.energy,
-                    HUD_GAUGE_ANIMATION_ORIGINS.energy.left,
-                    HUD_GAUGE_ANIMATION_ORIGINS.energy.top);
-                drawColorKeyed(context, wheel,
-                    0,
-                    wheelFrame * HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.wheel,
-                    wheel.width,
-                    HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.wheel,
-                    HUD_WHEEL_ANIMATION_ORIGIN.left,
-                    HUD_WHEEL_ANIMATION_ORIGIN.top);
-                const combatButtonImage = combatButtonFrames[combatButtonFrame];
-                if (combatButtonImage) context.drawImage(combatButtonImage,
-                    HUD_COMBAT_BUTTON_ANIMATION_ORIGIN.left,
-                    HUD_COMBAT_BUTTON_ANIMATION_ORIGIN.top);
-                if (actionPoints && actionPointsOpacity > 0) {
-                    context.save();
-                    context.globalAlpha = actionPointsOpacity;
-                    context.drawImage(actionPoints,
-                        0,
-                        actionPointsFrame * HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.actionPoints,
-                        actionPoints.width,
-                        HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.actionPoints,
-                        HUD_ACTION_POINTS_ANIMATION_ORIGIN.left,
-                        HUD_ACTION_POINTS_ANIMATION_ORIGIN.top,
-                        actionPoints.width,
-                        HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.actionPoints);
-                    context.restore();
-                }
-                if (healthFrame !== healthTarget || energyFrame !== energyTarget
-                    || combatButtonFrame !== combatButtonTarget || actionPointsOpacity !== actionPointsOpacityTarget) {
-                    animationFrame = window.requestAnimationFrame(draw);
-                }
-            };
-            draw();
-        });
+                    actionPointsFrame * HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.actionPoints,
+                    actionPoints.width,
+                    HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.actionPoints,
+                    HUD_ACTION_POINTS_ANIMATION_ORIGIN.left,
+                    HUD_ACTION_POINTS_ANIMATION_ORIGIN.top,
+                    actionPoints.width,
+                    HUD_NATIVE_ANIMATION_FRAME_HEIGHTS.actionPoints);
+                context.restore();
+            }
+            if (healthFrame !== healthTarget || energyFrame !== energyTarget
+                || combatButtonFrame !== combatButtonTarget || actionPointsOpacity !== actionPointsOpacityTarget) {
+                animationFrame = window.requestAnimationFrame(draw);
+            }
+        };
+        draw();
         return () => {
             cancelled = true;
             window.cancelAnimationFrame(animationFrame);
         };
-    }, [info.lifeRatio, info.energyRatio, info.elapsedMinutes, info.combatMode, info.actionPoints]);
+    }, [hudAnimationAssets, info.lifeRatio, info.energyRatio, info.elapsedMinutes, info.combatMode, info.actionPoints]);
 
     useEffect(() => {
         const handlePointerMove = (event: PointerEvent): void => {
@@ -892,6 +941,11 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
         : damageMode === 3 && info.weaponItemClass === "staff"
             ? "magic"
             : HUD_DAMAGE_RESOURCE_BY_MODE[damageMode];
+    // Mode 3 (`distance`) has no entry in the weapon's physical `damage` record
+    // (crushing/hacking/pricking only), so it renders no hit range here.
+    const weaponDamageRange = damageMode !== undefined && damageMode !== 3
+        ? info.weaponDamage[HUD_DAMAGE_RESOURCE_BY_MODE[damageMode] as "hacking" | "crushing" | "pricking"]
+        : undefined;
     const handleHudAction = (id: number): void => {
         if (id === 1) onInventory();
         else if (id === 3) onPause();
@@ -969,6 +1023,11 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
                 style={HUD_NO_WEAPON_POSITION} width={HUD_NO_WEAPON_POSITION.width} height={HUD_NO_WEAPON_POSITION.height} />}
             {info.weaponItemId !== "unarmed" && weaponIconUrl && guiObjects.get(16) && <ColorKeyImage
                 className={styles.weaponSlot} style={guiObjectStyle(guiObjects.get(16)!)} src={weaponIconUrl} />}
+            <span className={styles.weaponValues}
+                style={{ left: HUD_WEAPON_VALUE_RECT.left, top: HUD_WEAPON_VALUE_RECT.top, ...HUD_WEAPON_VALUE_FONT_STYLE }}>
+                <span>{interfaceStrings[HUD_WEAPON_AP_LABEL_STRING_ID] ?? ""}{info.weaponActionPointCost}</span>
+                {weaponDamageRange && <span>{interfaceStrings[HUD_WEAPON_DAMAGE_LABEL_STRING_ID] ?? ""}{weaponDamageRange.min}-{weaponDamageRange.max}</span>}
+            </span>
             {guiObjects.get(17) && <button className={styles.damageSlot} style={guiObjectStyle(guiObjects.get(17)!)}
                 type="button" disabled={damageModes.length <= 1}
                 aria-label="Текущий тип урона"
@@ -1034,11 +1093,11 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
                 {statusText || transientStatusText}
             </button>}
             {guiObjects.get(35) && <span className={styles.lifeValue}
-                style={{ ...guiObjectStyle(guiObjects.get(35)!), ...HUD_VALUE_FONT_STYLE }}>
+                style={{ ...HUD_LIFE_VALUE_RECT, ...HUD_VALUE_FONT_STYLE }}>
                 {Math.round(info.lifeValue)}/{Math.round(info.lifeMaximum)}
             </span>}
             {guiObjects.get(37) && <span className={styles.energyValue}
-                style={{ ...guiObjectStyle(guiObjects.get(37)!), ...HUD_VALUE_FONT_STYLE }}>
+                style={{ ...HUD_ENERGY_VALUE_RECT, ...HUD_VALUE_FONT_STYLE }}>
                 {Math.round(info.energyValue)}/{Math.round(info.energyMaximum)}
             </span>}
             <OriginalGuiLayer className={styles.authoredControls} script="gpanel_new"

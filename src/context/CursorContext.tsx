@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ANIParser, type ParsedAni } from "../game/parsers/ANIParser.ts";
+import { ANIParser, buildAniCursorSteps, type ParsedAni } from "../game/parsers/ANIParser.ts";
 import { CursorType } from "../enums/CursorTypes";
+import { Paths } from "../constants/paths.ts";
 
 interface CursorContextType {
     setCursor: (cursor: CursorType) => void;
@@ -31,7 +32,7 @@ export const CursorProvider = ({ children }: { children: ReactNode }) => {
         const generation = ++requestGeneration.current;
         let pending = cursorCache.get(cursor);
         if (!pending) {
-            pending = fetch(`/assets/cursors/${cursor}`).then(async (response) => {
+            pending = fetch(`${Paths.CURSORS}/${cursor}`).then(async (response) => {
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 return new ANIParser(await response.arrayBuffer()).parse();
             });
@@ -55,11 +56,12 @@ export const CursorProvider = ({ children }: { children: ReactNode }) => {
         if (parsedAni.frames.length === 1) {
             styleElement.innerHTML = `.${cursorClassName} { cursor: url(${parsedAni.frames[0]}), auto; }`;
         } else {
-            const keyframes = parsedAni.frames
-                .map((frame, index) => `${(parsedAni.rate[index] * index / parsedAni.rateSum) * 100}% { cursor: url(${frame}), auto; }`)
+            const { steps, rateSum } = buildAniCursorSteps(parsedAni);
+            const keyframes = steps
+                .map(({ frameIndex, percent }) => `${percent}% { cursor: url(${parsedAni.frames[frameIndex]}), auto; }`)
                 .join("\n");
 
-            const animationDuration = parsedAni.rateSum / 60;
+            const animationDuration = rateSum / 60;
             styleElement.innerHTML = `@keyframes ${cursorClassName}Animation{${keyframes}} .${cursorClassName}{animation: ${cursorClassName}Animation ${animationDuration}s steps(1) infinite;}`;
         }
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { DIARY_CONTENT_RECTS, DIARY_TAB_TEXT_DRAWS, type DiaryTabTextDraw, type NativeRect } from "../../constants/clientDll.ts";
-import { MAIN_INTERFACE_FONT, MAIN_INTERFACE_STRIKEOUT_FONT } from "../../constants/fontsScr.ts";
+import { MAIN_INTERFACE_FONT, MAIN_INTERFACE_STRIKEOUT_FONT, pointSizeToPixels } from "../../constants/fontsScr.ts";
 import type { Game } from "../../game/Game.ts";
 import type { GameRuntimeSnapshot } from "../../game/GameStateRuntime.ts";
 import { SDBParser, type SDBData } from "../../game/parsers/SDBParser.ts";
@@ -176,7 +176,7 @@ const diaryTabTextStyle = (draw: DiaryTabTextDraw, selected: boolean): CSSProper
     width: `${draw.boxWidth}px`,
     height: `${draw.boxHeight}px`,
     fontFamily: `ZlatoPalatino, "${MAIN_INTERFACE_FONT.typeFace}", serif`,
-    fontSize: `${MAIN_INTERFACE_FONT.size}px`,
+    fontSize: `${pointSizeToPixels(MAIN_INTERFACE_FONT.size)}px`,
     fontWeight: MAIN_INTERFACE_FONT.weight,
     color: selected ? "#000080" : "#000000",
 });
@@ -188,7 +188,7 @@ const diaryContentStyle = (rect: NativeRect): CSSProperties => ({
     width: `${rect.width}px`,
     height: `${rect.height}px`,
     fontFamily: `ZlatoPalatino, "${MAIN_INTERFACE_FONT.typeFace}", serif`,
-    fontSize: `${MAIN_INTERFACE_FONT.size}px`,
+    fontSize: `${pointSizeToPixels(MAIN_INTERFACE_FONT.size)}px`,
     fontWeight: MAIN_INTERFACE_FONT.weight,
 });
 

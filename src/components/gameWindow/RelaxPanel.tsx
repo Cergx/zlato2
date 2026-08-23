@@ -6,7 +6,7 @@ import {
     REST_MENU_PERIOD_RECT,
     type NativeRect,
 } from "../../constants/clientDll.ts";
-import { MAIN_INTERFACE_FONT, type ShippedFontDefinition } from "../../constants/fontsScr.ts";
+import { MAIN_INTERFACE_FONT, pointSizeToPixels, type ShippedFontDefinition } from "../../constants/fontsScr.ts";
 import type { Game } from "../../game/Game.ts";
 import {
     GOLDENLAND_START_DAY,
@@ -32,7 +32,7 @@ const nativeRectStyle = ({ left, top, width, height }: NativeRect): CSSPropertie
 
 const shippedFontStyle = (font: ShippedFontDefinition): CSSProperties => ({
     fontFamily: `ZlatoPalatino, "${font.typeFace}", serif`,
-    fontSize: `${font.size}px`,
+    fontSize: `${pointSizeToPixels(font.size)}px`,
     fontWeight: font.weight,
 });
 

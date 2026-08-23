@@ -15,6 +15,7 @@ import {
 import {
     HEADS_INTERFACE_FONT,
     MAIN_INTERFACE_FONT,
+    pointSizeToPixels,
     type ShippedFontDefinition,
 } from "../constants/fontsScr.ts";
 import { INVENTORY_QUICK_ACCESS_SLOTS } from "../constants/temporary/invGuiScr.ts";
@@ -94,7 +95,7 @@ const positionStyle = ({ left, top, width, height }: InventoryRect): CSSProperti
 
 const shippedFontStyle = (font: ShippedFontDefinition): CSSProperties => ({
     fontFamily: `ZlatoPalatino, "${font.typeFace}", serif`,
-    fontSize: `${font.size}px`,
+    fontSize: `${pointSizeToPixels(font.size)}px`,
     fontWeight: font.weight,
 });
 

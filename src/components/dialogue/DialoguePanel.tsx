@@ -10,7 +10,7 @@ import {
     DIALOGUE_WHEEL_SCROLL_STEP,
     type NativeRect,
 } from "../../constants/clientDll.ts";
-import { MAIN_INTERFACE_FONT } from "../../constants/fontsScr.ts";
+import { MAIN_INTERFACE_FONT, pointSizeToPixels } from "../../constants/fontsScr.ts";
 import type { DialogueOption, DialogueState } from "../../game/dialogue/DialogueRuntime.ts";
 import { ColorKeyImage } from "../ColorKeyImage.tsx";
 import { OriginalGuiLayer } from "../OriginalGuiLayer.tsx";
@@ -111,7 +111,7 @@ export const DialoguePanel = ({
                 style={{
                     ...nativeRectStyle(DIALOGUE_TEXT_RECT),
                     fontFamily: `ZlatoPalatino, "${MAIN_INTERFACE_FONT.typeFace}", serif`,
-                    fontSize: `${MAIN_INTERFACE_FONT.size}px`,
+                    fontSize: `${pointSizeToPixels(MAIN_INTERFACE_FONT.size)}px`,
                     fontWeight: MAIN_INTERFACE_FONT.weight,
                     lineHeight: `${DIALOGUE_LINE_HEIGHT}px`,
                     "--dialogue-continuation-indent": `${DIALOGUE_CONTINUATION_INDENT}px`,

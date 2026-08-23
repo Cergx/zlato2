@@ -14,6 +14,7 @@ import {
     BUTTON_HEADS_INTERFACE_FONT,
     HEADS_INTERFACE_FONT,
     MAIN_INTERFACE_FONT,
+    pointSizeToPixels,
     type ShippedFontDefinition,
 } from "../constants/fontsScr.ts";
 import type { Game } from "../game/Game.ts";
@@ -45,7 +46,7 @@ const nativeRectStyle = ({ left, top, width, height }: NativeRect): CSSPropertie
 
 const shippedFontStyle = (font: ShippedFontDefinition): CSSProperties => ({
     fontFamily: `ZlatoPalatino, "${font.typeFace}", serif`,
-    fontSize: `${font.size}px`,
+    fontSize: `${pointSizeToPixels(font.size)}px`,
     fontWeight: font.weight,
 });
 

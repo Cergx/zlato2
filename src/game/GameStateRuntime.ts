@@ -202,6 +202,7 @@ export interface GameStateRuntimeOptions {
     onSound?: (arguments_: readonly SCRValue[]) => void;
     onPersonSound?: (shader: SoundShaderDefinition) => void;
     onCombatAnimation?: (technicalName: string, kind: CombatAnimationKind) => number | undefined;
+    onCombatFloatingText?: (technicalName: string, text: string, color: string) => void;
     onMagicEffect?: (technicalName: string, targetName: string) => void;
     onWorldMagicEffect?: (technicalName: string, position: Readonly<WorldPosition>) => void;
     onClockChange?: (elapsedMinutes: number) => void;
@@ -301,6 +302,12 @@ const EQUIPMENT_SLOTS: readonly EquipmentSlot[] = [
     "mainHand", "offHand", "ammo", "head", "body", "arms", "bracelet", "amulet", "ringLeft", "ringRight",
 ];
 const DURABILITY_WEAPON_CLASSES = new Set<ItemClass>(["sword", "axe", "spear", "mace"]);
+// Floating combat text colors. The native FCT renderer (Client.dll 0x1203509c) hardcodes white;
+// the per-kind colored floater is a separate un-located system, so these match the observed
+// game behavior (damage red, gain green) rather than a recovered native color table.
+const FLOATING_TEXT_COLOR_DAMAGE = "#ff4444";
+const FLOATING_TEXT_COLOR_HEAL = "#44ff44";
+const FLOATING_TEXT_COLOR_XP = "#44ff44";
 const DURABILITY_ARMOR_SLOTS: readonly Readonly<{ slot: EquipmentSlot; itemClass: ItemClass }>[] = [
     { slot: "body", itemClass: "armor" },
     { slot: "head", itemClass: "helmet" },
@@ -2173,6 +2180,24 @@ export class GameStateRuntime {
             ?? baseCombatantName(name);
     }
 
+    /** Current/maximum health and energy of a combatant, resolved by name. */
+    public getCombatantHealthEnergy(name: string): Readonly<{
+        health: number;
+        maximumHealth: number;
+        energy: number;
+        maximumEnergy: number;
+    }> | undefined {
+        const resolved = this.resolveCombatantName(name);
+        const combatant = resolved ? this.combatants.get(resolved) : undefined;
+        if (!combatant) return undefined;
+        return Object.freeze({
+            health: combatant.health,
+            maximumHealth: combatant.maxHealth,
+            energy: combatant.mana,
+            maximumEnergy: combatant.maxMana,
+        });
+    }
+
     private publishNativeCombatMessage(id: number, ...values: readonly (string | number)[]): void {
         const template = this.options.resolveInterfaceString?.(id);
         if (!template) return;
@@ -2250,6 +2275,9 @@ export class GameStateRuntime {
                 targetLiteraryName,
                 result.appliedDamage,
             );
+            if (result.appliedDamage > 0) {
+                this.options.onCombatFloatingText?.(targetName, `-${result.appliedDamage}`, FLOATING_TEXT_COLOR_DAMAGE);
+            }
             if (result.killed) this.publishNativeCombatMessage(COMBAT_HISTORY_STRING_IDS.died, targetLiteraryName);
         } else {
             this.publishNativeCombatMessage(
@@ -2352,6 +2380,9 @@ export class GameStateRuntime {
         if (!Number.isFinite(amount)) throw new Error("Hero experience delta must be finite");
         this.experience = Math.max(0, this.experience + amount);
         this.refreshHeroCombatProfile();
+        if (amount > 0) {
+            this.options.onCombatFloatingText?.("hero", `+${amount} exp`, FLOATING_TEXT_COLOR_XP);
+        }
     }
 
     private recordBestiaryKill(targetName: string): void {
@@ -2416,6 +2447,7 @@ export class GameStateRuntime {
             if (!target || !targetProfile || target.isDead) continue;
             if (magic.target === "enemy" && casterName === "hero") this.activeEnemies.add(targetName);
             const damageBeforeTarget = damage;
+            const healingBeforeTarget = healing;
             const immunity = magic.target === "enemy" ? Math.max(0, Math.min(100, targetProfile.magicImmunity[magic.school])) : 0;
             const resisted = immunity > 0 && this.random() * 100 < immunity;
             if (targetName === primaryTargetName) primaryResisted = resisted;
@@ -2430,6 +2462,7 @@ export class GameStateRuntime {
                 }
             }
             const targetDamage = damage - damageBeforeTarget;
+            const targetHealing = healing - healingBeforeTarget;
             const targetLiteraryName = this.getCombatantLiteraryName(targetName);
             if (!resisted && targetDamage > 0) {
                 this.publishNativeCombatMessage(
@@ -2438,6 +2471,12 @@ export class GameStateRuntime {
                     targetLiteraryName,
                     targetDamage,
                 );
+            }
+            if (!resisted && targetDamage > 0) {
+                this.options.onCombatFloatingText?.(targetName, `-${targetDamage}`, FLOATING_TEXT_COLOR_DAMAGE);
+            }
+            if (!resisted && targetHealing > 0) {
+                this.options.onCombatFloatingText?.(targetName, `+${targetHealing}`, FLOATING_TEXT_COLOR_HEAL);
             }
             target.isDead = target.health === 0;
             if (target.isDead) this.processCombatDeath(targetName, casterName);

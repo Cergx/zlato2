@@ -3,7 +3,7 @@ import type { GameMode } from "./levels.ts";
 export const AssetsBase = "/assets";
 
 export const Paths = {
-    CURSORS: `${AssetsBase}/cursors`,
+    CURSORS: "/Data/Cursors",
     ENGINERES: `${AssetsBase}/engineres`,
     ITEMS: `${AssetsBase}/items`,
     LEVELS: `${AssetsBase}/levels`,

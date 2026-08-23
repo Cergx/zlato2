@@ -95,11 +95,30 @@ interface ActiveMagicAnimation {
     readonly startedAt: number;
 }
 
+interface FloatingText {
+    readonly technicalName: string;
+    readonly text: string;
+    readonly color: string;
+    readonly startedAt: number;
+}
+
 type HoverTargetKind = "person" | "door" | "trigger" | "reference" | "ground";
 
 // [INFERENCE] Native duplicate-object arbitration is not present in the available Client listing.
 // Cycle exact-name overlaps on a stable cadence so both persistent instances remain selectable.
 const DUPLICATE_TRIGGER_SELECTION_MS = 300;
+
+// Native floating-combat-text animation (Client.dll FCT object 0x12034c4c..0x1203517c):
+// lifetime 0x2C4 (708) / 0x300 (768) ticks, alpha 0xBF (191/255), move duration 0x258 (600).
+// The exact fly-up distance and scale ramp are authored inside the text-manager draw helpers
+// (0x120ae0fc / 0x12030584) and are not recoverable as single constants; the values below are
+// the closest whole-pixel/scale reproduction of the observed fly-up + fade + grow behavior.
+const FLOATING_TEXT_DURATION_MS = 700;
+const FLOATING_TEXT_FLY_UP_PX = 32;
+const FLOATING_TEXT_START_ALPHA = 191 / 255;
+const FLOATING_TEXT_SCALE_START = 1;
+const FLOATING_TEXT_SCALE_END = 1.5;
+const FLOATING_TEXT_FONT_PX = 14;
 
 
 type RenderKind = "static" | "animation" | "person";
@@ -151,6 +170,7 @@ export class MapRenderer {
     private readonly doorsByStatic = new Map<LevelStatic, DoorRuntime>();
     private readonly triggers = new Map<string, TriggerRuntime>();
     private triggerMasksByName = new Map<string, LevelTriggerMask>();
+    private readonly floatingTexts: FloatingText[] = [];
     private interactiveTriggerMasks: readonly LevelTriggerMask[] = [];
     private hoveredTargetKey = "";
     private hoveredTargetKind: HoverTargetKind | undefined;
@@ -230,6 +250,11 @@ export class MapRenderer {
             this.setHoveredTarget("person", person.person.combatantId, person);
             const hostile = this.getCombatVisualState?.(person.person.combatantId).relation === "hostile";
             this.changeCursor(this.deadPersons.has(person.person.combatantId.toLowerCase()) ? CursorType.TAKE : this.magicTargeting ? CursorType.CAST : event.shiftKey || this.combatMode || hostile ? CursorType.ATTACK : person.person.scriptDialog ? CursorType.TALK : CursorType.NPC_TURN);
+            return;
+        }
+        if (this.isPlayerAt(world)) {
+            this.setHoveredTarget("person", this.player.person.combatantId, this.player);
+            this.changeCursor(CursorType.NORMAL);
             return;
         }
         const door = this.findDoorAt(world);
@@ -331,6 +356,7 @@ export class MapRenderer {
         this.flashInteractiveObjects = false;
         this.setHoveredTarget();
         this.magicEffects.length = 0;
+        this.floatingTexts.length = 0;
     }
 
     public getPlayerWorldPosition(): WorldPosition {
@@ -501,6 +527,16 @@ export class MapRenderer {
             });
         }).catch((error) => console.warn(`Не удалось загрузить анимацию магии ${technicalName}`, error));
     }
+    public spawnFloatingText(technicalName: string, text: string, color: string): void {
+        if (!technicalName || !text) return;
+        this.floatingTexts.push({
+            technicalName: technicalName.toLowerCase(),
+            text,
+            color,
+            startedAt: this.simulationTick * this.simulationStepMs,
+        });
+    }
+
 
     public setDoorState(name: string, opened: boolean, cells?: readonly TilePosition[], activationCells?: readonly TilePosition[]): void {
         const door = this.doors.get(name);
@@ -562,6 +598,7 @@ export class MapRenderer {
         window.removeEventListener("blur", this.handleWindowBlur);
         this.setHoveredTarget();
         this.magicEffects.length = 0;
+        this.floatingTexts.length = 0;
     }
 
     public draw() {
@@ -600,6 +637,7 @@ export class MapRenderer {
         const highlightTime = this.simulationTick * this.simulationStepMs;
         for (const item of this.renderQueue) this.drawRenderItem(item, highlightTime);
         this.drawMagicEffects(highlightTime);
+        this.drawFloatingTexts(highlightTime);
         this.drawTriggerMaskHighlights(highlightTime);
         this.drawDoorMaskHighlights(highlightTime);
         if (this.dayNightEnabled) {
@@ -634,6 +672,34 @@ export class MapRenderer {
         if (normalized === "hero") return this.player.position;
         return this.persons.find((candidate) => candidate.person.combatantId.toLowerCase() === normalized)?.position;
     }
+    private drawFloatingTexts(now: number): void {
+        const context = this.ctx;
+        if (!context) return;
+        for (let index = this.floatingTexts.length - 1; index >= 0; index -= 1) {
+            const floating = this.floatingTexts[index];
+            const elapsedMs = now - floating.startedAt;
+            if (elapsedMs > FLOATING_TEXT_DURATION_MS) {
+                this.floatingTexts.splice(index, 1);
+                continue;
+            }
+            const position = this.personWorldPosition(floating.technicalName);
+            if (!position) continue;
+            const progress = elapsedMs / FLOATING_TEXT_DURATION_MS;
+            const x = position.x - this.offset.x;
+            const y = position.y - this.offset.y - 50 - FLOATING_TEXT_FLY_UP_PX * progress;
+            const alpha = FLOATING_TEXT_START_ALPHA * (1 - progress);
+            const scale = FLOATING_TEXT_SCALE_START + (FLOATING_TEXT_SCALE_END - FLOATING_TEXT_SCALE_START) * progress;
+            context.save();
+            context.globalAlpha = Math.max(0, alpha);
+            context.font = `${Math.round(FLOATING_TEXT_FONT_PX * scale)}px "Palatino Linotype", "Times New Roman", serif`;
+            context.fillStyle = floating.color;
+            context.textAlign = "center";
+            context.textBaseline = "alphabetic";
+            context.fillText(floating.text, x, y);
+            context.restore();
+        }
+    }
+
 
 
     private drawTriggerMaskHighlights(now: number): void {
@@ -1218,28 +1284,36 @@ export class MapRenderer {
         return minimum + Math.random() * (maximum - minimum);
     }
 
+    private personHitTest(runtime: PersonRuntime, position: Readonly<WorldPosition>, now: number): boolean {
+        const frame = this.personRenderFrame(runtime, now);
+        const localX = Math.floor(position.x - frame.worldX);
+        const localY = Math.floor(position.y - frame.worldY);
+        if (localX < 0 || localY < 0 || localX >= frame.width || localY >= frame.height) return false;
+        const sourcePixelX = frame.mirrored ? frame.width - localX - 1 : localX;
+        const sourceContext = frame.image.getContext("2d", { willReadFrequently: true });
+        if (!sourceContext) return false;
+        const alpha = sourceContext.getImageData(
+            frame.sourceX + sourcePixelX,
+            frame.sourceY + localY,
+            1,
+            1,
+        ).data[3];
+        return alpha > 16;
+    }
+
     private findPersonAt(position: Readonly<WorldPosition>): PersonRuntime | undefined {
         const now = this.simulationTick * this.simulationStepMs;
         const candidates = this.persons
             .filter((runtime) => !this.hiddenPersons.has(runtime.person.name))
             .sort((left, right) => right.position.y - left.position.y);
         for (const runtime of candidates) {
-            const frame = this.personRenderFrame(runtime, now);
-            const localX = Math.floor(position.x - frame.worldX);
-            const localY = Math.floor(position.y - frame.worldY);
-            if (localX < 0 || localY < 0 || localX >= frame.width || localY >= frame.height) continue;
-            const sourcePixelX = frame.mirrored ? frame.width - localX - 1 : localX;
-            const sourceContext = frame.image.getContext("2d", { willReadFrequently: true });
-            if (!sourceContext) continue;
-            const alpha = sourceContext.getImageData(
-                frame.sourceX + sourcePixelX,
-                frame.sourceY + localY,
-                1,
-                1,
-            ).data[3];
-            if (alpha > 16) return runtime;
+            if (this.personHitTest(runtime, position, now)) return runtime;
         }
         return undefined;
+    }
+
+    private isPlayerAt(position: Readonly<WorldPosition>): boolean {
+        return this.personHitTest(this.player, position, this.simulationTick * this.simulationStepMs);
     }
 
     private doorInteractionMask(door: DoorRuntime): LevelTriggerMask | undefined {
@@ -1496,7 +1570,7 @@ export class MapRenderer {
         if (drawX + frame.width < 0 || drawY + frame.height < 0) return;
 
         this.drawPersonFrame(frame, ctx, drawX, drawY);
-        if (runtime !== this.player && this.hoveredPerson === runtime) {
+        if (this.hoveredPerson === runtime) {
             this.drawPersonHighlight(runtime, frame, drawX, drawY);
         }
         this.drawOccluders({

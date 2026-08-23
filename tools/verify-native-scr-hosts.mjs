@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { createServer } from "vite";
+import { createServer as createHttpServer } from "node:http";
+import { readFileSync } from "node:fs";
 
 const vite = await createServer({ server: { middlewareMode: true }, appType: "custom" });
 try {
@@ -90,6 +92,32 @@ assert.deepEqual(events, [
     ["effect", "vis_gods", { x: 528, y: 585 }],
     ["finished", 3],
 ]);
+
+const cursorHttp = createHttpServer(vite.middlewares);
+await new Promise((resolve) => cursorHttp.listen(0, "127.0.0.1", resolve));
+try {
+    const cursorResponse = await fetch(`http://127.0.0.1:${cursorHttp.address().port}/Data/Cursors/normal.ani`);
+    assert.equal(cursorResponse.status, 200, "The served cursor URL must resolve");
+    const cursorBytes = new Uint8Array(await cursorResponse.arrayBuffer());
+    assert.equal(new TextDecoder("ascii").decode(cursorBytes.slice(0, 4)), "RIFF", "The served cursor must begin with a RIFF header");
+} finally {
+    cursorHttp.close();
+}
+
+const { ANIParser, buildAniCursorSteps } = await vite.ssrLoadModule("/src/game/parsers/ANIParser.ts");
+const originalCreateObjectURL = URL.createObjectURL;
+URL.createObjectURL = () => "blob:ani-test";
+try {
+    const takeBuffer = readFileSync("public/Data/Cursors/take.ani");
+    const takeParsed = new ANIParser(takeBuffer.buffer.slice(takeBuffer.byteOffset, takeBuffer.byteOffset + takeBuffer.byteLength)).parse();
+    const takeSteps = buildAniCursorSteps(takeParsed);
+    assert.equal(takeSteps.steps.length, 8, "take.ani must emit all eight authored steps");
+    assert.deepEqual(takeSteps.steps.map((step) => step.frameIndex), [0, 1, 2, 3, 4, 3, 2, 5], "take.ani must follow its authored seq, not collapse to six linear frames");
+    assert.deepEqual(takeSteps.steps.map((step) => step.percent), [0, 12.5, 25, 37.5, 50, 62.5, 75, 87.5], "take.ani keyframes must land at cumulative rate percentages");
+    assert.equal(takeSteps.rateSum, 48, "take.ani total duration must sum the eight authored rates");
+} finally {
+    URL.createObjectURL = originalCreateObjectURL;
+}
 
 console.log("Verified native-zero SCR mutator returns, faction defaults, location-state variables, and shipped visual-effect argument order");
 } finally {

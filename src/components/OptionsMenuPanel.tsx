@@ -11,6 +11,7 @@ import {
     BUTTON_HEADS_INTERFACE_FONT,
     HEADS_INTERFACE_FONT,
     MAIN_INTERFACE_FONT,
+    pointSizeToPixels,
     type ShippedFontDefinition,
 } from "../constants/fontsScr";
 import {
@@ -41,7 +42,7 @@ const positionStyle = ({ left, top, width, height }: NativeRect): CSSProperties 
 
 const fontStyle = (font: ShippedFontDefinition): CSSProperties => ({
     fontFamily: `ZlatoPalatino, "${font.typeFace}", serif`,
-    fontSize: `${font.size}px`,
+    fontSize: `${pointSizeToPixels(font.size)}px`,
     fontWeight: font.weight,
 });
 

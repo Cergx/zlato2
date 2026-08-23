@@ -680,6 +680,19 @@ export const COMBAT_HISTORY_STRING_IDS = Object.freeze({
     reflectedMagic: 0xFC,
 });
 
+/**
+ * Native hover-reveal templates from `user_interface.sdb`, appended to a
+ * combatant's name on mouse-over (Client.dll 0x120c3094 / 0x120c310f /
+ * 0x120c3212). Each `%s/%s` slot is filled `current/maximum`; `unknown` (`?`)
+ * replaces the current value when the hero's science skill is below the
+ * threshold that reveals it (see `Level.ts` hover handler).
+ */
+export const COMBATANT_HOVER_STRING_IDS = Object.freeze({
+    health: 0xDA,
+    energy: 0xDB,
+    unknown: 0xDC,
+});
+
 export type HudInterfaceIconAction = "inventory" | "journal" | "none";
 
 export interface HudInterfaceIconDefinition {

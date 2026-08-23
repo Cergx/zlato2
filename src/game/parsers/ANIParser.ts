@@ -126,3 +126,25 @@ export class ANIParser {
         return { metadata, images, rate, seq, frames, rateSum };
     }
 }
+export type AniCursorStep = {
+    readonly frameIndex: number;
+    readonly percent: number;
+};
+
+export const buildAniCursorSteps = (ani: ParsedAni): { steps: AniCursorStep[]; rateSum: number } => {
+    const nSteps = ani.metadata.nSteps || ani.frames.length;
+    const defaultTick = ani.metadata.iDispRate || 10;
+    const rates = ani.rate.length ? ani.rate : Array.from({ length: nSteps }, () => defaultTick);
+    const sequence = ani.seq && ani.seq.length ? ani.seq : Array.from({ length: nSteps }, (_, index) => index);
+    const rateSum = rates.reduce((sum, tick) => sum + tick, 0);
+
+    let cumulative = 0;
+    const steps: AniCursorStep[] = [];
+    for (let step = 0; step < nSteps; step += 1) {
+        const frameIndex = sequence[step] ?? step;
+        if (frameIndex >= ani.frames.length) continue;
+        steps.push({ frameIndex, percent: (cumulative / rateSum) * 100 });
+        cumulative += rates[step] ?? defaultTick;
+    }
+    return { steps, rateSum };
+};
