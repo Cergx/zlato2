@@ -27,10 +27,16 @@ export interface PersonSpriteSet {
     attack?: PADAnimation;
     castImage?: HTMLCanvasElement;
     cast?: PADAnimation;
+    ssAttackImage?: HTMLCanvasElement;
+    ssAttack?: PADAnimation;
     sufferImage?: HTMLCanvasElement;
     suffer?: PADAnimation;
     dieImage?: HTMLCanvasElement;
     die?: PADAnimation;
+    funImage?: HTMLCanvasElement;
+    fun?: PADAnimation;
+    turnFunImage?: HTMLCanvasElement;
+    turnFun?: PADAnimation;
 }
 
 export interface LevelPerson extends SEFPerson {
@@ -112,15 +118,18 @@ const loadSpriteSet = (resource: string): Promise<PersonSpriteSet> => {
         const pad = new PADParser(await response.arrayBuffer());
         const profile = selectAnimationProfile(pad, resource);
         const hasTurnProfile = pad.hasAnimation(turnBasedProfile.idleAction) && pad.hasAnimation(turnBasedProfile.walkAction);
-        const [idleImage, walkImage, turnIdleImage, turnWalkImage, attack, cast, suffer, die] = await Promise.all([
+        const [idleImage, walkImage, turnIdleImage, turnWalkImage, attack, cast, ssAttack, suffer, die, fun, turnFun] = await Promise.all([
             loadCSX(Paths.PERSON_ANIMATION(resource, profile.idleFile)),
             loadCSX(Paths.PERSON_ANIMATION(resource, profile.walkFile)),
             profile === turnBasedProfile || !hasTurnProfile ? undefined : loadCSX(Paths.PERSON_ANIMATION(resource, turnBasedProfile.idleFile)),
             profile === turnBasedProfile || !hasTurnProfile ? undefined : loadCSX(Paths.PERSON_ANIMATION(resource, turnBasedProfile.walkFile)),
             loadOptionalAnimation(pad, resource, ["hits0.csx", "hits1.csx", "hits2.csx", "hits3.csx"], [0x10000, 0x20000, 0x40000, 0x80000]),
-            loadOptionalAnimation(pad, resource, ["cast.csx", "ss_attack.csx"], [0x40, 0x400]),
+            loadOptionalAnimation(pad, resource, ["cast.csx"], [0x40]),
+            loadOptionalAnimation(pad, resource, ["ss_attack.csx"], [0x400]),
             loadOptionalAnimation(pad, resource, ["suffer.csx"], [0x80]),
             loadOptionalAnimation(pad, resource, ["die.csx"], [0x100]),
+            loadOptionalAnimation(pad, resource, ["rt_fun.csx"], [0x2]),
+            loadOptionalAnimation(pad, resource, ["tb_fun.csx"], [0x8]),
         ]);
         if (!idleImage || !walkImage) throw new Error(`Failed to load person sprite ${resource}`);
         return {
@@ -136,10 +145,16 @@ const loadSpriteSet = (resource: string): Promise<PersonSpriteSet> => {
             attack: attack?.animation,
             castImage: cast?.image,
             cast: cast?.animation,
+            ssAttackImage: ssAttack?.image,
+            ssAttack: ssAttack?.animation,
             sufferImage: suffer?.image,
             suffer: suffer?.animation,
             dieImage: die?.image,
             die: die?.animation,
+            funImage: fun?.image,
+            fun: fun?.animation,
+            turnFunImage: turnFun?.image,
+            turnFun: turnFun?.animation,
         };
     });
 

@@ -37,7 +37,8 @@ interface PersonRuntime {
     waitUntil: number;
     moving: boolean;
     running: boolean;
-    combatAnimation?: { readonly kind: CombatAnimationKind; readonly startedAt: number };
+    combatAnimation?: { readonly kind: CombatAnimationKind; readonly startedAt: number; readonly reverse?: boolean };
+    nextFidgetAt: number;
 }
 
 interface DoorRuntime {
@@ -488,15 +489,26 @@ export class MapRenderer {
             : this.persons.find((candidate) => candidate.person.combatantId.toLowerCase() === normalized);
         if (!runtime) return undefined;
         if (kind === "die") this.deadPersons.add(normalized);
-        runtime.combatAnimation = { kind, startedAt: this.simulationTick * this.simulationStepMs };
+        const reverse = kind === "combatEntry";
+        runtime.combatAnimation = { kind, startedAt: this.simulationTick * this.simulationStepMs, reverse };
         runtime.route = [];
         runtime.targetIndex = 0;
         runtime.moving = false;
         runtime.running = false;
-        const metadata = kind === "attack" ? runtime.person.sprites.attack
-            : kind === "cast" ? runtime.person.sprites.cast
-                : kind === "suffer" ? runtime.person.sprites.suffer : runtime.person.sprites.die;
-        return metadata ? personAnimationClipDuration(metadata) : undefined;
+        const clip = kind === "attack"
+            ? { metadata: runtime.person.sprites.attack, image: runtime.person.sprites.attackImage }
+            : kind === "cast"
+                ? { metadata: runtime.person.sprites.cast, image: runtime.person.sprites.castImage }
+                : kind === "suffer"
+                    ? { metadata: runtime.person.sprites.suffer, image: runtime.person.sprites.sufferImage }
+                    : kind === "die"
+                        ? { metadata: runtime.person.sprites.die, image: runtime.person.sprites.dieImage }
+                        : kind === "combatEntry"
+                            ? { metadata: runtime.person.sprites.ssAttack, image: runtime.person.sprites.ssAttackImage, reverse: true }
+                            : kind === "combatExit"
+                                ? { metadata: runtime.person.sprites.ssAttack, image: runtime.person.sprites.ssAttackImage, reverse: false }
+                                : { metadata: runtime.person.sprites.fun, image: runtime.person.sprites.funImage, reverse: false };
+        return clip.metadata ? personAnimationClipDuration(clip.metadata) : undefined;
     }
 
     public faceCombatant(technicalName: string, targetPosition: Readonly<WorldPosition>): void {
@@ -950,6 +962,7 @@ export class MapRenderer {
             waitUntil: 0,
             moving: false,
             running: false,
+            nextFidgetAt: (person.name.length * 997) % 9000,
         };
     }
 
@@ -967,8 +980,10 @@ export class MapRenderer {
             waitUntil: 0,
             moving: false,
             running: false,
+            nextFidgetAt: 4500,
         };
     }
+
 
     private blockedCells(excluded?: PersonRuntime): Set<number> {
         const blocked = new Set<number>();
@@ -1087,6 +1102,7 @@ export class MapRenderer {
 
     public setCombatState(active: boolean, currentCombatant?: string): void {
         const enteringCombat = active && !this.combatMode;
+        const leavingCombat = !active && this.combatMode;
         const previousCombatant = this.currentCombatant;
         this.combatMode = active;
         this.currentCombatant = currentCombatant;
@@ -1097,10 +1113,14 @@ export class MapRenderer {
         }
         if (enteringCombat) {
             for (const runtime of this.persons) {
-                runtime.route = [];
-                runtime.targetIndex = 0;
-                runtime.moving = false;
+                this.playPersonCombatAnimation(runtime.person.combatantId, "combatEntry");
             }
+            this.playPersonCombatAnimation("hero", "combatEntry");
+        } else if (leavingCombat) {
+            for (const runtime of this.persons) {
+                this.playPersonCombatAnimation(runtime.person.combatantId, "combatExit");
+            }
+            this.playPersonCombatAnimation("hero", "combatExit");
         }
         if (this.aiTurn) {
             this.player.route = [];
@@ -1199,6 +1219,10 @@ export class MapRenderer {
                 && !this.pendingPersonInteraction.attack
                 && this.pendingPersonInteraction.runtime === runtime) continue;
             if (runtime.combatAnimation) continue;
+            if (now >= runtime.nextFidgetAt && runtime.route.length === 0) {
+                this.startFidget(runtime, now);
+            }
+            if (runtime.combatAnimation) continue;
 
             let remainingMs = deltaSeconds * 1000;
             if (this.combatMode) {
@@ -1241,6 +1265,15 @@ export class MapRenderer {
                 }
             }
         }
+    }
+
+    private startFidget(runtime: PersonRuntime, now: number): void {
+        runtime.nextFidgetAt = now + (this.combatMode ? 6000 : 15000) + Math.floor(Math.random() * (this.combatMode ? 9000 : 25000));
+        if (this.deadPersons.has(runtime.person.name)) return;
+        const sprites = runtime.person.sprites;
+        const clip = this.combatMode ? sprites.turnFun : sprites.fun;
+        if (!clip) return;
+        this.playPersonCombatAnimation(runtime.person.combatantId, "fidget");
     }
 
     private moveRuntimeTowards(runtime: PersonRuntime, target: Readonly<WorldPosition>, elapsedMs: number): number {
@@ -1511,7 +1544,14 @@ export class MapRenderer {
                     ? { metadata: sprites.cast, image: sprites.castImage }
                     : combat.kind === "suffer"
                         ? { metadata: sprites.suffer, image: sprites.sufferImage }
-                        : { metadata: sprites.die, image: sprites.dieImage };
+                        : combat.kind === "die"
+                            ? { metadata: sprites.die, image: sprites.dieImage }
+                            : combat.kind === "fidget"
+                                ? this.combatMode
+                                    ? { metadata: sprites.turnFun, image: sprites.turnFunImage }
+                                    : { metadata: sprites.fun, image: sprites.funImage }
+                                : { metadata: sprites.ssAttack, image: sprites.ssAttackImage };
+            const reverse = combat.kind === "combatExit";
             if (clip.metadata && clip.image) {
                 const elapsed = Math.max(0, now - combat.startedAt);
                 const frameDuration = personAnimationFrameDuration(clip.metadata);
@@ -1519,9 +1559,12 @@ export class MapRenderer {
                 if (combat.kind === "die" || elapsed < clipDuration) {
                     metadata = clip.metadata;
                     image = clip.image;
+                    const rawFrame = Math.floor(elapsed / frameDuration);
                     frame = combat.kind === "die" && elapsed >= clipDuration
                         ? clip.metadata.frameCount - 1
-                        : Math.min(clip.metadata.frameCount - 1, Math.floor(elapsed / frameDuration));
+                        : reverse
+                            ? Math.max(0, clip.metadata.frameCount - 1 - rawFrame)
+                            : Math.min(clip.metadata.frameCount - 1, rawFrame);
                 } else this.finishCombatAnimation(runtime);
             } else if (combat.kind !== "die") this.finishCombatAnimation(runtime);
         }

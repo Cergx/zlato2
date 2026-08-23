@@ -18,7 +18,7 @@ interface WearLayer {
 interface ActionProfile {
     readonly action: number;
     readonly file: string;
-    readonly target: "idle" | "walk" | "run" | "turnIdle" | "turnWalk" | "attack" | "cast" | "suffer" | "die";
+    readonly target: "idle" | "walk" | "run" | "turnIdle" | "turnWalk" | "attack" | "ssAttack" | "suffer" | "die";
 }
 
 const ACTIONS: readonly ActionProfile[] = [
@@ -28,7 +28,7 @@ const ACTIONS: readonly ActionProfile[] = [
     { action: 0x4, file: "tb_stay.csx", target: "turnIdle" },
     { action: 0x10, file: "tb_go.csx", target: "turnWalk" },
     { action: 0x10000, file: "hits0.csx", target: "attack" },
-    { action: 0x400, file: "ss_attack.csx", target: "cast" },
+    { action: 0x400, file: "ss_attack.csx", target: "ssAttack" },
     { action: 0x80, file: "suffer.csx", target: "suffer" },
     { action: 0x100, file: "die.csx", target: "die" },
 ];
@@ -193,8 +193,8 @@ export const loadCompositedHeroSprites = async (equippedTechnicalNames: readonly
             turnWalk: had.getAnimation(ACTIONS[4].action),
             attackImage: composed[5],
             attack: had.getAnimation(ACTIONS[5].action),
-            castImage: composed[6],
-            cast: had.getAnimation(ACTIONS[6].action),
+            ssAttackImage: composed[6],
+            ssAttack: had.getAnimation(ACTIONS[6].action),
             sufferImage: composed[7],
             suffer: had.getAnimation(ACTIONS[7].action),
             dieImage: composed[8],

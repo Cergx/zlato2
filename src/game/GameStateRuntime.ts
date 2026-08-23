@@ -89,7 +89,7 @@ export interface AreaTransitionRequest {
     entrance?: string;
 }
 
-export type CombatAnimationKind = "attack" | "cast" | "suffer" | "die";
+export type CombatAnimationKind = "attack" | "cast" | "suffer" | "die" | "combatEntry" | "combatExit" | "fidget";
 
 export interface CombatantRuntimeSnapshot {
     readonly health: number;
