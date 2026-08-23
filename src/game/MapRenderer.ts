@@ -120,6 +120,13 @@ const FLOATING_TEXT_SCALE_START = 1;
 const FLOATING_TEXT_SCALE_END = 1.5;
 const FLOATING_TEXT_FONT_PX = 14;
 
+/** Native attack hit-chance hint (Client.dll 0x120c8d2d): "debug_info" font, white, offset from cursor. */
+const HIT_CHANCE_CURSOR_OFFSET_X = 23;
+const HIT_CHANCE_CURSOR_OFFSET_Y = -8;
+const HIT_CHANCE_FONT = '300 11px Arial, sans-serif';
+const HIT_CHANCE_COLOR = "#ffffff";
+
+
 
 type RenderKind = "static" | "animation" | "person";
 
@@ -176,6 +183,8 @@ export class MapRenderer {
     private hoveredTargetKind: HoverTargetKind | undefined;
     private hoveredTargetName: string | undefined;
     private pointerWorldPosition: WorldPosition | undefined;
+    private pointerCanvasPosition: Readonly<{ x: number; y: number }> | undefined;
+    private attackHitChance: number | undefined;
     private duplicateTriggerSelectionCycle = -1;
     private hoveredPerson: PersonRuntime | undefined;
     private currentCursor = CursorType.NORMAL;
@@ -245,11 +254,18 @@ export class MapRenderer {
         }
         const world = { x: local.x + this.offset.x, y: local.y + this.offset.y };
         this.pointerWorldPosition = world;
+        this.pointerCanvasPosition = local;
+        this.attackHitChance = undefined;
         const person = this.findPersonAt(world);
         if (person) {
             this.setHoveredTarget("person", person.person.combatantId, person);
             const hostile = this.getCombatVisualState?.(person.person.combatantId).relation === "hostile";
-            this.changeCursor(this.deadPersons.has(person.person.combatantId.toLowerCase()) ? CursorType.TAKE : this.magicTargeting ? CursorType.CAST : event.shiftKey || this.combatMode || hostile ? CursorType.ATTACK : person.person.scriptDialog ? CursorType.TALK : CursorType.NPC_TURN);
+            const attacking = event.shiftKey || this.combatMode || hostile;
+            const dead = this.deadPersons.has(person.person.combatantId.toLowerCase());
+            if ((event.shiftKey || this.combatMode) && !dead && !this.magicTargeting) {
+                this.attackHitChance = this.getHeroAttackHitChance?.(person.person.combatantId);
+            }
+            this.changeCursor(dead ? CursorType.TAKE : this.magicTargeting ? CursorType.CAST : attacking ? CursorType.ATTACK : person.person.scriptDialog ? CursorType.TALK : CursorType.NPC_TURN);
             return;
         }
         if (this.isPlayerAt(world)) {
@@ -275,8 +291,9 @@ export class MapRenderer {
 
     private readonly handleMouseLeave = () => {
         this.pointerWorldPosition = undefined;
+        this.pointerCanvasPosition = undefined;
+        this.attackHitChance = undefined;
         this.setHoveredTarget();
-        this.changeCursor(CursorType.NORMAL);
     };
 
     private readonly handleKeyDown = (event: KeyboardEvent) => {
@@ -305,6 +322,7 @@ export class MapRenderer {
         private readonly onCursorChange?: (cursor: CursorType) => void,
         private readonly onHoverTarget?: (kind?: HoverTargetKind, name?: string, doorOpened?: boolean) => void,
         private readonly getHeroAttackDistance?: () => number,
+        private readonly getHeroAttackHitChance?: (technicalName: string) => number | undefined,
         private readonly onPersonPositionChange?: (technicalName: string, position: Readonly<WorldPosition>) => void,
         onCombatMovementStep?: () => boolean,
         getCombatVisualState?: (technicalName: string) => Readonly<{ relation: "friendly" | "neutral" | "hostile"; current: boolean; active: boolean }>,
@@ -649,6 +667,7 @@ export class MapRenderer {
                 this.levelData.sefData.internalLocation === true,
             );
         }
+        this.drawAttackHitChance();
     }
 
     private drawMagicEffects(now: number): void {
@@ -698,6 +717,20 @@ export class MapRenderer {
             context.fillText(floating.text, x, y);
             context.restore();
         }
+    }
+
+    private drawAttackHitChance(): void {
+        const context = this.ctx;
+        const position = this.pointerCanvasPosition;
+        const hitChance = this.attackHitChance;
+        if (!context || !position || hitChance === undefined) return;
+        context.save();
+        context.font = HIT_CHANCE_FONT;
+        context.fillStyle = HIT_CHANCE_COLOR;
+        context.textAlign = "left";
+        context.textBaseline = "alphabetic";
+        context.fillText(`${hitChance}%`, position.x + HIT_CHANCE_CURSOR_OFFSET_X, position.y + HIT_CHANCE_CURSOR_OFFSET_Y);
+        context.restore();
     }
 
 

@@ -479,6 +479,7 @@ export class Level {
                 this.options.onStatusText?.(text ?? name);
             },
             () => this.runtime.getHeroAttackDistance(),
+            (technicalName) => this.runtime.getHeroAttackHitChance(technicalName),
             (technicalName, position) => this.runtime.setCombatantPosition(technicalName, position),
             () => this.runtime.consumeCombatMovementActionPoint("hero"),
             (technicalName) => this.runtime.getCombatVisualState(technicalName),

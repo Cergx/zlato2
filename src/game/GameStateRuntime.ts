@@ -1083,6 +1083,23 @@ export class GameStateRuntime {
         return this.combatProfiles.get("hero")?.weapon.attackDistance ?? 6;
     }
 
+    /** Hit chance (0-100) for the hero attacking a target, matching Client.dll 0x1201e660. */
+    public getHeroAttackHitChance(targetName: string): number | undefined {
+        const resolved = this.resolveCombatantName(targetName);
+        if (!resolved || resolved.toLowerCase() === "hero" || this.isPartyMember(resolved)) return undefined;
+        const hero = this.combatProfiles.get("hero");
+        const target = this.combatProfiles.get(resolved);
+        const heroCombatant = this.combatants.get("hero");
+        const targetCombatant = this.combatants.get(resolved);
+        if (!hero || !target || !heroCombatant || !targetCombatant || heroCombatant.isDead || targetCombatant.isDead) return undefined;
+        const remaining = this.remainingActionPoints.get("hero") ?? hero.actionPoints;
+        if (remaining < hero.weapon.actionPointCost) return undefined;
+        const heroPosition = this.combatantPositions.get("hero");
+        const targetPosition = this.combatantPositions.get(resolved);
+        if (heroPosition && targetPosition && originalCombatDistance(heroPosition, targetPosition) > hero.weapon.attackDistance) return undefined;
+        return Math.max(0, Math.min(100, Math.round(hero.hitChance - target.armorClass)));
+    }
+
     public setCombatantPosition(technicalName: string, worldPosition: Readonly<WorldPosition>): void {
         const resolvedName = this.resolveCombatantName(technicalName);
         if (resolvedName) this.combatantPositions.set(resolvedName, worldToCell(worldPosition));
