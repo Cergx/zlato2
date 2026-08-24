@@ -12,7 +12,10 @@ interface PersonAnimationProfile {
     walkAction: number;
 }
 
+export type PersonAnimationSlot = "idle" | "walk" | "run" | "turnIdle" | "turnWalk" | "attack" | "cast" | "ssAttack" | "suffer" | "die" | "fun" | "turnFun";
+
 export interface PersonSpriteSet {
+    shadowImages: Partial<Record<PersonAnimationSlot, HTMLCanvasElement>>;
     idleImage: HTMLCanvasElement;
     idle: PADAnimation;
     walkImage: HTMLCanvasElement;
@@ -94,7 +97,7 @@ const loadOptionalAnimation = async (
     resource: string,
     files: readonly string[],
     actions: readonly number[],
-): Promise<{ readonly image: HTMLCanvasElement; readonly animation: PADAnimation } | undefined> => {
+): Promise<{ readonly image: HTMLCanvasElement; readonly animation: PADAnimation; readonly file: string } | undefined> => {
     for (const file of files) {
         const image = await loadOptionalCSX(Paths.PERSON_ANIMATION(resource, file));
         if (!image) continue;
@@ -102,11 +105,16 @@ const loadOptionalAnimation = async (
             if (!pad.hasAnimation(action)) continue;
             const animation = pad.getAnimation(action);
             if (image.width === animation.frameCount * animation.frameWidth && image.height % animation.frameHeight === 0) {
-                return { image, animation };
+                return { image, animation, file };
             }
         }
     }
     return undefined;
+};
+
+const loadShadowImage = async (resource: string, file: string | undefined): Promise<HTMLCanvasElement | undefined> => {
+    if (!file) return undefined;
+    return loadOptionalCSX(Paths.PERSON_SHADOW(resource, file));
 };
 
 const loadSpriteSet = (resource: string): Promise<PersonSpriteSet> => {
@@ -132,7 +140,30 @@ const loadSpriteSet = (resource: string): Promise<PersonSpriteSet> => {
             loadOptionalAnimation(pad, resource, ["tb_fun.csx"], [0x8]),
         ]);
         if (!idleImage || !walkImage) throw new Error(`Failed to load person sprite ${resource}`);
+        const turnIdleFile = profile === turnBasedProfile ? profile.idleFile : turnBasedProfile.idleFile;
+        const turnWalkFile = profile === turnBasedProfile ? profile.walkFile : turnBasedProfile.walkFile;
+        const shadowFiles: Partial<Record<PersonAnimationSlot, string>> = {
+            idle: profile.idleFile,
+            walk: profile.walkFile,
+            turnIdle: turnIdleFile,
+            turnWalk: turnWalkFile,
+            attack: attack?.file,
+            cast: cast?.file,
+            ssAttack: ssAttack?.file,
+            suffer: suffer?.file,
+            die: die?.file,
+            fun: fun?.file,
+            turnFun: turnFun?.file,
+        };
+        const shadowEntries = await Promise.all(
+            (Object.keys(shadowFiles) as PersonAnimationSlot[]).map(async (slot) => [slot, await loadShadowImage(resource, shadowFiles[slot])] as const),
+        );
+        const shadowImages: Partial<Record<PersonAnimationSlot, HTMLCanvasElement>> = {};
+        for (const [slot, image] of shadowEntries) {
+            if (image) shadowImages[slot] = image;
+        }
         return {
+            shadowImages,
             idleImage,
             idle: pad.getAnimation(profile.idleAction),
             walkImage,

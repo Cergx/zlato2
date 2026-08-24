@@ -1,6 +1,6 @@
 import { MapScroller } from "./MapScroller";
 import type { LevelAnimation, LevelData, LevelDoor, LevelStatic, LevelTriggerMask } from "./Level.ts";
-import { loadHeroSprites, type LevelPerson } from "./PersonSprite.ts";
+import { loadHeroSprites, type LevelPerson, type PersonAnimationSlot } from "./PersonSprite.ts";
 import type { Direction, TilePosition } from "./parsers/SEFParser.ts";
 import type { PADAnimation } from "./parsers/PersonAnimationParser.ts";
 import { WorldGrid } from "./WorldGrid.ts";
@@ -37,6 +37,8 @@ interface PersonRuntime {
     waitUntil: number;
     moving: boolean;
     running: boolean;
+    facingDirection: Direction;
+    nextTurnStepAt: number;
     combatAnimation?: { readonly kind: CombatAnimationKind; readonly startedAt: number; readonly reverse?: boolean };
     nextFidgetAt: number;
 }
@@ -52,10 +54,33 @@ interface DoorRuntime {
 }
 
 type TriggerRuntime = ScenarioTriggerState;
-
 interface DirectionFrame {
     row: number;
     mirrored: boolean;
+}
+
+/** Temporary calibration hook for shadow alignment verification - remove when done. */
+interface PlayerFrameDebug {
+    position: { x: number; y: number };
+    worldX: number;
+    worldY: number;
+    anchorFrameX: number;
+    anchorFrameY: number;
+    frameWidth: number;
+    frameHeight: number;
+    slot: string;
+    mirrored: boolean;
+    hovered: boolean;
+    row: number;
+    shadow: { dx: number; dy: number; width: number; height: number; sourceY: number } | null;
+    offsetX: number;
+    offsetY: number;
+}
+
+declare global {
+    interface Window {
+        __playerFrame?: PlayerFrameDebug;
+    }
 }
 
 interface PersonRenderFrame {
@@ -69,6 +94,15 @@ interface PersonRenderFrame {
     readonly anchorX: number;
     readonly anchorY: number;
     readonly mirrored: boolean;
+    readonly shadow?: {
+        readonly image: HTMLCanvasElement;
+        readonly sourceX: number;
+        readonly sourceY: number;
+        readonly width: number;
+        readonly height: number;
+        readonly dx: number;
+        readonly dy: number;
+    };
 }
 
 const personAnimationFrameDuration = (metadata: PADAnimation, playbackRate = 1): number =>
@@ -149,10 +183,29 @@ const doorRenderDepth = (cells: readonly TilePosition[], fallback: number): numb
     return Number.isFinite(depth) ? depth : fallback;
 };
 const directionOrder: readonly Direction[] = ["UP", "UP_RIGHT", "RIGHT", "DOWN_RIGHT", "DOWN", "DOWN_LEFT", "LEFT", "UP_LEFT"];
+const TURN_STEP_MS = 40;
+
+// Shadow sheets carry one row per compass octant (movement clips carry two rows per octant),
+const shadowDirectionOrder: readonly Direction[] = ["UP", "UP_LEFT", "LEFT", "DOWN_LEFT", "DOWN", "DOWN_RIGHT", "RIGHT", "UP_RIGHT"];
+// ordered like the unmirrored animation rows: UP, UP_LEFT, LEFT, DOWN_LEFT, DOWN, ...
+// Calibrated against the native game (Kotar, start location, idle DOWN_LEFT):
+// body needed +6/+4 px, shadow an additional +5/-13 px relative to the body.
+const PERSON_DRAW_OFFSET_X = 6;
+const PERSON_DRAW_OFFSET_Y = 4;
+const SHADOW_OFFSET_X = -3;
+const SHADOW_OFFSET_Y = -1;
+const SHADOW_ALPHA = 0.45;
+const IDLE_SHADOW_ROWS = 8;
+const MOVE_SHADOW_ROWS = 16;
 
 export class MapRenderer {
     private readonly canvas: HTMLCanvasElement;
     private readonly ctx: CanvasRenderingContext2D | null;
+
+    private readonly rowGroundCache = new WeakMap<PADAnimation, { xs: number[]; ys: number[] }>();
+    private readonly shadowMetricsCache = new WeakMap<HTMLCanvasElement, {
+        rows: readonly { readonly top: number; readonly height: number; readonly centerX: number; readonly bottomY: number }[];
+    }>();
     private levelData: LevelData;
     private readonly scroller: MapScroller;
     private offset: Readonly<WorldPosition> = { x: 0, y: 0 };
@@ -665,6 +718,10 @@ export class MapRenderer {
             return depthDelta || renderPriority[left.kind] - renderPriority[right.kind];
         });
         const highlightTime = this.simulationTick * this.simulationStepMs;
+        // All shadows render beneath every unit frame, never overlapping another person's sprite.
+        for (const item of this.renderQueue) {
+            if (item.kind === "person" && !this.hiddenPersons.has(item.runtime.person.name)) this.drawPersonShadow(item.runtime, highlightTime);
+        }
         for (const item of this.renderQueue) this.drawRenderItem(item, highlightTime);
         this.drawMagicEffects(highlightTime);
         this.drawFloatingTexts(highlightTime);
@@ -822,6 +879,7 @@ export class MapRenderer {
         this.simulationTick++;
         const simulationTime = this.simulationTick * this.simulationStepMs;
         this.updatePersons(simulationTime, this.simulationStepMs / 1000);
+        this.advanceTurn(this.player, simulationTime);
         this.updatePlayer(this.simulationStepMs / 1000);
         const edgeDirection = this.scroller.update();
         if (!edgeDirection && this.isEdgeCursor(this.currentCursor)) this.changeCursor(CursorType.NORMAL);
@@ -962,6 +1020,8 @@ export class MapRenderer {
             waitUntil: 0,
             moving: false,
             running: false,
+            facingDirection: person.direction,
+            nextTurnStepAt: 0,
             nextFidgetAt: (person.name.length * 997) % 9000,
         };
     }
@@ -980,6 +1040,8 @@ export class MapRenderer {
             waitUntil: 0,
             moving: false,
             running: false,
+            facingDirection: player.direction,
+            nextTurnStepAt: 0,
             nextFidgetAt: 4500,
         };
     }
@@ -993,9 +1055,6 @@ export class MapRenderer {
             }
         }
         if (this.player !== excluded) blocked.add(this.worldGrid.index(worldToCell(this.player.position)));
-        for (const door of this.doors.values()) {
-            if (!door.opened) for (const cell of door.cells) blocked.add(this.worldGrid.index(cell));
-        }
         if (excluded) blocked.delete(this.worldGrid.index(worldToCell(excluded.position)));
         return blocked;
     }
@@ -1212,6 +1271,7 @@ export class MapRenderer {
 
     private updatePersons(now: number, deltaSeconds: number) {
         for (const runtime of this.persons) {
+            this.advanceTurn(runtime, now);
             runtime.moving = false;
             if (this.hiddenPersons.has(runtime.person.name)) continue;
             if (runtime.person.combatantId.toLowerCase() === this.dialogueSpeakerCombatantId) continue;
@@ -1279,8 +1339,13 @@ export class MapRenderer {
     private moveRuntimeTowards(runtime: PersonRuntime, target: Readonly<WorldPosition>, elapsedMs: number): number {
         const dx = target.x - runtime.position.x;
         const dy = target.y - runtime.position.y;
-        const durationMs = this.movementDurationMs(runtime, target);
         runtime.direction = this.directionFromVector(dx, dy);
+        if (runtime.facingDirection !== runtime.direction) {
+            // The unit turns in place first; movement resumes once it faces the route.
+            runtime.moving = false;
+            return 0;
+        }
+        const durationMs = this.movementDurationMs(runtime, target);
         runtime.moving = true;
         if (durationMs <= elapsedMs || durationMs < 0.001) {
             runtime.position.x = target.x;
@@ -1536,8 +1601,20 @@ export class MapRenderer {
         let metadata: PADAnimation | undefined;
         let image: HTMLCanvasElement | undefined;
         let frame: number | undefined;
+        let slot: PersonAnimationSlot = "idle";
 
         if (combat) {
+            slot = combat.kind === "attack"
+                ? "attack"
+                : combat.kind === "cast"
+                    ? "cast"
+                    : combat.kind === "suffer"
+                        ? "suffer"
+                        : combat.kind === "die"
+                            ? "die"
+                            : combat.kind === "fidget"
+                                ? this.combatMode ? "turnFun" : "fun"
+                                : "ssAttack";
             const clip = combat.kind === "attack"
                 ? { metadata: sprites.attack, image: sprites.attackImage }
                 : combat.kind === "cast"
@@ -1573,6 +1650,7 @@ export class MapRenderer {
             const useTurnWalk = this.combatMode && runtime.moving && sprites.turnWalk && sprites.turnWalkImage;
             const useTurnIdle = this.combatMode && !runtime.moving && sprites.turnIdle && sprites.turnIdleImage;
             const hasRunAnimation = !this.combatMode && runtime.running && sprites.run !== undefined && sprites.runImage !== undefined;
+            slot = useTurnWalk ? "turnWalk" : useTurnIdle ? "turnIdle" : hasRunAnimation ? "run" : runtime.moving ? "walk" : "idle";
             metadata = useTurnWalk ? sprites.turnWalk! : useTurnIdle ? sprites.turnIdle! : hasRunAnimation ? sprites.run! : runtime.moving ? sprites.walk : sprites.idle;
             image = useTurnWalk ? sprites.turnWalkImage! : useTurnIdle ? sprites.turnIdleImage! : hasRunAnimation ? sprites.runImage! : runtime.moving ? sprites.walkImage : sprites.idleImage;
             const fallbackPlaybackRate = runtime.running && !hasRunAnimation ? 2 : 1;
@@ -1580,12 +1658,61 @@ export class MapRenderer {
             frame = Math.floor(now / frameDuration) % metadata.frameCount;
         }
 
+        // Native model: the PAD/HAD record carries a STATIC anchor point (anchorX, anchorY)
+        // in cell coordinates - the entity's logical position lands there. Per-frame
+        // quads are only crop windows around the content bbox, they do not move the
+        // sprite. Ground-contact mean (c,d) is kept for the shadow vertical tie-in.
         const directionFrame = runtime.moving
-            ? this.walkDirectionFrame(runtime.direction)
-            : this.idleDirectionFrame(runtime.direction);
-        const worldX = directionFrame.mirrored
-            ? runtime.position.x - (metadata.frameWidth - metadata.anchorX)
-            : runtime.position.x - metadata.anchorX;
+            ? this.walkDirectionFrame(runtime.facingDirection)
+            : this.idleDirectionFrame(runtime.facingDirection);
+        const ground = this.groundAnchor(metadata, directionFrame.row);
+        const anchorFrameX = directionFrame.mirrored ? metadata.frameWidth - metadata.anchorX : metadata.anchorX;
+        const anchorFrameY = ground ? ground.y : metadata.anchorY;
+        // Calibrated screen-space bias between our tile projection and the native one.
+        const worldX = runtime.position.x - anchorFrameX + PERSON_DRAW_OFFSET_X;
+        const shadowImage = sprites.shadowImages[slot];
+        let shadow: PersonRenderFrame["shadow"];
+        const movementClip = slot === "walk" || slot === "turnWalk" || slot === "run";
+        const shadowRows = movementClip ? MOVE_SHADOW_ROWS : IDLE_SHADOW_ROWS;
+        const shadowRow = shadowDirectionOrder.indexOf(runtime.facingDirection) * (movementClip ? 2 : 1);
+        if (shadowRow >= 0 && shadowImage && shadowImage.width % metadata.frameCount === 0) {
+            const shadowFrameWidth = shadowImage.width / metadata.frameCount;
+            // Statically pin the pooled shadow blob to the person position. Row bands are
+            // detected from the sheet itself: authored rows are not evenly spaced.
+            const metrics = this.shadowRowMetrics(shadowImage, metadata.frameCount, shadowRows);
+            const row = metrics.rows[shadowRow];
+            if (row) {
+                const dx = anchorFrameX - row.centerX + SHADOW_OFFSET_X;
+                const dy = anchorFrameY - row.bottomY + SHADOW_OFFSET_Y;
+                shadow = {
+                    image: shadowImage,
+                    sourceX: frame * shadowFrameWidth,
+                    sourceY: row.top,
+                    width: shadowFrameWidth,
+                    height: row.height,
+                    dx,
+                    dy,
+                };
+            }
+        }
+        if (runtime === this.player) {
+            window.__playerFrame = {
+                position: { ...runtime.position },
+                worldX,
+                worldY: runtime.position.y - metadata.anchorY,
+                anchorFrameX,
+                anchorFrameY,
+                frameWidth: metadata.frameWidth,
+                frameHeight: metadata.frameHeight,
+                slot,
+                row: directionFrame.row,
+                mirrored: directionFrame.mirrored,
+                hovered: this.hoveredPerson === runtime,
+                shadow: shadow ? { dx: shadow.dx, dy: shadow.dy, width: shadow.width, height: shadow.height, sourceY: shadow.sourceY } : null,
+                offsetX: this.offset.x,
+                offsetY: this.offset.y,
+            };
+        }
         return {
             image,
             sourceX: frame * metadata.frameWidth,
@@ -1593,15 +1720,161 @@ export class MapRenderer {
             width: metadata.frameWidth,
             height: metadata.frameHeight,
             worldX,
-            worldY: runtime.position.y - metadata.anchorY,
+            worldY: runtime.position.y - metadata.anchorY + PERSON_DRAW_OFFSET_Y,
             anchorX: runtime.position.x,
             anchorY: runtime.position.y,
             mirrored: directionFrame.mirrored,
+            shadow,
         };
     }
+    /** Per-row shadow blob geometry with adaptively detected row bands. */
+    private shadowRowMetrics(image: HTMLCanvasElement, frameCount: number, rows: number): {
+        rows: readonly { readonly top: number; readonly height: number; readonly centerX: number; readonly bottomY: number }[];
+    } {
+        const cached = this.shadowMetricsCache.get(image);
+        if (cached) return cached;
+        const context = image.getContext("2d");
+        const empty = { rows: [] };
+        if (!context) return empty;
+        const cellWidth = Math.floor(image.width / frameCount);
+        if (cellWidth <= 0) return empty;
+        const data = context.getImageData(0, 0, image.width, image.height).data;
 
-    private drawPersonFrame(frame: PersonRenderFrame, context: CanvasRenderingContext2D, drawX: number, drawY: number): void {
+        // Vertical occupancy histogram over the whole sheet.
+        const histY = new Uint32Array(image.height);
+        for (let y = 0; y < image.height; y++) {
+            const rowBase = y * image.width;
+            let count = 0;
+            for (let frame = 0; frame < frameCount; frame++) {
+                const base = rowBase + frame * cellWidth;
+                for (let x = 0; x < cellWidth; x++) if (data[(base + x) * 4 + 3] !== 0) count++;
+            }
+            histY[y] = count;
+        }
+
+        // Detect content bands and keep the `rows` widest ones as direction strips.
+        interface Band { start: number; end: number; weight: number }
+        const bands: Band[] = [];
+        let bandStart = -1;
+        for (let y = 0; y <= image.height; y++) {
+            const occupied = y < image.height && histY[y] > 0;
+            if (occupied && bandStart < 0) bandStart = y;
+            if (!occupied && bandStart >= 0) { bands.push({ start: bandStart, end: y - 1, weight: 0 }); bandStart = -1; }
+        }
+        for (const band of bands) {
+            for (let y = band.start; y <= band.end; y++) band.weight += histY[y];
+        }
+        // Merge adjacent bands separated by tiny gaps so fragments do not inflate the count.
+        const merged: Band[] = [];
+        for (const band of bands) {
+            const last = merged[merged.length - 1];
+            if (last && band.start - last.end <= 2) {
+                last.end = band.end;
+                last.weight += band.weight;
+            } else merged.push({ ...band });
+        }
+        while (merged.length > rows) {
+            let weakest = 0;
+            for (let i = 1; i < merged.length; i++) if (merged[i].weight < merged[weakest].weight) weakest = i;
+            const prev = merged[weakest - 1];
+            const next = merged[weakest + 1];
+            if (!prev && !next) break;
+            if (!prev || (next && next.weight >= prev.weight)) {
+                next.start = merged[weakest].start;
+                next.weight += merged[weakest].weight;
+                merged.splice(weakest, 1);
+            } else {
+                prev.end = merged[weakest].end;
+                prev.weight += merged[weakest].weight;
+                merged.splice(weakest, 1);
+            }
+        }
+
+        const computedRows = [];
+        if (merged.length === rows) {
+            for (let row = 0; row < rows; row++) {
+                const top = row === 0 ? 0 : Math.floor((merged[row - 1].end + merged[row].start) / 2) + 1;
+                const bottom = row === rows - 1 ? image.height : Math.floor((merged[row].end + merged[row + 1].start) / 2) + 1;
+                let minX = Number.POSITIVE_INFINITY, maxX = Number.NEGATIVE_INFINITY;
+                let minY = Number.POSITIVE_INFINITY, maxY = Number.NEGATIVE_INFINITY;
+                for (let frame = 0; frame < frameCount; frame++) {
+                    for (let y = top; y < bottom; y++) for (let x = 0; x < cellWidth; x++) {
+                        if (data[((y * image.width) + (frame * cellWidth + x)) * 4 + 3] === 0) continue;
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+                const centerX = maxX < minX ? cellWidth / 2 : (minX + maxX) / 2;
+                const blobBottom = maxY < minY ? bottom : maxY + 1;
+                computedRows.push({ top, height: bottom - top, centerX, bottomY: blobBottom - top });
+            }
+        } else {
+            const cellHeight = Math.floor(image.height / rows);
+            for (let row = 0; row < rows; row++) {
+                let minX = Number.POSITIVE_INFINITY, maxX = Number.NEGATIVE_INFINITY;
+                let minY = Number.POSITIVE_INFINITY, maxY = Number.NEGATIVE_INFINITY;
+                for (let frame = 0; frame < frameCount; frame++) {
+                    for (let y = 0; y < cellHeight; y++) for (let x = 0; x < cellWidth; x++) {
+                        if (data[(((row * cellHeight + y) * image.width) + (frame * cellWidth + x)) * 4 + 3] === 0) continue;
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+                const centerX = maxX < minX ? cellWidth / 2 : (minX + maxX) / 2;
+                const bottomY = maxY < minY ? cellHeight : maxY + 1;
+                computedRows.push({ top: row * cellHeight, height: cellHeight, centerX, bottomY });
+            }
+        }
+        const metrics = { rows: computedRows };
+        this.shadowMetricsCache.set(image, metrics);
+        return metrics;
+    }
+
+    /** Mean quad (c,d) across frames of a direction row: the stable ground contact line.
+        Wear-system HAD tables carry all-zero quads - fall back to the record anchor. */
+    private groundAnchor(metadata: PADAnimation, row: number): { x: number; y: number } | undefined {
+        const quads = metadata.hotspots?.[row];
+        if (!quads || quads.length === 0 || quads.every((entry) => entry[2] === 0 && entry[3] === 0)) return undefined;
+        let cached = this.rowGroundCache.get(metadata);
+        if (!cached) {
+            const rowCount = metadata.hotspots!.length;
+            cached = { xs: new Array(rowCount).fill(0), ys: new Array(rowCount).fill(0) };
+            for (let r = 0; r < rowCount; r++) {
+                const entries = metadata.hotspots![r];
+                let sx = 0, sy = 0;
+                for (const entry of entries) { sx += entry[2]; sy += entry[3]; }
+                cached.xs[r] = sx / entries.length;
+                cached.ys[r] = sy / entries.length;
+            }
+            this.rowGroundCache.set(metadata, cached);
+        }
+        return { x: cached.xs[row], y: cached.ys[row] };
+    }
+
+    private advanceTurn(runtime: PersonRuntime, now: number): void {
+        if (runtime.facingDirection === runtime.direction) return;
+        if (now < runtime.nextTurnStepAt) return;
+        const from = directionOrder.indexOf(runtime.facingDirection);
+        const to = directionOrder.indexOf(runtime.direction);
+        const delta = (to - from + directionOrder.length) % directionOrder.length;
+        const step = delta <= directionOrder.length / 2 ? 1 : -1;
+        runtime.facingDirection = directionOrder[(from + step + directionOrder.length) % directionOrder.length];
+        runtime.nextTurnStepAt = now + TURN_STEP_MS;
+    }
+
+    private drawPersonFrame(frame: PersonRenderFrame, context: CanvasRenderingContext2D, drawX: number, drawY: number, includeShadow = true): void {
         context.save();
+        if (includeShadow && frame.shadow) {
+            const shadowX = drawX + frame.shadow.dx;
+            const shadowY = drawY + frame.shadow.dy;
+            context.globalAlpha = SHADOW_ALPHA;
+            context.drawImage(frame.shadow.image, frame.shadow.sourceX, frame.shadow.sourceY, frame.shadow.width, frame.shadow.height, shadowX, shadowY, frame.shadow.width, frame.shadow.height);
+            context.globalAlpha = 1;
+        }
         if (frame.mirrored) {
             context.translate(drawX + frame.width, drawY);
             context.scale(-1, 1);
@@ -1611,16 +1884,18 @@ export class MapRenderer {
         }
         context.restore();
     }
-
     private drawPersonHighlight(runtime: PersonRuntime, frame: PersonRenderFrame, drawX: number, drawY: number): void {
         const state = this.getCombatVisualState?.(runtime.person.combatantId);
         const context = this.highlightContext;
         const target = this.ctx;
         if (!state || !context || !target) return;
+        // The offscreen canvas is shared with trigger/door mask highlights, which
+        // leave it sized to THEIR images; without this resize the silhouette is
+        // clipped to the previous (smaller) canvas - "half body / head only" bugs.
         if (this.highlightCanvas.width !== frame.width) this.highlightCanvas.width = frame.width;
         if (this.highlightCanvas.height !== frame.height) this.highlightCanvas.height = frame.height;
         context.clearRect(0, 0, frame.width, frame.height);
-        this.drawPersonFrame(frame, context, 0, 0);
+        this.drawPersonFrame(frame, context, 0, 0, false);
         context.globalCompositeOperation = "source-in";
         context.fillStyle = state.relation === "hostile" ? "#ff2418"
             : state.relation === "friendly" ? "#42ff38" : "#ffe43b";
@@ -1635,6 +1910,16 @@ export class MapRenderer {
     }
 
 
+    private drawPersonShadow(runtime: PersonRuntime, now: number) {
+        const ctx = this.ctx;
+        if (!ctx) return;
+        const frame = this.personRenderFrame(runtime, now);
+        const drawX = frame.worldX - this.offset.x;
+        const drawY = frame.worldY - this.offset.y;
+        this.drawPersonFrame(frame, ctx, drawX, drawY, true);
+    }
+
+
     private drawPerson(runtime: PersonRuntime, now: number) {
         const ctx = this.ctx;
         if (!ctx) return;
@@ -1645,7 +1930,7 @@ export class MapRenderer {
         if (drawX > this.canvas.width || drawY > this.canvas.height) return;
         if (drawX + frame.width < 0 || drawY + frame.height < 0) return;
 
-        this.drawPersonFrame(frame, ctx, drawX, drawY);
+        this.drawPersonFrame(frame, ctx, drawX, drawY, false);
         if (this.hoveredPerson === runtime) {
             this.drawPersonHighlight(runtime, frame, drawX, drawY);
         }

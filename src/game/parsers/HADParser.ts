@@ -29,7 +29,7 @@ export class HADParser {
                 throw new Error(`Invalid HAD record size ${recordSize} at ${recordOffset}`);
             }
 
-            this.animations.set(action, {
+            const animation: HADAnimation = {
                 action,
                 frameDuration: view.getUint32(recordOffset + 4, true),
                 frameCount: view.getUint32(recordOffset + 8, true),
@@ -41,7 +41,27 @@ export class HADParser {
                 anchorY: view.getUint32(recordOffset + 32, true),
                 movementX: view.getFloat32(recordOffset + 36, true),
                 movementY: view.getFloat32(recordOffset + 40, true),
-            });
+            };
+            const tableSize = view.getUint32(recordOffset + 44, true);
+            const rowCount = Math.floor(tableSize / 8 / animation.frameCount);
+            if (rowCount > 0 && recordOffset + 48 + tableSize <= recordsEnd) {
+                const hotspots: (readonly [number, number, number, number])[][] = [];
+                for (let row = 0; row < rowCount; row++) {
+                    const frames: (readonly [number, number, number, number])[] = [];
+                    for (let frame = 0; frame < animation.frameCount; frame++) {
+                        const base = recordOffset + 48 + (row * animation.frameCount + frame) * 8;
+                        frames.push([
+                            view.getInt16(base, true),
+                            view.getInt16(base + 2, true),
+                            view.getInt16(base + 4, true),
+                            view.getInt16(base + 6, true),
+                        ]);
+                    }
+                    hotspots.push(frames);
+                }
+                animation.hotspots = hotspots;
+            }
+            this.animations.set(action, animation);
             offset = recordOffset + recordSize;
         }
     }

@@ -8,6 +8,8 @@ export interface PADAnimation {
     anchorY: number;
     movementX: number;
     movementY: number;
+    /** Per-direction-row, per-frame auxiliary quads [bboxX1, bboxY1, shadowHotspotX, shadowHotspotY]. */
+    hotspots?: readonly (readonly (readonly [number, number, number, number])[])[];
 }
 
 export class PADParser {
@@ -43,7 +45,7 @@ export class PADParser {
                 throw new Error(`Invalid PAD record size ${recordSize} at ${recordOffset}`);
             }
 
-            this.animations.set(action, {
+            const animation: PADAnimation = {
                 action,
                 frameDuration: view.getUint32(recordOffset + 4, true),
                 frameCount: view.getUint32(recordOffset + 8, true),
@@ -53,7 +55,27 @@ export class PADParser {
                 anchorY: view.getUint32(recordOffset + 24, true),
                 movementX: view.getFloat32(recordOffset + 28, true),
                 movementY: view.getFloat32(recordOffset + 32, true),
-            });
+            };
+            const tableSize = view.getUint32(recordOffset + 36, true);
+            const rowCount = Math.floor(tableSize / 8 / animation.frameCount);
+            if (rowCount > 0 && recordOffset + 40 + tableSize <= recordsEnd) {
+                const hotspots: (readonly [number, number, number, number])[][] = [];
+                for (let row = 0; row < rowCount; row++) {
+                    const frames: (readonly [number, number, number, number])[] = [];
+                    for (let frame = 0; frame < animation.frameCount; frame++) {
+                        const base = recordOffset + 40 + (row * animation.frameCount + frame) * 8;
+                        frames.push([
+                            view.getInt16(base, true),
+                            view.getInt16(base + 2, true),
+                            view.getInt16(base + 4, true),
+                            view.getInt16(base + 6, true),
+                        ]);
+                    }
+                    hotspots.push(frames);
+                }
+                animation.hotspots = hotspots;
+            }
+            this.animations.set(action, animation);
 
             offset = recordOffset + recordSize;
         }

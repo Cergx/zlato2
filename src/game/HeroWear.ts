@@ -1,4 +1,4 @@
-import { loadCSX } from "./Assets.ts";
+import { loadCSX, loadOptionalCSX } from "./Assets.ts";
 import { HADParser, type HADAnimation } from "./parsers/HADParser.ts";
 import { IADParser, type IADAnimation } from "./parsers/IADParser.ts";
 import type { PersonSpriteSet } from "./PersonSprite.ts";
@@ -159,6 +159,63 @@ const composeAction = async (
     return output;
 };
 
+const composeShadowAction = async (
+    profile: string,
+    action: ActionProfile,
+    base: HADAnimation,
+    equippedMappings: readonly WearMapping[],
+): Promise<HTMLCanvasElement | undefined> => {
+    const baseShadow = await loadOptionalCSX(`/assets/wear/${profile}/shadows/${action.file}`);
+    if (!baseShadow) return undefined;
+    const rows = /(^|_)go\.csx$|run\.csx$/i.test(action.file) ? 16 : 8;
+    if (baseShadow.width % base.frameCount !== 0 || baseShadow.height % rows !== 0) return undefined;
+    const frameWidth = baseShadow.width / base.frameCount;
+    const frameHeight = baseShadow.height / rows;
+
+    const loadedLayers = await Promise.all(equippedMappings.map(async (mapping): Promise<WearLayer | undefined> => {
+        const category = getWearCategory(mapping.group);
+        const directory = `/assets/wear/${profile}/${category}/${mapping.group}`;
+        const image = await loadOptionalCSX(`${directory}/shadows/${action.file}`);
+        if (!image) return undefined;
+        const [iadBuffer, sequenceBuffer] = await Promise.all([
+            fetchBuffer(`${directory}/${mapping.group}.iad`),
+            fetchBuffer(`/assets/wear/${profile}/seq/${action.file.replace(/\.csx$/i, "")}_${category}.seq`),
+        ]);
+        const metadata = new IADParser(iadBuffer).getAnimation(action.action);
+        if (image.width % base.frameCount !== 0 || image.height % rows !== 0) return undefined;
+        const sequence = new Uint8Array(sequenceBuffer);
+        if (sequence[0] !== base.frameCount) return undefined;
+        return { category, image, metadata, order: sequence.subarray(1) };
+    }));
+    const layers = loadedLayers.filter((layer): layer is WearLayer => layer !== undefined);
+
+    if (layers.length === 0) return baseShadow;
+    const output = document.createElement("canvas");
+    output.width = baseShadow.width;
+    output.height = baseShadow.height;
+    const context = output.getContext("2d");
+    if (!context) return undefined;
+
+    for (let row = 0; row < rows; row += 1) {
+        for (let frame = 0; frame < base.frameCount; frame += 1) {
+            const index = row * base.frameCount + frame;
+            const sorted = [...layers].sort((left, right) => left.order[index % left.order.length] - right.order[index % right.order.length]);
+            for (const layer of sorted.filter((entry) => entry.order[index % entry.order.length] < 1)) {
+                drawFrame(context, layer.image, layer.image.width / base.frameCount, layer.image.height / rows, row, frame,
+                    frame * frameWidth + layer.metadata.compositeWidth - base.compositeWidth,
+                    row * frameHeight + layer.metadata.compositeHeight - base.compositeHeight);
+            }
+            drawFrame(context, baseShadow, frameWidth, frameHeight, row, frame, frame * frameWidth, row * frameHeight);
+            for (const layer of sorted.filter((entry) => entry.order[index % entry.order.length] >= 1)) {
+                drawFrame(context, layer.image, layer.image.width / base.frameCount, layer.image.height / rows, row, frame,
+                    frame * frameWidth + layer.metadata.compositeWidth - base.compositeWidth,
+                    row * frameHeight + layer.metadata.compositeHeight - base.compositeHeight);
+            }
+        }
+    }
+    return output;
+};
+
 export const loadCompositedHeroSprites = async (equippedTechnicalNames: readonly string[]): Promise<PersonSpriteSet> => {
     const mappings = await loadWearMappings();
     const equippedMappings = equippedTechnicalNames
@@ -180,7 +237,16 @@ export const loadCompositedHeroSprites = async (equippedTechnicalNames: readonly
             const base = had.getAnimation(action.action);
             return composeAction(profile, action, base, baseImages[index]!, equippedMappings);
         }));
+        const shadowComposed = await Promise.all(actions.map(async (action) => ({
+            target: action.target,
+            shadow: await composeShadowAction(profile, action, had.getAnimation(action.action), equippedMappings),
+        })));
+        const shadowImages: PersonSpriteSet["shadowImages"] = {};
+        for (const entry of shadowComposed) {
+            if (entry.shadow) shadowImages[entry.target] = entry.shadow;
+        }
         return {
+            shadowImages,
             idleImage: composed[0],
             idle: had.getAnimation(ACTIONS[0].action),
             walkImage: composed[1],

@@ -60,10 +60,9 @@ body {
 }
 
 #root {
-  position: fixed;
   inset: 0;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
   overflow: auto;
 }
 

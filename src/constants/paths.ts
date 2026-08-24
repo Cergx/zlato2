@@ -18,6 +18,7 @@ export const Paths = {
 
     PERSON_PAD: (resource: string) => `${Paths.PERSONS}/${resource}/${resource}.pad`,
     PERSON_ANIMATION: (resource: string, animation: string) => `${Paths.PERSONS}/${resource}/animation/${animation}`,
+    PERSON_SHADOW: (resource: string, animation: string) => `${Paths.PERSONS}/${resource}/shadows/${animation}`,
     PERSON_SCRIPT: (name: string) => `${Paths.SCRIPTS}/persons/${name.toLowerCase()}.scr`,
     HERO_HAD: `${AssetsBase}/wear/noweapon_thrw/noweapon_thrw.had`,
     HERO_ANIMATION: (animation: string) => `${AssetsBase}/wear/noweapon_thrw/animation/${animation}`,
