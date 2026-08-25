@@ -7,6 +7,8 @@ import { WorldGrid } from "./WorldGrid.ts";
 import {
     cellToWorld,
     worldToCell,
+    WORLD_CELL_HEIGHT,
+    WORLD_CELL_WIDTH,
     WORLD_CHUNK_HEIGHT,
     WORLD_CHUNK_WIDTH,
     type WorldPosition,
@@ -188,12 +190,14 @@ const TURN_STEP_MS = 40;
 // Shadow sheets carry one row per compass octant (movement clips carry two rows per octant),
 const shadowDirectionOrder: readonly Direction[] = ["UP", "UP_LEFT", "LEFT", "DOWN_LEFT", "DOWN", "DOWN_RIGHT", "RIGHT", "UP_RIGHT"];
 // ordered like the unmirrored animation rows: UP, UP_LEFT, LEFT, DOWN_LEFT, DOWN, ...
-// Calibrated against the native game (Kotar, start location, idle DOWN_LEFT):
-// body needed +6/+4 px, shadow an additional +5/-13 px relative to the body.
-const PERSON_DRAW_OFFSET_X = 6;
-const PERSON_DRAW_OFFSET_Y = 4;
-const SHADOW_OFFSET_X = -3;
-const SHADOW_OFFSET_Y = -1;
+// Native anchors a person at the CENTER of their tile, while cellToWorld yields
+// the tile's top-left corner - hence the half-tile draw offset (verified against
+// the native game: Kotar needed exactly (+6, +4) at 12x9 px tiles; the .5 vertical
+// remainder floors away in the native integer blit).
+const PERSON_DRAW_OFFSET_X = WORLD_CELL_WIDTH / 2;
+const PERSON_DRAW_OFFSET_Y = Math.floor(WORLD_CELL_HEIGHT / 2);
+const SHADOW_OFFSET_X = 0;
+const SHADOW_OFFSET_Y = 0;
 const SHADOW_ALPHA = 0.45;
 const IDLE_SHADOW_ROWS = 8;
 const MOVE_SHADOW_ROWS = 16;

@@ -981,17 +981,6 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
                         event.currentTarget.setPointerCapture(event.pointerId);
                     }} />
             </div>
-            {skillsActive && <section className={styles.skillPanel} aria-label="Навыки героя">
-                <ColorKeyImage className={styles.skillPanelBackground}
-                    src="/assets/engineres/gpanel/skill_panel.bmp" />
-                <div className={styles.skillList}>
-                    {info.professionSkills.map((skill) => <button className={styles.skillEntry}
-                        data-profession-skill={skill.id} key={skill.id} type="button"
-                        onClick={() => onProfessionSkill(skill, info.professionSkills)}>
-                        {interfaceStrings[skill.interfaceStringId] ?? skill.id}
-                    </button>)}
-                </div>
-            </section>}
             <div className={styles.companions} aria-label="Спутники">
                 {info.companions.map((companion) => <div className={styles.companion} key={companion.name} title={companion.name}>
                     <ColorKeyImage className={styles.companionPortrait} src={companion.portrait} />
@@ -1019,6 +1008,17 @@ export const GameHud = ({ getGame, statusText, statusMessages, quickSaveSignal, 
                 onClick={() => handleInterfaceIcon(definition)}
                 onAnimationComplete={definition.index === 5 ? () => dismissPersistentIcon(5) : undefined}
             />)}
+            {skillsActive && <section className={styles.skillPanel} aria-label="Навыки героя">
+                <ColorKeyImage className={styles.skillPanelBackground}
+                               src="/assets/engineres/gpanel/skill_panel.bmp" />
+                <div className={styles.skillList}>
+                    {info.professionSkills.map((skill) => <button className={styles.skillEntry}
+                                                                  data-profession-skill={skill.id} key={skill.id} type="button"
+                                                                  onClick={() => onProfessionSkill(skill, info.professionSkills)}>
+                        {interfaceStrings[skill.interfaceStringId] ?? skill.id}
+                    </button>)}
+                </div>
+            </section>}
             {info.weaponItemId === "unarmed" && <canvas ref={noWeaponRef} className={styles.weaponSlot}
                 style={HUD_NO_WEAPON_POSITION} width={HUD_NO_WEAPON_POSITION.width} height={HUD_NO_WEAPON_POSITION.height} />}
             {info.weaponItemId !== "unarmed" && weaponIconUrl && guiObjects.get(16) && <ColorKeyImage

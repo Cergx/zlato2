@@ -161,27 +161,32 @@ export const OriginalGuiLayer = ({
     };
 
     if (error) return <div className={`${styles.layer} ${className ?? ""}`} role="alert">{error}</div>;
-    return <div className={`${styles.layer} ${className ?? ""}`}
-        data-gui-script={script} data-gui-source={definition?.sourcePath}
-        onPointerOver={handlePointerOver} onPointerOut={handlePointerOut}>
-        {definition?.objects
-            .filter((object: GuiObjectDefinition) => !objectIds || objectIds.includes(object.id))
-            .map((object: GuiObjectDefinition) => {
-                const limits = sliderLimits[object.id];
-                const configuredObject = {
-                    ...object,
-                    ...(enabledObjectIds.includes(object.id) ? { enabled: true } : {}),
-                    ...(disabledObjectIds.includes(object.id) ? { enabled: false } : {}),
-                    ...(limits ? { sliderLowLimit: limits.minimum, sliderHighLimit: limits.maximum } : {}),
-                };
-                return <GuiObjectControl key={object.id}
-                    object={configuredObject} value={values[object.id]} listItems={items[object.id]}
-                    content={objectContents[object.id]}
-                    ariaLabel={labels[object.id]} onAction={onAction} onValueChange={onValueChange}
-                    onDragOver={onDragOver} onDrop={onDrop} inactive={inactiveObjectIds.includes(object.id)}
-                    canvasWidth={canvasWidth} canvasHeight={canvasHeight} />;
-            })}
-        {activeTooltip && <GuiTooltip text={activeTooltip.text} anchor={activeTooltip.anchor}
-            canvasWidth={canvasWidth} canvasHeight={canvasHeight} />}
-    </div>;
+    return <>
+        <div className={`${styles.layer} ${className ?? ""}`}
+             data-gui-script={script} data-gui-source={definition?.sourcePath}
+             onPointerOver={handlePointerOver} onPointerOut={handlePointerOut}>
+            {definition?.objects
+                .filter((object: GuiObjectDefinition) => !objectIds || objectIds.includes(object.id))
+                .map((object: GuiObjectDefinition) => {
+                    const limits = sliderLimits[object.id];
+                    const configuredObject = {
+                        ...object,
+                        ...(enabledObjectIds.includes(object.id) ? { enabled: true } : {}),
+                        ...(disabledObjectIds.includes(object.id) ? { enabled: false } : {}),
+                        ...(limits ? { sliderLowLimit: limits.minimum, sliderHighLimit: limits.maximum } : {}),
+                    };
+                    return (
+                        <GuiObjectControl
+                            key={object.id}
+                            object={configuredObject} value={values[object.id]} listItems={items[object.id]}
+                            content={objectContents[object.id]}
+                            ariaLabel={labels[object.id]} onAction={onAction} onValueChange={onValueChange}
+                            onDragOver={onDragOver} onDrop={onDrop} inactive={inactiveObjectIds.includes(object.id)}
+                            canvasWidth={canvasWidth} canvasHeight={canvasHeight}
+                        />
+                    );
+                })}
+        </div>
+        {activeTooltip && <GuiTooltip text={activeTooltip.text} anchor={activeTooltip.anchor} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />}
+    </>;
 };
