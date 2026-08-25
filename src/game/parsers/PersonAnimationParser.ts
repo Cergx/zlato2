@@ -1,15 +1,19 @@
 export interface PADAnimation {
-    action: number;
-    frameDuration: number;
-    frameCount: number;
-    frameWidth: number;
-    frameHeight: number;
-    anchorX: number;
-    anchorY: number;
-    movementX: number;
-    movementY: number;
-    /** Per-direction-row, per-frame auxiliary quads [bboxX1, bboxY1, shadowHotspotX, shadowHotspotY]. */
+    readonly action: number;
+    readonly frameDuration: number;
+    readonly frameCount: number;
+    readonly frameWidth: number;
+    readonly frameHeight: number;
+    readonly anchorX: number;
+    readonly anchorY: number;
+    readonly movementX: number;
+    readonly movementY: number;
+    /** Quad entries are (x, y, WIDTH, HEIGHT) crops, not corner pairs (verified vs pixels). */
     hotspots?: readonly (readonly (readonly [number, number, number, number])[])[];
+    /** Trailing per-record shadow table: geom[0..1] = shadow cell size, geom[2..3] = shadow anchor in cell. */
+    shadowGeom?: readonly [number, number, number, number];
+    /** Rows of the trailing shadow quad table (8 = idle-type sheets, 16 = movement). */
+    shadowRowCount?: number;
 }
 
 export class PADParser {
@@ -71,9 +75,26 @@ export class PADParser {
                             view.getInt16(base + 6, true),
                         ]);
                     }
-                    hotspots.push(frames);
                 }
                 animation.hotspots = hotspots;
+            }
+            // Trailing per-record shadow table: geom u32[4], tableSize2 u32,
+            // then shadowRowCount * frameCount quads (x, y, w, h) int16.
+            const recordEnd = recordOffset + recordSize;
+            const shadowTail = recordOffset + 40 + tableSize;
+            if (shadowTail + 20 <= recordEnd) {
+                const geom: [number, number, number, number] = [
+                    view.getUint32(shadowTail, true),
+                    view.getUint32(shadowTail + 4, true),
+                    view.getUint32(shadowTail + 8, true),
+                    view.getUint32(shadowTail + 12, true),
+                ];
+                const shadowTableSize = view.getUint32(shadowTail + 16, true);
+                const shadowRows = Math.floor(shadowTableSize / 8 / animation.frameCount);
+                if (shadowTail + 20 + shadowTableSize <= recordEnd && shadowRows > 0) {
+                    animation.shadowGeom = geom;
+                    animation.shadowRowCount = shadowRows;
+                }
             }
             this.animations.set(action, animation);
 

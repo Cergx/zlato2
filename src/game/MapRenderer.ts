@@ -1672,27 +1672,55 @@ export class MapRenderer {
         const worldX = runtime.position.x - anchorFrameX + PERSON_DRAW_OFFSET_X;
         const shadowImage = sprites.shadowImages[slot];
         let shadow: PersonRenderFrame["shadow"];
+        const octant = directionOrder.indexOf(runtime.facingDirection);
         const movementClip = slot === "walk" || slot === "turnWalk" || slot === "run";
-        const shadowRows = movementClip ? MOVE_SHADOW_ROWS : IDLE_SHADOW_ROWS;
-        const shadowRow = shadowDirectionOrder.indexOf(runtime.facingDirection) * (movementClip ? 2 : 1);
-        if (shadowRow >= 0 && shadowImage && shadowImage.width % metadata.frameCount === 0) {
-            const shadowFrameWidth = shadowImage.width / metadata.frameCount;
-            // Statically pin the pooled shadow blob to the person position. Row bands are
-            // detected from the sheet itself: authored rows are not evenly spaced.
-            const metrics = this.shadowRowMetrics(shadowImage, metadata.frameCount, shadowRows);
-            const row = metrics.rows[shadowRow];
-            if (row) {
-                const dx = anchorFrameX - row.centerX + SHADOW_OFFSET_X;
-                const dy = anchorFrameY - row.bottomY + SHADOW_OFFSET_Y;
+        const shadowGeom = metadata.shadowGeom;
+        const shadowRowCount = metadata.shadowRowCount;
+        if (shadowGeom && shadowRowCount && shadowImage && shadowImage.width % metadata.frameCount === 0
+            && shadowImage.height % shadowRowCount === 0 && octant >= 0) {
+            // Data-driven path (goldenLand2 FINDINGS): every PAD/HAD record carries a
+            // trailing shadow table - geom[0..1] = shadow cell size, geom[2..3] = the
+            // anchor INSIDE the shadow cell that lands on the entity position. Shadow
+            // rows are absolute octants (full circle, never mirrored); movement sheets
+            // hold two rows per octant, fixed first variant.
+            const circleRow = (8 - octant) % 8;
+            const srow = shadowRowCount >= 16 ? circleRow * 2 : circleRow;
+            const cellW = shadowImage.width / metadata.frameCount;
+            const cellH = shadowImage.height / shadowRowCount;
+            if (cellW > 0 && cellH > 0 && srow * cellH + cellH <= shadowImage.height) {
                 shadow = {
                     image: shadowImage,
-                    sourceX: frame * shadowFrameWidth,
-                    sourceY: row.top,
-                    width: shadowFrameWidth,
-                    height: row.height,
-                    dx,
-                    dy,
+                    sourceX: frame * cellW,
+                    sourceY: srow * cellH,
+                    width: cellW,
+                    height: cellH,
+                    // Same vertical origin as the body cell top (record anchorY),
+                    // so the shadow keeps its authored offset from the feet line.
+                    dx: anchorFrameX - shadowGeom[2],
+                    dy: metadata.anchorY - shadowGeom[3],
                 };
+            }
+        } else {
+            const shadowRows = movementClip ? MOVE_SHADOW_ROWS : IDLE_SHADOW_ROWS;
+            const shadowRow = shadowDirectionOrder.indexOf(runtime.facingDirection) * (movementClip ? 2 : 1);
+            if (shadowRow >= 0 && shadowImage && shadowImage.width % metadata.frameCount === 0) {
+                const shadowFrameWidth = shadowImage.width / metadata.frameCount;
+                // Fallback for records without a shadow table: pin the pooled blob.
+                const metrics = this.shadowRowMetrics(shadowImage, metadata.frameCount, shadowRows);
+                const row = metrics.rows[shadowRow];
+                if (row) {
+                    const dx = anchorFrameX - row.centerX + SHADOW_OFFSET_X;
+                    const dy = anchorFrameY - row.bottomY + SHADOW_OFFSET_Y;
+                    shadow = {
+                        image: shadowImage,
+                        sourceX: frame * shadowFrameWidth,
+                        sourceY: row.top,
+                        width: shadowFrameWidth,
+                        height: row.height,
+                        dx,
+                        dy,
+                    };
+                }
             }
         }
         if (runtime === this.player) {

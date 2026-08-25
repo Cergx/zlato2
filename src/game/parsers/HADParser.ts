@@ -61,6 +61,25 @@ export class HADParser {
                 }
                 animation.hotspots = hotspots;
             }
+            // Trailing per-record shadow table (after 8 bytes of HAD extra fields
+            // when they fit): geom u32[4], tableSize2 u32, rows2 * frameCount quads.
+            const recordEnd = Math.min(recordsEnd, view.byteLength);
+            let shadowTail = recordOffset + 48 + tableSize;
+            if (shadowTail + 28 <= recordEnd) shadowTail += 8;
+            if (shadowTail + 20 <= recordEnd) {
+                const geom: [number, number, number, number] = [
+                    view.getUint32(shadowTail, true),
+                    view.getUint32(shadowTail + 4, true),
+                    view.getUint32(shadowTail + 8, true),
+                    view.getUint32(shadowTail + 12, true),
+                ];
+                const shadowTableSize = view.getUint32(shadowTail + 16, true);
+                const shadowRows = Math.floor(shadowTableSize / 8 / animation.frameCount);
+                if (shadowTail + 20 + shadowTableSize <= recordEnd && shadowRows > 0) {
+                    animation.shadowGeom = geom;
+                    animation.shadowRowCount = shadowRows;
+                }
+            }
             this.animations.set(action, animation);
             offset = recordOffset + recordSize;
         }
