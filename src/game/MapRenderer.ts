@@ -1878,7 +1878,9 @@ export class MapRenderer {
             for (let r = 0; r < rowCount; r++) {
                 const entries = metadata.hotspots![r];
                 let sx = 0, sy = 0;
-                for (const entry of entries) { sx += entry[2]; sy += entry[3]; }
+                // Quads are (x, y, WIDTH, HEIGHT): the ground-contact line of a frame
+                // is its bbox bottom = y + height.
+                for (const entry of entries) { sx += entry[0] + entry[2]; sy += entry[1] + entry[3]; }
                 cached.xs[r] = sx / entries.length;
                 cached.ys[r] = sy / entries.length;
             }

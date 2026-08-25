@@ -345,7 +345,7 @@ export class Level {
         for (let i = 0; i < lvlData.animationDescriptions.length; i++) {
             const description = lvlData.animationDescriptions[i];
             const animationInfo = laoData[description.number];
-            if (!description || !animationInfo) continue;
+            if (!description || !animationInfo || animationInfo.height <= 0) continue;
             const animation = new Animation(Paths.LEVEL_ANIMATION(sefData.pack, description.number), animationInfo.height, animationInfo.duration);
             levelAnimations.push({ animation, ...description });
         }

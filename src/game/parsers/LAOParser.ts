@@ -3,6 +3,12 @@ export interface LAOData {
     duration: number;
 }
 
+/**
+ * Level animation metadata (goldenLand2 FINDINGS, verified on 83/83 sheets):
+ * a .lao file is a flat array of u32-le pairs —
+ *   u32 frameHeight (cell height of the vertical strip anim_<i>.csx),
+ *   u32 delay       (per-frame delay, engine time units).
+ */
 export class LAOParser {
     private data: LAOData[] = [];
 
@@ -17,15 +23,17 @@ export class LAOParser {
         const buffer = await this.loadFile();
         const recordSize = 8;
 
-        if (buffer.byteLength%recordSize !== 0 || buffer.byteLength > 500) {
+        if (buffer.byteLength === 0 || buffer.byteLength % recordSize !== 0) {
             return;
         }
         const view = new DataView(buffer);
 
-        for (let i = 0; i < buffer.byteLength; i += recordSize) {
-            const height = view.getUint16(i, true);
-            const duration = view.getUint16(i + 4, true);
-            this.data.push({ height, duration })
+        for (let i = 0; i + recordSize <= buffer.byteLength; i += recordSize) {
+            // Keep index alignment with BLK_ADSC resourceIndex even for degenerate rows.
+            this.data.push({
+                height: view.getUint32(i, true),
+                duration: view.getUint32(i + 4, true),
+            });
         }
     }
 
