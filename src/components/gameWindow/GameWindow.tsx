@@ -23,6 +23,7 @@ import type { MapReferenceHint } from "../../game/Level.ts";
 import { NativeMessageBox } from "../gui/NativeMessageBox.tsx";
 import { SDBParser } from "../../game/parsers/SDBParser.ts";
 import { COMBAT_HISTORY_STRING_IDS } from "../../constants/clientDll.ts";
+import { DevHoverDock } from "./DevHoverDock.tsx";
 
 interface GameWindowProps {
     gameMode: "single" | "multiplayer";
@@ -296,6 +297,7 @@ export const GameWindow = ({ gameMode, level, entrance, saveSlot, heroProfile, o
     return (
         <div className={`${styles.gameWindow} ${cursorClassName}`} style={{ filter: `brightness(${gameGamma(settings)})` }}>
             <canvas width={1024} height={768} ref={canvasRef} />
+            <DevHoverDock />
             <WeatherOverlay getGame={getGame} paused={paused} enabled={settings[3] === true} />
             <MapReferenceTooltip hint={!activePanel && dialogueState?.status !== "active" && !worldMapState && !loading ? referenceHint : null}
                 delayMs={gameHintDelayMs(settings)} />

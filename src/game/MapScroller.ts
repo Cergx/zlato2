@@ -79,8 +79,8 @@ export class MapScroller {
     }
 
     public centerOn(position: WorldPosition) {
-        this.offset.x = Math.max(0, Math.min(position.x - this.canvas.width / 2, Math.max(this.mapSize.width - this.canvas.width, 0)));
-        this.offset.y = Math.max(0, Math.min(position.y - this.canvas.height / 2, Math.max(this.mapSize.height - this.canvas.height, 0)));
+        this.offset.x = Math.floor(Math.max(0, Math.min(position.x - this.canvas.width / 2, Math.max(this.mapSize.width - this.canvas.width, 0))));
+        this.offset.y = Math.floor(Math.max(0, Math.min(position.y - this.canvas.height / 2, Math.max(this.mapSize.height - this.canvas.height, 0))));
     }
 
     public destroy() {

@@ -79,9 +79,27 @@ interface PlayerFrameDebug {
     offsetY: number;
 }
 
+/** Live hover report for the DEV overlay: every object under the pointer, not just the top one. */
+export interface DevHoverItem {
+    readonly kind: "unit" | "chest" | "trigger" | "static" | "door" | "mask";
+    readonly name: string;
+    /** world-space top-left */
+    readonly x: number;
+    readonly y: number;
+    readonly w: number;
+    readonly h: number;
+    /** painter depth (base y); higher draws later = on top */
+    readonly depth: number;
+    readonly tileX?: number;
+    readonly tileY?: number;
+    readonly extra: readonly string[];
+}
+
 declare global {
     interface Window {
         __playerFrame?: PlayerFrameDebug;
+        __devHover?: readonly DevHoverItem[];
+        __devHoverEnabled?: boolean;
     }
 }
 
@@ -249,6 +267,7 @@ export class MapRenderer {
     private flashInteractiveObjects = false;
     private readonly highlightCanvas = document.createElement("canvas");
     private readonly highlightContext = this.highlightCanvas.getContext("2d");
+    private readonly occluderScratch = document.createElement("canvas");
     private combatMode = false;
     private magicTargeting = false;
     private aiTurn = false;
@@ -303,6 +322,8 @@ export class MapRenderer {
             return;
         }
         const local = this.eventCanvasPosition(event);
+        const world = { x: local.x + this.offset.x, y: local.y + this.offset.y };
+        if (window.__devHoverEnabled) this.publishDevHover(this.computeDevHover(world));
         const edgeCursor = this.edgeCursor(local);
 
         if (edgeCursor) {
@@ -310,7 +331,6 @@ export class MapRenderer {
             this.changeCursor(edgeCursor);
             return;
         }
-        const world = { x: local.x + this.offset.x, y: local.y + this.offset.y };
         this.pointerWorldPosition = world;
         this.pointerCanvasPosition = local;
         this.attackHitChance = undefined;
@@ -1520,6 +1540,172 @@ export class MapRenderer {
         };
     }
 
+    private publishDevHover(items: readonly DevHoverItem[]): void {
+        window.__devHover = items;
+        window.dispatchEvent(new CustomEvent("zlato2:dev-hover", { detail: items }));
+    }
+
+    /** Every object under the pointer (units, chests, statics, doors, masks), not just the top one. */
+    private computeDevHover(world: WorldPosition): DevHoverItem[] {
+        const items: DevHoverItem[] = [];
+        const now = this.simulationTick * this.simulationStepMs;
+
+        for (const runtime of [this.player, ...this.persons]) {
+            if (this.hiddenPersons.has(runtime.person.name)) continue;
+            if (!this.personHitTest(runtime, world, now)) continue;
+            const frame = this.personRenderFrame(runtime, now);
+            const tile = worldToCell(runtime.position);
+            items.push({
+                kind: "unit",
+                name: runtime.person.combatantId,
+                x: frame.worldX,
+                y: frame.worldY,
+                w: frame.width,
+                h: frame.height,
+                depth: runtime.position.y,
+                tileX: tile.x,
+                tileY: tile.y,
+                extra: [
+                    `dir=${runtime.direction} facing=${runtime.facingDirection} moving=${runtime.moving}`,
+                    `literary=${runtime.person.literaryLabel ?? runtime.person.literaryName ?? "-"}`,
+                ],
+            });
+        }
+
+        for (const levelStatic of this.levelData.levelStatics) {
+            const image = levelStatic.image;
+            if (!image) continue;
+            const x = Math.floor(world.x - levelStatic.position.x);
+            const y = Math.floor(world.y - levelStatic.position.y);
+            if (x < 0 || y < 0 || x >= image.width || y >= image.height) continue;
+            if ((image.getContext("2d", { willReadFrequently: true })?.getImageData(x, y, 1, 1).data[3] ?? 0) <= 16) continue;
+            items.push({
+                kind: "static",
+                name: levelStatic.name,
+                x: levelStatic.position.x,
+                y: levelStatic.position.y,
+                w: image.width,
+                h: image.height,
+                depth: levelStatic.position.y + image.height,
+                extra: [
+                    `#${levelStatic.number} param1=${levelStatic.param1} param2=${levelStatic.param2}`,
+                    `visible=${this.isStaticVisible(levelStatic)}`,
+                ],
+            });
+        }
+
+        for (const door of this.doors.values()) {
+            let hitX = 0;
+            let hitY = 0;
+            let hitW = 0;
+            let hitH = 0;
+            let hit = false;
+            const levelStatic = door.levelDoor.levelStatic;
+            const image = levelStatic.image;
+            if (image) {
+                const x = Math.floor(world.x - levelStatic.position.x);
+                const y = Math.floor(world.y - levelStatic.position.y);
+                if (x >= 0 && y >= 0 && x < image.width && y < image.height
+                    && (image.getContext("2d", { willReadFrequently: true })?.getImageData(x, y, 1, 1).data[3] ?? 0) > 16) {
+                    hit = true;
+                    hitX = levelStatic.position.x;
+                    hitY = levelStatic.position.y;
+                    hitW = image.width;
+                    hitH = image.height;
+                }
+            }
+            if (!hit) {
+                const mask = this.doorInteractionMask(door);
+                if (mask) {
+                    const x = Math.floor(world.x - mask.position.x);
+                    const y = Math.floor(world.y - mask.position.y);
+                    if (x >= 0 && y >= 0 && x < mask.image.width && y < mask.image.height
+                        && (mask.image.getContext("2d", { willReadFrequently: true })?.getImageData(x, y, 1, 1).data[3] ?? 0) > 16) {
+                        hit = true;
+                        hitX = mask.position.x;
+                        hitY = mask.position.y;
+                        hitW = mask.image.width;
+                        hitH = mask.image.height;
+                    }
+                }
+            }
+            if (!hit) continue;
+            items.push({
+                kind: "door",
+                name: door.name,
+                x: hitX,
+                y: hitY,
+                w: hitW,
+                h: hitH,
+                depth: door.depth,
+                extra: [
+                    `opened=${door.opened} cells=${door.cells.length} maskCells=${door.maskCells.length}`,
+                    `static=${door.levelDoor.levelStatic.name}`,
+                ],
+            });
+        }
+
+        for (const trigger of this.triggers.values()) {
+            const mask = this.triggerMasksByName.get(trigger.name.toLowerCase());
+            if (mask) {
+                const x = Math.floor(world.x - mask.position.x);
+                const y = Math.floor(world.y - mask.position.y);
+                if (x < 0 || y < 0 || x >= mask.image.width || y >= mask.image.height) continue;
+                if ((mask.image.getContext("2d", { willReadFrequently: true })?.getImageData(x, y, 1, 1).data[3] ?? 0) <= 16) continue;
+                items.push({
+                    kind: trigger.inventoryName ? "chest" : "trigger",
+                    name: trigger.name,
+                    x: mask.position.x,
+                    y: mask.position.y,
+                    w: mask.image.width,
+                    h: mask.image.height,
+                    depth: mask.position.y + mask.image.height,
+                    extra: [
+                        `inv=${trigger.inventoryName ?? "-"} script=${trigger.scriptName ?? "-"} cursor=${trigger.cursorName ?? "-"}`,
+                        `active=${trigger.active} visible=${trigger.visible} transition=${trigger.transition}`,
+                    ],
+                });
+            } else {
+                const cell = worldToCell(world);
+                if (!trigger.cells.some((candidate) => candidate.x === cell.x && candidate.y === cell.y)) continue;
+                items.push({
+                    kind: trigger.inventoryName ? "chest" : "trigger",
+                    name: trigger.name,
+                    x: cell.x * WORLD_CELL_WIDTH,
+                    y: cell.y * WORLD_CELL_HEIGHT,
+                    w: WORLD_CELL_WIDTH,
+                    h: WORLD_CELL_HEIGHT,
+                    depth: cell.y * WORLD_CELL_HEIGHT,
+                    tileX: cell.x,
+                    tileY: cell.y,
+                    extra: [`cells=${trigger.cells.length}`],
+                });
+            }
+        }
+
+        this.levelData.levelMasks.forEach((mask, index) => {
+            const foreground = mask.foreground ?? mask.alternateForeground;
+            if (!foreground) return;
+            const x = Math.floor(world.x - mask.x);
+            const y = Math.floor(world.y - mask.y);
+            if (x < 0 || y < 0 || x >= foreground.width || y >= foreground.height) return;
+            if ((foreground.getContext("2d", { willReadFrequently: true })?.getImageData(x, y, 1, 1).data[3] ?? 0) <= 16) return;
+            items.push({
+                kind: "mask",
+                name: `mask#${index}`,
+                x: mask.x,
+                y: mask.y,
+                w: foreground.width,
+                h: foreground.height,
+                depth: mask.y + foreground.height,
+                extra: [`type=${mask.type} number=${mask.number}`],
+            });
+        });
+
+        items.sort((left, right) => right.depth - left.depth);
+        return items;
+    }
+
     private eventWorldPosition(event: MouseEvent): WorldPosition {
         const local = this.eventCanvasPosition(event);
         return { x: local.x + this.offset.x, y: local.y + this.offset.y };
@@ -1973,7 +2159,7 @@ export class MapRenderer {
             y: frame.worldY,
             width: frame.width,
             height: frame.height,
-        }, frame.anchorX, frame.anchorY);
+        }, frame.anchorX, frame.anchorY, frame);
     }
 
 
@@ -2056,14 +2242,18 @@ export class MapRenderer {
         }, levelStatic.position.x + image.width / 2, levelStatic.position.y + image.height);
     }
 
-    private drawOccluders(bounds: RenderBounds, anchorX: number, anchorY: number) {
+    private drawOccluders(bounds: RenderBounds, anchorX: number, anchorY: number, frame?: PersonRenderFrame) {
         const ctx = this.ctx;
         if (!ctx) return;
         const occluders = this.findOccluders(bounds, anchorX, anchorY);
         if (occluders.length === 0) return;
-
+        if (frame && this.transparentOccluders) this.drawOccludersDither(bounds, occluders, frame);
+        else this.drawOccludersSolid(bounds, occluders);
+    }
+    private drawOccludersSolid(bounds: RenderBounds, occluders: readonly NativeOccluderSelection[]): void {
+        const ctx = this.ctx;
+        if (!ctx) return;
         ctx.save();
-        ctx.globalAlpha = this.transparentOccluders ? 0.58 : 1;
         ctx.beginPath();
         ctx.rect(bounds.x - this.offset.x, bounds.y - this.offset.y, bounds.width, bounds.height);
         ctx.clip();
@@ -2074,6 +2264,52 @@ export class MapRenderer {
             ctx.drawImage(foreground, mask.x - this.offset.x, mask.y - this.offset.y);
         }
         ctx.restore();
+    }
+
+    private drawOccludersDither(bounds: RenderBounds, occluders: readonly NativeOccluderSelection[], frame: PersonRenderFrame): void {
+        const ctx = this.ctx;
+        if (!ctx) return;
+        const width = bounds.width;
+        const height = bounds.height;
+        if (width <= 0 || height <= 0) return;
+        const scratch = this.occluderScratch;
+        if (scratch.width !== width || scratch.height !== height) {
+            scratch.width = width;
+            scratch.height = height;
+        }
+        const scratchContext = scratch.getContext("2d");
+        if (!scratchContext) {
+            this.drawOccludersSolid(bounds, occluders);
+            return;
+        }
+        scratchContext.clearRect(0, 0, width, height);
+        for (const { maskIndex, alternate } of occluders) {
+            const mask = this.levelData.levelMasks[maskIndex];
+            const foreground = alternate ? mask?.alternateForeground : mask?.foreground;
+            if (!foreground || !mask) continue;
+            scratchContext.drawImage(foreground, mask.x - bounds.x, mask.y - bounds.y);
+        }
+        // Punch a screen-stable diagonal checkerboard (native "Прозрачность объектов"):
+        // every other pixel stays occluder, the rest reveals the unit drawn beneath.
+        // Masked to the unit's opaque silhouette so the padding around the sprite stays solid.
+        const imageData = scratchContext.getImageData(0, 0, width, height);
+        const pixels = imageData.data;
+        const frameContext = frame.image.getContext("2d", { willReadFrequently: true });
+        const unitAlpha = frameContext?.getImageData(frame.sourceX, frame.sourceY, width, height).data;
+        const originX = Math.floor(bounds.x - this.offset.x);
+        const originY = Math.floor(bounds.y - this.offset.y);
+        for (let y = 0; y < height; y++) {
+            const rowParity = (originX + originY + y) & 1;
+            for (let x = 0; x < width; x++) {
+                if (((rowParity + x) & 1) !== 0) continue;
+                const localX = frame.mirrored ? width - 1 - x : x;
+                if (unitAlpha && (unitAlpha[(y * width + localX) * 4 + 3] ?? 0) > 16) {
+                    pixels[(y * width + x) * 4 + 3] = 0;
+                }
+            }
+        }
+        scratchContext.putImageData(imageData, 0, 0);
+        ctx.drawImage(scratch, bounds.x - this.offset.x, bounds.y - this.offset.y);
     }
 
     private findOccluders(bounds: RenderBounds, anchorX: number, anchorY: number): readonly NativeOccluderSelection[] {
