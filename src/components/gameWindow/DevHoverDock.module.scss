@@ -1,0 +1,106 @@
+.dock {
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.25rem;
+}
+
+.toggle {
+    margin: 0.4rem 0.4rem 0 0;
+    border: 1px solid rgb(200 184 135 / 45%);
+    padding: 0.15rem 0.45rem;
+    color: #c9bb91;
+    font: 10px/1.2 system-ui, sans-serif;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    background: rgb(10 10 9 / 78%);
+    opacity: 0.35;
+    transition: opacity 120ms ease;
+}
+
+.toggle:hover,
+.toggleOpen {
+    opacity: 1;
+}
+
+.panel {
+    width: 300px;
+    max-height: calc(100% - 2rem);
+    margin-right: 0.4rem;
+    overflow: auto;
+    border: 1px solid rgb(200 184 135 / 35%);
+    padding: 0.4rem 0.5rem;
+    color: #c9bb91;
+    font: 10px/1.25 system-ui, sans-serif;
+    background: rgb(10 10 9 / 88%);
+}
+
+.panelTitle {
+    margin-bottom: 0.35rem;
+    letter-spacing: 0.12em;
+    color: #ead8a9;
+}
+
+.empty {
+    color: rgb(201 187 145 / 60%);
+}
+
+.item {
+    border-top: 1px solid rgb(200 184 135 / 20%);
+    padding: 0.3rem 0;
+}
+
+.item:first-of-type {
+    border-top: none;
+    padding-top: 0;
+}
+
+.itemHead {
+    display: flex;
+    gap: 0.4rem;
+    align-items: baseline;
+}
+
+.badge {
+    flex: 0 0 auto;
+    padding: 0 0.25rem;
+    border-radius: 2px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    background: rgb(200 184 135 / 18%);
+}
+
+.name {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.coords {
+    color: rgb(201 187 145 / 78%);
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 9px;
+}
+
+.tile {
+    color: #ffe43b;
+    font-weight: 600;
+}
+
+.extra {
+    color: rgb(201 187 145 / 66%);
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 9px;
+    overflow-wrap: anywhere;
+}
+
+.unit { color: #bff2ff; }
+.chest { color: #ffd88a; }
+.trigger { color: #d7c7ff; }
+.static { color: #b9e8a9; }
+.door { color: #ffb0a8; }
+.mask { color: #f3b8ff; }
