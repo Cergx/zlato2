@@ -195,6 +195,15 @@ const renderPriority: Record<RenderKind, number> = {
     animation: 1,
     person: 2,
 };
+// Client.dll 0x1202EFFC: phase 1 draws the scenery list (statics) before the person passes
+// (phase 2 kind 2 / phase 7 kind 1). A static sprite can never cover a person; occlusion
+// comes only from the mask pass. Within a phase objects sort by their stored anchor Y
+// (qsort 0x1202BBDC, ascending — no y+height recomputation, no *9).
+const renderLayer: Record<RenderKind, number> = {
+    static: 0,
+    animation: 1,
+    person: 1,
+};
 const STATIC_SCENERY_VISIBLE = 0x2;
 
 const doorRenderDepth = (cells: readonly TilePosition[], fallback: number): number => {
@@ -738,8 +747,9 @@ export class MapRenderer {
         for (const levelStatic of this.backgroundStatics) this.drawBackgroundStatic(levelStatic);
 
         this.renderQueue.sort((left, right) => {
+            const layerDelta = renderLayer[left.kind] - renderLayer[right.kind];
             const depthDelta = this.renderDepth(left) - this.renderDepth(right);
-            return depthDelta || renderPriority[left.kind] - renderPriority[right.kind];
+            return layerDelta || depthDelta || renderPriority[left.kind] - renderPriority[right.kind];
         });
         const highlightTime = this.simulationTick * this.simulationStepMs;
         // All shadows render beneath every unit frame, never overlapping another person's sprite.
@@ -992,10 +1002,9 @@ export class MapRenderer {
     private renderDepth(item: RenderItem): number {
         switch (item.kind) {
             case "static":
-                return this.doorsByStatic.get(item.levelStatic)?.depth
-                    ?? item.levelStatic.position.y + (item.levelStatic.image?.height ?? 0);
+                return item.levelStatic.position.y;
             case "animation":
-                return item.levelAnimation.position.y + (item.levelAnimation.animation?.frameHeight ?? 0);
+                return item.levelAnimation.position.y;
             case "person":
                 return item.runtime.position.y;
         }
@@ -2159,7 +2168,7 @@ export class MapRenderer {
             y: frame.worldY,
             width: frame.width,
             height: frame.height,
-        }, frame.anchorX, frame.anchorY, frame);
+        }, frame);
     }
 
 
@@ -2178,7 +2187,7 @@ export class MapRenderer {
             y: levelAnimation.position.y,
             width: animation.frameWidth,
             height: animation.frameHeight,
-        }, levelAnimation.position.x + animation.frameWidth / 2, levelAnimation.position.y + animation.frameHeight);
+        });
     }
 
     private refreshInteractiveVisuals(): void {
@@ -2239,16 +2248,48 @@ export class MapRenderer {
             y: levelStatic.position.y,
             width: image.width,
             height: image.height,
-        }, levelStatic.position.x + image.width / 2, levelStatic.position.y + image.height);
+        });
     }
 
-    private drawOccluders(bounds: RenderBounds, anchorX: number, anchorY: number, frame?: PersonRenderFrame) {
+    private drawOccluders(bounds: RenderBounds, frame?: PersonRenderFrame) {
         const ctx = this.ctx;
         if (!ctx) return;
-        const occluders = this.findOccluders(bounds, anchorX, anchorY);
+        const occluders = this.findOccluders(bounds);
         if (occluders.length === 0) return;
         if (frame && this.transparentOccluders) this.drawOccludersDither(bounds, occluders, frame);
         else this.drawOccludersSolid(bounds, occluders);
+    }
+
+    /**
+     * Client.dll 0x1202F251 (ApplyCellMask): each matched cell's mask tile piece is drawn
+     * at the mask's own world position, clipped to that cell's 24×18 rect intersected with
+     * the drawable's rect (clip fields 0x84a0..0x84b4).
+     */
+    private drawMaskSelections(
+        target: CanvasRenderingContext2D,
+        translateX: number,
+        translateY: number,
+        bounds: RenderBounds,
+        occluders: readonly NativeOccluderSelection[],
+    ): void {
+        for (const { maskIndex, alternate, cells } of occluders) {
+            const mask = this.levelData.levelMasks[maskIndex];
+            const foreground = alternate ? mask?.alternateForeground : mask?.foreground;
+            if (!foreground || !mask) continue;
+            target.save();
+            target.beginPath();
+            for (const cell of cells) {
+                const x = Math.max(cell.x * WORLD_CHUNK_WIDTH, bounds.x);
+                const y = Math.max(cell.y * WORLD_CHUNK_HEIGHT, bounds.y);
+                const right = Math.min(cell.x * WORLD_CHUNK_WIDTH + WORLD_CHUNK_WIDTH, bounds.x + bounds.width);
+                const bottom = Math.min(cell.y * WORLD_CHUNK_HEIGHT + WORLD_CHUNK_HEIGHT, bounds.y + bounds.height);
+                if (right <= x || bottom <= y) continue;
+                target.rect(x - translateX, y - translateY, right - x, bottom - y);
+            }
+            target.clip();
+            target.drawImage(foreground, mask.x - translateX, mask.y - translateY);
+            target.restore();
+        }
     }
     private drawOccludersSolid(bounds: RenderBounds, occluders: readonly NativeOccluderSelection[]): void {
         const ctx = this.ctx;
@@ -2257,12 +2298,7 @@ export class MapRenderer {
         ctx.beginPath();
         ctx.rect(bounds.x - this.offset.x, bounds.y - this.offset.y, bounds.width, bounds.height);
         ctx.clip();
-        for (const { maskIndex, alternate } of occluders) {
-            const mask = this.levelData.levelMasks[maskIndex];
-            const foreground = alternate ? mask?.alternateForeground : mask?.foreground;
-            if (!foreground || !mask) continue;
-            ctx.drawImage(foreground, mask.x - this.offset.x, mask.y - this.offset.y);
-        }
+        this.drawMaskSelections(ctx, this.offset.x, this.offset.y, bounds, occluders);
         ctx.restore();
     }
 
@@ -2283,12 +2319,7 @@ export class MapRenderer {
             return;
         }
         scratchContext.clearRect(0, 0, width, height);
-        for (const { maskIndex, alternate } of occluders) {
-            const mask = this.levelData.levelMasks[maskIndex];
-            const foreground = alternate ? mask?.alternateForeground : mask?.foreground;
-            if (!foreground || !mask) continue;
-            scratchContext.drawImage(foreground, mask.x - bounds.x, mask.y - bounds.y);
-        }
+        this.drawMaskSelections(scratchContext, bounds.x, bounds.y, bounds, occluders);
         // Punch a screen-stable diagonal checkerboard (native "Прозрачность объектов"):
         // every other pixel stays occluder, the rest reveals the unit drawn beneath.
         // Masked to the unit's opaque silhouette so the padding around the sprite stays solid.
@@ -2312,21 +2343,15 @@ export class MapRenderer {
         ctx.drawImage(scratch, bounds.x - this.offset.x, bounds.y - this.offset.y);
     }
 
-    private findOccluders(bounds: RenderBounds, anchorX: number, anchorY: number): readonly NativeOccluderSelection[] {
+    private findOccluders(bounds: RenderBounds): readonly NativeOccluderSelection[] {
         const header = this.levelData.lvlData.maskHDR;
-        const left = Math.max(0, Math.floor(bounds.x / WORLD_CHUNK_WIDTH));
-        const right = Math.min(header.width - 1, Math.floor((bounds.x + Math.max(1, bounds.width) - 1) / WORLD_CHUNK_WIDTH));
-        const anchorCellX = Math.floor(anchorX / WORLD_CHUNK_WIDTH);
-        const anchorCellY = Math.floor(anchorY / WORLD_CHUNK_HEIGHT);
-        const key = `${left}:${right}:${anchorCellX}:${anchorCellY}`;
+        const key = `${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}`;
         const cached = this.occluderCache.get(key);
         if (cached) return cached;
         const result = findNativeOccluders(
             header,
             this.levelData.levelMasks,
             bounds,
-            anchorX,
-            anchorY,
             this.alternateMaskTiles,
         );
         this.occluderCache.set(key, result);
