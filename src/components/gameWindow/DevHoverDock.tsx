@@ -14,15 +14,20 @@ const KIND_LABEL: Record<DevHoverItem["kind"], string> = {
 export const DevHoverDock = () => {
     const [open, setOpen] = useState(false);
     const [items, setItems] = useState<readonly DevHoverItem[]>([]);
+    const [pointer, setPointer] = useState<{ worldX: number; worldY: number; cellX: number; cellY: number; mhdrX: number; mhdrY: number } | null>(null);
 
     useEffect(() => {
         const onHover = (event: Event) => {
             setItems((event as CustomEvent<readonly DevHoverItem[]>).detail ?? []);
         };
         window.addEventListener("zlato2:dev-hover", onHover);
-        return () => window.removeEventListener("zlato2:dev-hover", onHover);
+        const onPointer = (event: Event) => setPointer((event as CustomEvent).detail ?? null);
+        window.addEventListener("zlato2:dev-pointer", onPointer);
+        return () => {
+            window.removeEventListener("zlato2:dev-hover", onHover);
+            window.removeEventListener("zlato2:dev-pointer", onPointer);
+        };
     }, []);
-
     useEffect(() => {
         window.__devHoverEnabled = open;
         if (!open) window.__devHover = [];
@@ -42,6 +47,12 @@ export const DevHoverDock = () => {
             {open && (
                 <div className={styles.panel}>
                     <div className={styles.panelTitle}>Объекты под курсором</div>
+                <div className={styles.panelTitle}>
+                    Указатель:{" "}
+                    {pointer
+                        ? `px=(${Math.trunc(pointer.worldX)},${pointer.worldY}) cell=(${pointer.cellX},${pointer.cellY}) mhdr=(${pointer.mhdrX},${pointer.mhdrY})`
+                        : "—"}
+                </div>
                     {items.length === 0 ? (
                         <div className={styles.empty}>Наведите курсор на объект</div>
                     ) : (

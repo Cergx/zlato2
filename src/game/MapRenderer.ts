@@ -332,7 +332,19 @@ export class MapRenderer {
         }
         const local = this.eventCanvasPosition(event);
         const world = { x: local.x + this.offset.x, y: local.y + this.offset.y };
-        if (window.__devHoverEnabled) this.publishDevHover(this.computeDevHover(world));
+        if (window.__devHoverEnabled) {
+            this.publishDevHover(this.computeDevHover(world));
+            window.dispatchEvent(new CustomEvent("zlato2:dev-pointer", {
+                detail: {
+                    worldX: world.x,
+                    worldY: world.y,
+                    cellX: Math.floor(world.x / 12),
+                    cellY: Math.floor(world.y / 9),
+                    mhdrX: Math.floor(world.x / 24),
+                    mhdrY: Math.floor(world.y / 18),
+                },
+            }));
+        }
         const edgeCursor = this.edgeCursor(local);
 
         if (edgeCursor) {
@@ -2243,12 +2255,8 @@ export class MapRenderer {
         if (x > this.canvas.width || y > this.canvas.height) return;
         if (x + image.width < 0 || y + image.height < 0) return;
         this.ctx.drawImage(image, x, y);
-        this.drawOccluders({
-            x: levelStatic.position.x,
-            y: levelStatic.position.y,
-            width: image.width,
-            height: image.height,
-        });
+        // Native statics draw in scenery phase 1 WITHOUT the per-drawable mask composite;
+        // pieces apply only in the person worker (0x1202c8ac kind-1/2 on persons).
     }
 
     private drawOccluders(bounds: RenderBounds, frame?: PersonRenderFrame) {
