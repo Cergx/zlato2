@@ -111,10 +111,14 @@ export const findNativeOccluders = (
     masks: readonly LevelMask[],
     bounds: NativeMaskBounds,
     alternateTiles: ReadonlySet<string>,
+    options?: { anchorRow?: number; bodyHeight?: number; rowsBelow?: number },
 ): readonly NativeOccluderSelection[] => {
     if (header.chunks.length === 0 || header.width <= 0 || header.height <= 0) return [];
     const leftBound = Math.floor(bounds.x / WORLD_CHUNK_WIDTH);
-    const anchorRow = Math.floor((bounds.y + Math.max(1, bounds.height)) / WORLD_CHUNK_HEIGHT);
+    // The anchor row is always the drawable's feet row (0x958c = D.y>>1); a composite
+    // rect (body ∪ shadow) must not move it. bodyHeight keeps the upward sweep at the
+    // body's own floor(h/18)+2 rows; rowsBelow extends the cell window south.
+    const anchorRow = options?.anchorRow ?? Math.floor((bounds.y + Math.max(1, bounds.height)) / WORLD_CHUNK_HEIGHT);
     let colCount = Math.floor((bounds.x + Math.max(1, bounds.width)) / WORLD_CHUNK_WIDTH) + 1 - leftBound;
     if (colCount > 13) colCount = 13;
     if (colCount <= 0 || leftBound < 0 || anchorRow < 0 || anchorRow >= header.height) return [];
@@ -136,11 +140,12 @@ export const findNativeOccluders = (
     }
     if (!flag.some(Boolean)) return [];
 
-    const rows = Math.floor(Math.max(1, bounds.height) / WORLD_CHUNK_HEIGHT) + 2;
+    const rowsUp = Math.floor(Math.max(1, options?.bodyHeight ?? bounds.height) / WORLD_CHUNK_HEIGHT) + 2;
+    const rowsBelow = options?.rowsBelow ?? 0;
     const grouped = new Map<string, NativeOccluderSelection>();
-    for (let row = 0; row < rows; row += 1) {
-        const chunkY = anchorRow - row;
-        if (chunkY < 0) break;
+    for (let chunkY = anchorRow - rowsUp + 1; chunkY <= anchorRow + rowsBelow; chunkY += 1) {
+        if (chunkY < 0) continue;
+        if (chunkY >= header.height) break;
         for (let col = 0; col < colCount; col += 1) {
             const chunkX = leftBound + col;
             if (chunkX >= header.width) break;

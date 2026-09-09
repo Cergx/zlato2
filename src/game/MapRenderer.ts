@@ -142,6 +142,25 @@ interface RenderBounds {
     width: number;
     height: number;
 }
+/** One opaque-source mask for the parity punch: a body frame or a shadow frame. */
+interface OccluderSilhouette {
+    image: HTMLCanvasElement;
+    sourceX: number;
+    sourceY: number;
+    width: number;
+    height: number;
+    mirrored: boolean;
+    /** Silhouette top-left within the occluder bounds, px. */
+    offsetX: number;
+    offsetY: number;
+}
+
+/** Native anchor override for a composite (body ∪ shadow) search rect. */
+interface OccluderSearch {
+    anchorRow: number;
+    bodyHeight: number;
+    rowsBelow: number;
+}
 
 interface ActiveMagicAnimation {
     readonly animation: MagicEffectAnimation;
@@ -764,10 +783,6 @@ export class MapRenderer {
             return layerDelta || depthDelta || renderPriority[left.kind] - renderPriority[right.kind];
         });
         const highlightTime = this.simulationTick * this.simulationStepMs;
-        // All shadows render beneath every unit frame, never overlapping another person's sprite.
-        for (const item of this.renderQueue) {
-            if (item.kind === "person" && !this.hiddenPersons.has(item.runtime.person.name)) this.drawPersonShadow(item.runtime, highlightTime);
-        }
         for (const item of this.renderQueue) this.drawRenderItem(item, highlightTime);
         this.drawMagicEffects(highlightTime);
         this.drawFloatingTexts(highlightTime);
@@ -2150,17 +2165,6 @@ export class MapRenderer {
         target.restore();
     }
 
-
-    private drawPersonShadow(runtime: PersonRuntime, now: number) {
-        const ctx = this.ctx;
-        if (!ctx) return;
-        const frame = this.personRenderFrame(runtime, now);
-        const drawX = frame.worldX - this.offset.x;
-        const drawY = frame.worldY - this.offset.y;
-        this.drawPersonFrame(frame, ctx, drawX, drawY, true);
-    }
-
-
     private drawPerson(runtime: PersonRuntime, now: number) {
         const ctx = this.ctx;
         if (!ctx) return;
@@ -2168,20 +2172,78 @@ export class MapRenderer {
         const drawX = frame.worldX - this.offset.x;
         const drawY = frame.worldY - this.offset.y;
 
-        if (drawX > this.canvas.width || drawY > this.canvas.height) return;
-        if (drawX + frame.width < 0 || drawY + frame.height < 0) return;
+        if (drawX > this.canvas.width || drawY + frame.height + (frame.shadow ? frame.shadow.dy + frame.shadow.height : 0) < 0) return;
+        if (drawX + frame.width < 0 || drawY < 0) return;
 
-        this.drawPersonFrame(frame, ctx, drawX, drawY, false);
+        this.drawPersonFrame(frame, ctx, drawX, drawY, true);
         if (this.hoveredPerson === runtime) {
             this.drawPersonHighlight(runtime, frame, drawX, drawY);
         }
-        this.drawOccluders({
-            x: frame.worldX,
-            y: frame.worldY,
-            width: frame.width,
-            height: frame.height,
-        }, frame);
+        if (frame.shadow) {
+            // ONE ApplyCellMask pass over the union rect with a combined silhouette
+            // (body ∪ shadow): splitting the calls per rect would give each its own
+            // parity phase (the pattern derives from the bounds origin) and the shadow's
+            // piece would cover the body's feet without holes.
+            const shadowX = frame.worldX + frame.shadow.dx;
+            const shadowY = frame.worldY + frame.shadow.dy;
+            const unionX = Math.min(frame.worldX, shadowX);
+            const unionY = Math.min(frame.worldY, shadowY);
+            const unionX1 = Math.max(frame.worldX + frame.width, shadowX + frame.shadow.width);
+            const unionY1 = Math.max(frame.worldY + frame.height, shadowY + frame.shadow.height);
+            this.drawOccluders({
+                x: unionX,
+                y: unionY,
+                width: unionX1 - unionX,
+                height: unionY1 - unionY,
+            }, [
+                {
+                    image: frame.image,
+                    sourceX: frame.sourceX,
+                    sourceY: frame.sourceY,
+                    width: frame.width,
+                    height: frame.height,
+                    mirrored: frame.mirrored,
+                    offsetX: frame.worldX - unionX,
+                    offsetY: frame.worldY - unionY,
+                },
+                {
+                    image: frame.shadow.image,
+                    sourceX: frame.shadow.sourceX,
+                    sourceY: frame.shadow.sourceY,
+                    width: frame.shadow.width,
+                    height: frame.shadow.height,
+                    mirrored: false,
+                    offsetX: shadowX - unionX,
+                    offsetY: shadowY - unionY,
+                },
+            ], {
+                // Anchor = the body's feet row (native D.y>>1); the sweep upward stays at
+                // the body's floor(h/18)+2 rows, extended south over the shadow.
+                anchorRow: Math.floor((frame.worldY + frame.height) / WORLD_CHUNK_HEIGHT),
+                bodyHeight: frame.height,
+                rowsBelow: Math.ceil((shadowY + frame.shadow.height - (frame.worldY + frame.height)) / WORLD_CHUNK_HEIGHT),
+            });
+        } else {
+            this.drawOccluders({
+                x: frame.worldX,
+                y: frame.worldY,
+                width: frame.width,
+                height: frame.height,
+            }, [
+                {
+                    image: frame.image,
+                    sourceX: frame.sourceX,
+                    sourceY: frame.sourceY,
+                    width: frame.width,
+                    height: frame.height,
+                    mirrored: frame.mirrored,
+                    offsetX: 0,
+                    offsetY: 0,
+                },
+            ]);
+        }
     }
+
 
 
     private drawAnimation(levelAnimation: LevelAnimation) {
@@ -2257,14 +2319,15 @@ export class MapRenderer {
         this.ctx.drawImage(image, x, y);
         // Native statics draw in scenery phase 1 WITHOUT the per-drawable mask composite;
         // pieces apply only in the person worker (0x1202c8ac kind-1/2 on persons).
+
     }
 
-    private drawOccluders(bounds: RenderBounds, frame?: PersonRenderFrame) {
+    private drawOccluders(bounds: RenderBounds, units?: readonly OccluderSilhouette[], search?: OccluderSearch) {
         const ctx = this.ctx;
         if (!ctx) return;
-        const occluders = this.findOccluders(bounds);
+        const occluders = this.findOccluders(bounds, search);
         if (occluders.length === 0) return;
-        if (frame && this.transparentOccluders) this.drawOccludersDither(bounds, occluders, frame);
+        if (units && this.transparentOccluders) this.drawOccludersDither(bounds, occluders, units);
         else this.drawOccludersSolid(bounds, occluders);
     }
 
@@ -2299,6 +2362,7 @@ export class MapRenderer {
             target.restore();
         }
     }
+
     private drawOccludersSolid(bounds: RenderBounds, occluders: readonly NativeOccluderSelection[]): void {
         const ctx = this.ctx;
         if (!ctx) return;
@@ -2310,7 +2374,7 @@ export class MapRenderer {
         ctx.restore();
     }
 
-    private drawOccludersDither(bounds: RenderBounds, occluders: readonly NativeOccluderSelection[], frame: PersonRenderFrame): void {
+    private drawOccludersDither(bounds: RenderBounds, occluders: readonly NativeOccluderSelection[], units: readonly OccluderSilhouette[]): void {
         const ctx = this.ctx;
         if (!ctx) return;
         const width = bounds.width;
@@ -2330,30 +2394,40 @@ export class MapRenderer {
         this.drawMaskSelections(scratchContext, bounds.x, bounds.y, bounds, occluders);
         // Punch a screen-stable diagonal checkerboard (native "Прозрачность объектов"):
         // every other pixel stays occluder, the rest reveals the unit drawn beneath.
-        // Masked to the unit's opaque silhouette so the padding around the sprite stays solid.
+        // Masked to the combined body ∪ shadow silhouette so the padding around the
+        // sprites stays solid.
         const imageData = scratchContext.getImageData(0, 0, width, height);
         const pixels = imageData.data;
-        const frameContext = frame.image.getContext("2d", { willReadFrequently: true });
-        const unitAlpha = frameContext?.getImageData(frame.sourceX, frame.sourceY, width, height).data;
+        const alphas = units.map((silhouette) => {
+            const context = silhouette.image.getContext("2d", { willReadFrequently: true });
+            return context?.getImageData(silhouette.sourceX, silhouette.sourceY, silhouette.width, silhouette.height).data;
+        });
         const originX = Math.floor(bounds.x - this.offset.x);
         const originY = Math.floor(bounds.y - this.offset.y);
         for (let y = 0; y < height; y++) {
             const rowParity = (originX + originY + y) & 1;
             for (let x = 0; x < width; x++) {
                 if (((rowParity + x) & 1) !== 0) continue;
-                const localX = frame.mirrored ? width - 1 - x : x;
-                if (unitAlpha && (unitAlpha[(y * width + localX) * 4 + 3] ?? 0) > 16) {
-                    pixels[(y * width + x) * 4 + 3] = 0;
+                for (let s = 0; s < alphas.length; s++) {
+                    const alpha = alphas[s];
+                    const silhouette = units[s];
+                    const sx = x - silhouette.offsetX;
+                    const sy = y - silhouette.offsetY;
+                    if (sx < 0 || sy < 0 || sx >= silhouette.width || sy >= silhouette.height) continue;
+                    const localX = silhouette.mirrored ? silhouette.width - 1 - sx : sx;
+                    if (alpha && (alpha[(sy * silhouette.width + localX) * 4 + 3] ?? 0) > 16) {
+                        pixels[(y * width + x) * 4 + 3] = 0;
+                        break;
+                    }
                 }
             }
         }
         scratchContext.putImageData(imageData, 0, 0);
         ctx.drawImage(scratch, bounds.x - this.offset.x, bounds.y - this.offset.y);
     }
-
-    private findOccluders(bounds: RenderBounds): readonly NativeOccluderSelection[] {
+    private findOccluders(bounds: RenderBounds, search?: OccluderSearch): readonly NativeOccluderSelection[] {
         const header = this.levelData.lvlData.maskHDR;
-        const key = `${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}`;
+        const key = `${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}:${search ? `${search.anchorRow}:${search.bodyHeight}:${search.rowsBelow}` : ""}`;
         const cached = this.occluderCache.get(key);
         if (cached) return cached;
         const result = findNativeOccluders(
@@ -2361,6 +2435,7 @@ export class MapRenderer {
             this.levelData.levelMasks,
             bounds,
             this.alternateMaskTiles,
+            search,
         );
         this.occluderCache.set(key, result);
         return result;
