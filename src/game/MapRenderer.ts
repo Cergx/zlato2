@@ -296,6 +296,10 @@ export class MapRenderer {
     private readonly highlightCanvas = document.createElement("canvas");
     private readonly highlightContext = this.highlightCanvas.getContext("2d");
     private readonly occluderScratch = document.createElement("canvas");
+    /** Per-frame alpha map of everything a mask piece must not paint over
+     * (earlier units' silhouettes, closed door statics). */
+    private readonly occluderCoverage = document.createElement("canvas");
+    private occluderCoverageContext: CanvasRenderingContext2D | null = null;
     private combatMode = false;
     private magicTargeting = false;
     private aiTurn = false;
@@ -764,6 +768,7 @@ export class MapRenderer {
 
         this.offset = this.scroller.getOffset();
         ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ensureOccluderCoverage();
         ctx.drawImage(
             this.levelData.image,
             this.offset.x,
@@ -2221,7 +2226,7 @@ export class MapRenderer {
                 // the body's floor(h/18)+2 rows, extended south over the shadow.
                 anchorRow: Math.floor((frame.worldY + frame.height) / WORLD_CHUNK_HEIGHT),
                 bodyHeight: frame.height,
-                rowsBelow: Math.ceil((shadowY + frame.shadow.height - (frame.worldY + frame.height)) / WORLD_CHUNK_HEIGHT),
+                rowsBelow: Math.max(0, Math.ceil((shadowY + frame.shadow.height - (frame.worldY + frame.height)) / WORLD_CHUNK_HEIGHT)),
             });
         } else {
             this.drawOccluders({
@@ -2241,6 +2246,13 @@ export class MapRenderer {
                     offsetY: 0,
                 },
             ]);
+        }
+        // Stamp this unit into the coverage AFTER its pieces: the punch above saw only
+        // content drawn before this unit, and later units' pieces must not paint over
+        // this unit's silhouette.
+        this.stampOccluderCoverage(frame.image, frame.sourceX, frame.sourceY, frame.width, frame.height, drawX, drawY, frame.mirrored);
+        if (frame.shadow) {
+            this.stampOccluderCoverage(frame.shadow.image, frame.shadow.sourceX, frame.shadow.sourceY, frame.shadow.width, frame.shadow.height, drawX + frame.shadow.dx, drawY + frame.shadow.dy, false);
         }
     }
 
@@ -2317,9 +2329,36 @@ export class MapRenderer {
         if (x > this.canvas.width || y > this.canvas.height) return;
         if (x + image.width < 0 || y + image.height < 0) return;
         this.ctx.drawImage(image, x, y);
-        // Native statics draw in scenery phase 1 WITHOUT the per-drawable mask composite;
-        // pieces apply only in the person worker (0x1202c8ac kind-1/2 on persons).
+        // A closed door's static is protected from later units' mask pieces: the piece
+        // (doorway interior art) must not paint over the leaf; the hero behind the door
+        // is dithered by the door band via the parity punch on his own silhouette.
+        const door = this.doorsByStatic.get(levelStatic);
+        if (door && !door.opened) this.stampOccluderCoverage(image, 0, 0, image.width, image.height, x, y, false);
 
+    }
+
+    private ensureOccluderCoverage(): void {
+        if (this.occluderCoverage.width !== this.canvas.width || this.occluderCoverage.height !== this.canvas.height) {
+            this.occluderCoverage.width = this.canvas.width;
+            this.occluderCoverage.height = this.canvas.height;
+            this.occluderCoverageContext = this.occluderCoverage.getContext("2d", { willReadFrequently: true });
+        }
+        this.occluderCoverageContext?.clearRect(0, 0, this.occluderCoverage.width, this.occluderCoverage.height);
+    }
+
+    /** Records a drawable's opaque pixels so later mask pieces skip them. */
+    private stampOccluderCoverage(image: HTMLCanvasElement, sourceX: number, sourceY: number, width: number, height: number, destX: number, destY: number, mirrored: boolean): void {
+        const context = this.occluderCoverageContext;
+        if (!context || width <= 0 || height <= 0) return;
+        context.save();
+        if (mirrored) {
+            context.translate(destX + width, destY);
+            context.scale(-1, 1);
+            context.drawImage(image, sourceX, sourceY, width, height, 0, 0, width, height);
+        } else {
+            context.drawImage(image, sourceX, sourceY, width, height, destX, destY, width, height);
+        }
+        context.restore();
     }
 
     private drawOccluders(bounds: RenderBounds, units?: readonly OccluderSilhouette[], search?: OccluderSearch) {
@@ -2373,7 +2412,6 @@ export class MapRenderer {
         this.drawMaskSelections(ctx, this.offset.x, this.offset.y, bounds, occluders);
         ctx.restore();
     }
-
     private drawOccludersDither(bounds: RenderBounds, occluders: readonly NativeOccluderSelection[], units: readonly OccluderSilhouette[]): void {
         const ctx = this.ctx;
         if (!ctx) return;
@@ -2402,12 +2440,49 @@ export class MapRenderer {
             const context = silhouette.image.getContext("2d", { willReadFrequently: true });
             return context?.getImageData(silhouette.sourceX, silhouette.sourceY, silhouette.width, silhouette.height).data;
         });
+        // The union rect may stick out of the canvas (drawPerson allows a partially
+        // visible unit): clamp the read to the coverage bounds and remember the offset
+        // so loop coordinates map onto the clipped image.
+        const coverageContext = this.occluderCoverage.getContext("2d", { willReadFrequently: true });
+        let coverage: Uint8ClampedArray | undefined;
+        let coverageOffsetX = 0;
+        let coverageOffsetY = 0;
+        let coverageWidth = 0;
+        let coverageHeight = 0;
+        if (coverageContext) {
+            const covX = Math.floor(bounds.x - this.offset.x);
+            const covY = Math.floor(bounds.y - this.offset.y);
+            const cx0 = Math.max(0, covX);
+            const cy0 = Math.max(0, covY);
+            const cx1 = Math.min(this.occluderCoverage.width, covX + width);
+            const cy1 = Math.min(this.occluderCoverage.height, covY + height);
+            coverageWidth = cx1 - cx0;
+            coverageHeight = cy1 - cy0;
+            if (coverageWidth > 0 && coverageHeight > 0) {
+                coverage = coverageContext.getImageData(cx0, cy0, coverageWidth, coverageHeight).data;
+                coverageOffsetX = cx0 - covX;
+                coverageOffsetY = cy0 - covY;
+            } else {
+                coverageWidth = 0;
+                coverageHeight = 0;
+            }
+        }
         const originX = Math.floor(bounds.x - this.offset.x);
         const originY = Math.floor(bounds.y - this.offset.y);
         for (let y = 0; y < height; y++) {
             const rowParity = (originX + originY + y) & 1;
             for (let x = 0; x < width; x++) {
-                if (((rowParity + x) & 1) !== 0) continue;
+                // The current unit's own silhouette drives the parity dither even where
+                // it overlaps protected content (a hero in a closed doorway must stay
+                // dithered). Everything else drawn this frame (earlier units, closed
+                // doors) is protected unconditionally: the piece paints only over bare
+                // backdrop, so it can never erase another drawable's dither or static.
+                const cx = x - coverageOffsetX;
+                const cy = y - coverageOffsetY;
+                const covered = coverage !== undefined && cx >= 0 && cy >= 0
+                    && cx < coverageWidth && cy < coverageHeight
+                    && coverage[(cy * coverageWidth + cx) * 4 + 3] > 0;
+                let currentAlpha = false;
                 for (let s = 0; s < alphas.length; s++) {
                     const alpha = alphas[s];
                     const silhouette = units[s];
@@ -2416,9 +2491,15 @@ export class MapRenderer {
                     if (sx < 0 || sy < 0 || sx >= silhouette.width || sy >= silhouette.height) continue;
                     const localX = silhouette.mirrored ? silhouette.width - 1 - sx : sx;
                     if (alpha && (alpha[(sy * silhouette.width + localX) * 4 + 3] ?? 0) > 16) {
-                        pixels[(y * width + x) * 4 + 3] = 0;
+                        currentAlpha = true;
                         break;
                     }
+                }
+                if (currentAlpha) {
+                    if (((rowParity + x) & 1) !== 0) continue;
+                    pixels[(y * width + x) * 4 + 3] = 0;
+                } else if (covered) {
+                    pixels[(y * width + x) * 4 + 3] = 0;
                 }
             }
         }
